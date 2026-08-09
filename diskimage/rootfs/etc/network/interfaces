@@ -1,0 +1,9 @@
+# Guest network interfaces.
+# The emulated NIC (eth0) is created by CheerpX only after the browser-side
+# Tailscale client connects, so configuration is retried at desktop boot
+# (see /etc/local.d/desktop.start) rather than only once at boot.
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp

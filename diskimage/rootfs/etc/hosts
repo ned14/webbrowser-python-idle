@@ -1,0 +1,8 @@
+# LAN hostname -> IP entries for git remotes / backend hosts.
+# The guest uses IP addresses only (no DNS); add any LAN hostname aliases you
+# want to resolve here at build time.
+127.0.0.1	localhost localhost.localdomain
+::1		localhost ip6-localhost ip6-loopback
+
+# Example — uncomment and edit for a LAN git/backend host:
+#192.168.1.50	gitbox

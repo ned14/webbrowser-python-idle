@@ -1,0 +1,110 @@
+name: webvm-custom
+
+# Options are inline with defaults — `.env` is optional and only overrides.
+# Secrets are `${VAR:-}` here (never `${VAR:?err}`) so browser/none builds and
+# CI (`docker compose config -q`) pass with nothing set; the entrypoints enforce
+# secrets fail-closed per mode.
+
+x-server-env: &server-env
+  STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}
+  HEADSCALE_ENABLED: ${HEADSCALE_ENABLED:-0}
+  HEADSCALE_BOOTSTRAP: ${HEADSCALE_BOOTSTRAP:-0}
+  CONTROL_HOST: ${CONTROL_HOST:-host.docker.internal}
+  LAN_IP: ${LAN_IP:-127.0.0.1}
+  SITE_PORT: ${SITE_PORT:-8081}
+  CONTROL_PORT: ${CONTROL_PORT:-8443}
+  WEBDAV_PORT: ${WEBDAV_PORT:-8082}
+  STUN_PORT: ${STUN_PORT:-3478}
+  WEBDAV_ROOT: ${WEBDAV_ROOT:-/data/webdav}
+  WEBDAV_USER: ${WEBDAV_USER:-}
+  WEBDAV_PASS: ${WEBDAV_PASS:-}
+  HEADSCALE_PREAUTHKEY: ${HEADSCALE_PREAUTHKEY:-}
+  GATEWAY_AUTHKEY: ${GATEWAY_AUTHKEY:-}
+  GATEWAY_TAILNET_IP: ${GATEWAY_TAILNET_IP:-}
+
+services:
+  # nginx (site + control plane + DERP) + headscale (+ wsgidav in webdav mode)
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+      args:
+        STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}
+        WEBDAV_ROOT: ${WEBDAV_ROOT:-/data/webdav}
+    restart: unless-stopped
+    environment: *server-env
+    ports:
+      # Ports are published ONLY on LAN_IP (never all interfaces). Default
+      # 127.0.0.1 = zero-config single machine. LAN use sets LAN_IP=<lan-ip>.
+      # The container side matches the rendered listen port so arbitrary
+      # remapping works (nginx/wsgidav/headscale listen on the env value).
+      # Site (HTTPS)
+      - "${LAN_IP:-127.0.0.1}:${SITE_PORT:-8081}:${SITE_PORT:-8081}"
+      # Control plane + embedded DERP (WSS)
+      - "${LAN_IP:-127.0.0.1}:${CONTROL_PORT:-8443}:${CONTROL_PORT:-8443}"
+      # WebDAV (webdav mode only; refused otherwise)
+      - "${LAN_IP:-127.0.0.1}:${WEBDAV_PORT:-8082}:${WEBDAV_PORT:-8082}"
+      # Embedded DERP STUN (UDP; used by the gateway over the compose network,
+      # the host publish is a harmless extra)
+      - "${LAN_IP:-127.0.0.1}:${STUN_PORT:-3478}:${STUN_PORT:-3478}/udp"
+    volumes:
+      - ./certs:/certs:ro
+      # headscale's SQLite DB holds the preauth keys and the gateway's node
+      # record (and therefore its allocated tailnet IP) — persistence is what
+      # keeps GATEWAY_TAILNET_IP valid across container recreation.
+      - headscale-data:/var/lib/headscale
+      - ${DATA_DIR:-./data}:${WEBDAV_ROOT:-/data/webdav}
+    networks:
+      webvm-net:
+        ipv4_address: 172.28.0.10
+
+  # tailscaled (userspace networking) + socat relays in one container.
+  # Started only for tailnet modes: `make up-tailnet` (compose profile).
+  gateway:
+    build:
+      context: ./gateway
+    profiles: ["tailnet"]
+    restart: unless-stopped
+    environment:
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}
+      GATEWAY_AUTHKEY: ${GATEWAY_AUTHKEY:-}
+      CONTROL_HOST: ${CONTROL_HOST:-host.docker.internal}
+      CONTROL_PORT: ${CONTROL_PORT:-8443}
+      WEBDAV_PORT: ${WEBDAV_PORT:-8082}
+      SAMBA_LAN_IP: ${SAMBA_LAN_IP:-}
+      GIT_SSH_LAN_IP: ${GIT_SSH_LAN_IP:-}
+      GIT_HTTP_LAN_IP: ${GIT_HTTP_LAN_IP:-}
+      GIT_HTTP_PORT: ${GIT_HTTP_PORT:-8083}
+      # Trust the private CA for control-plane/DERP TLS (Go honors this)
+      SSL_CERT_FILE: /certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
+      - gateway-state:/var/lib/tailscale
+    extra_hosts:
+      # Reach the control plane/DERP over the compose network (server's static
+      # IP), never via loopback-published host ports.
+      - "host.docker.internal:172.28.0.10"
+    depends_on:
+      - server
+    networks:
+      - webvm-net
+
+  # Unit tests (pytest) — no host Python packages needed
+  test-unit:
+    image: python:3.11-alpine
+    profiles: ["test"]
+    working_dir: /work
+    volumes:
+      - .:/work
+    command: sh -c "pip install --no-cache-dir --break-system-packages pytest >/dev/null && pytest -q /work/tests/unit"
+
+networks:
+  webvm-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  headscale-data:
+  gateway-state:

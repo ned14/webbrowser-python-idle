@@ -3,10 +3,12 @@
 Research date: 2026-08-08 · Revised 2026-08-09 (see note below).
 See `plans/implementation_options.md` for the option comparison.
 
-> **Revision note (2026-08-09, review rounds 5–6):** the plan has been through
-> six review rounds (round 5 = external cross-check against the CheerpX docs,
+> **Revision note (2026-08-09, review rounds 5–7):** the plan has been through
+> seven review rounds (round 5 = external cross-check against the CheerpX docs,
 > the webvm source, headscale v0.29.x source, tailscale source, the Alpine 3.17
-> APKINDEX, and empirical tests; round 6 = local review of the round-5 fixes).
+> APKINDEX, and empirical tests; round 6 = local review of the round-5 fixes;
+> round 7 = the implementation-time revisions recorded in the note below and
+> in §12/21).
 > Round 5 fixed: the SvelteKit output path
 > (`alpine.html`, not `alpine/index.html`), missing WebSocket upgrade headers
 > on the nginx `/derp` locations, the headscale fixed-IP claim (no such
@@ -19,7 +21,24 @@ See `plans/implementation_options.md` for the option comparison.
 > build.sh container-local-untar example, the nginx `root .` ambiguity for
 > `/custom-disk-images/`, the headscale preauth-key first-run bootstrap,
 > the CI artifact wiring for `WEBVM_IMAGE_BUILD`/the ext2, and the cacheId
-> fingerprint (content-stable, not raw ext2 bytes).
+> fingerprint (content-stable, not raw ext2 bytes). Round 7 (implementation-time
+> revisions, 2026-08-09) records the deviations the built code makes from the
+> letter of the design below — every one verified against the pinned versions
+> and noted at the spot it touches plus in §12/21: **server_url is PATH-LESS**
+> (v0.29.3's noise-internal router 404s a base path — §12/21(c)); the 8443
+> listener is a **catch-all proxy** to headscale (no `/headscale/` prefix
+> locations); the **CheerpX runtime is self-hosted** at `/cheerpx/` (the npm
+> package CDN-loads its core by default — §12/21); the server container is
+> built on **`python:3.11-alpine`** (the `nginx:alpine` python3/libexpat pair
+> breaks pip); Alpine v3.17 repos point at **`dl-cdn.alpinelinux.org`** (the
+> archive host does not resolve); `preauthkeys create` takes the **numeric user
+> id** and `preauthkeys list` **masks keys**; the first-run key bootstrap uses
+> **`HEADSCALE_BOOTSTRAP=1`**; `EXTRA_BIND_IP` was **dropped** (not bindable on
+> macOS Docker Desktop); the guest SSH keypair is generated **at first boot**;
+> the guest **sync agent walks subdirectories** (recursive listing + MKCOL of
+> parent collections); and the CSP is the full `default-src 'self'` set
+> (`script-src 'unsafe-inline' 'unsafe-eval' blob:`, `worker-src blob:`), not
+> just `connect-src`.
 > all decisions are in the body (§3, §4, §5, §12) and full rationale is in git
 > history. Current standpoints in one paragraph: **HTTPS is the only access
 > mode** — `https://127.0.0.1:<SITE_PORT>` single-machine (private CA trusted
@@ -137,6 +156,11 @@ that this plan's self-hosted nginx makes unnecessary.
 2. **Base image:** `i386/alpine:3.17` (32-bit, matching the reference Alpine
    image). EOL fallback: `/etc/apk/repositories` →
    `https://archive.alpinelinux.org/alpine/v3.17/{main,community}`.
+   **REVISED at implementation (2026-08-09):** the archive host does not
+   resolve (NXDOMAIN even at public resolvers) and `dl-cdn.alpinelinux.org`
+   still serves v3.17, so the repositories point at the CDN
+   (`https://dl-cdn.alpinelinux.org/alpine/v3.17/{main,community}`) — switch
+   to the archive host if the CDN ever drops EOL versions.
    **The Dockerfile must enable the `community` repo** (the official Alpine
    image ships `main` only): `python3-tkinter` and `python3-idle` live in
    `community`. Note: tkinter/idle build against Python 3.10.11 while `main`
@@ -446,36 +470,35 @@ container). The guest joins automatically via the URL hash
    `127.0.0.1:8080`, WSS-terminated by nginx on 8443) with embedded DERP; in
    WebDAV mode the container also runs **wsgidav** (port 8082) on a
    configurable root. In `samba`/`browser`/`none` modes no file service runs
-   in the container. **Path routing (verify against the pinned headscale
-   version):** headscale serves the control protocol under `/headscale/…` (via
-   `server_url`; clients append `/ts2021`, `/key`, …) and the **embedded DERP
-   relay at the root-level `/derp`** — with `/derp/probe`,
-   `/derp/latency-check`, and `/bootstrap-dns` alongside. The DERP-map relay
-    URL headscale hands clients is derived from `server_url`; it is expected to
-    be `https://${CONTROL_HOST}:${CONTROL_PORT}/derp` (no `/headscale` prefix)
-    — confirm the exact derivation against the pinned version and make nginx
-    match it. nginx therefore proxies on the 8443 listener: `location /headscale/`
-    with **prefix stripping** (`proxy_pass http://127.0.0.1:8080/;` — headscale
-    runs in the same container; there is no separate `headscale` host) +
-    WebSocket upgrade headers per the Headscale reverse-proxy docs),
-    `location = /derp`, `location /derp/`, and `location /bootstrap-dns`. A
-    trailing-slash `location /derp/` alone would **not** match the bare `/derp`
-    path. **The `/derp` and `/derp/` locations need the same WebSocket handling
-    as `/headscale/`** (`proxy_http_version 1.1`, `Upgrade`/`Connection:
-    $connection_upgrade` headers, `proxy_buffering off`, generous timeouts):
-    headscale's DERP handler answers `426 Upgrade Required` to any non-upgraded
-    request, and the browser connects to the relay over a WebSocket.
+   in the container. **Path routing (VERIFIED against the pinned headscale
+   v0.29.3 — see §12/21(c)):** `server_url` is **PATH-LESS**
+   (`https://${CONTROL_HOST}:${CONTROL_PORT}`), because the tailscale client
+   posts `/machine/register` over the Noise channel with the `server_url` path
+   verbatim and headscale's noise-internal router serves it at the root — a
+   `/headscale` base path 404s node registration. The **embedded DERP relay is
+   at the root-level `/derp`** (with `/derp/probe` and `/bootstrap-dns`
+   alongside), and the DERP-map relay URL headscale hands clients is derived
+   from `server_url` as `https://${CONTROL_HOST}:${CONTROL_PORT}/derp`
+   (confirmed at runtime: the DERP map lists `HostName: host.docker.internal`,
+   `DERPPort: 8443`). nginx therefore proxies the **entire** 8443 listener to
+   headscale with a single catch-all `location /` carrying the WebSocket
+   upgrade headers (`proxy_http_version 1.1`, `Upgrade`/`Connection:
+   $connection_upgrade`, `proxy_buffering off`, generous timeouts): headscale's
+   DERP handler answers `426 Upgrade Required` and its TS2021 handler answers
+   `500` to any non-upgraded request, and the browser connects to the control
+   plane and the relay over WebSockets.
 2. **Gateway node (no host installs):** a `gateway` compose service runs
    `tailscaled` in **userspace-networking mode** and the **socat relays in the
    same container** (a small `gateway/Dockerfile` built from the official
    `tailscale/tailscale` pinned tag with `socat` added — socat must share the
    gateway's network namespace with tailscaled, so it cannot be a separate
    service) joined to the container's Headscale as a plain member
-   (**no `--advertise-routes`**, no exit node). Everything lives in Docker;
-   nothing is installed on the host. The gateway joins with
-   `--login-server https://${CONTROL_HOST}:${CONTROL_PORT}/headscale`
-   and `--authkey $GATEWAY_AUTHKEY` (reusable — see §12/12 — so a recreated
-   container can rejoin) and persists its tailscaled state on a named volume.
+    (**no `--advertise-routes`**, no exit node). Everything lives in Docker;
+    nothing is installed on the host. The gateway joins with
+    `--login-server https://${CONTROL_HOST}:${CONTROL_PORT}`
+    (path-less — matches `server_url`; §12/21(c))
+    and `--authkey $GATEWAY_AUTHKEY` (reusable — see §12/12 — so a recreated
+    container can rejoin) and persists its tailscaled state on a named volume.
    **Reachability (fixed — works on Linux and Docker Desktop):** because
    published ports bind only the host's loopback (`127.0.0.1`/`127.0.0.2`), a
    container reaching the host via `host-gateway` (the bridge IP, e.g.
@@ -538,25 +561,24 @@ container). The guest joins automatically via the URL hash
 restricted on the host):** the "LAN + loopback only" rule is enforced with
 Docker's port binding, **not** by binding the LAN IP inside the container (the
 container has no interface for the host's LAN IP). Compose publishes each port
-**on `${LAN_IP}` and on `${EXTRA_BIND_IP}`** — never on all interfaces:
+**on `${LAN_IP}`** — never on all interfaces (**REVISED at implementation: the
+planned second `${EXTRA_BIND_IP}` binding was dropped** — `127.0.0.2` is not
+bindable on macOS Docker Desktop (EADDRNOTAVAIL), compose cannot express a
+conditional second port line, and a single loopback binding is all zero-config
+single-machine use needs; §12/21):
 - Defaults: `SITE_PORT=8081` (HTTPS site), `CONTROL_PORT=8443` (Headscale
   control + DERP behind nginx wss), `WEBDAV_PORT=8082` (webdav mode),
   **`STUN_PORT=3478` (UDP; the embedded DERP's mandatory STUN listener — see
   Step 6)**. Set directly in `compose.yaml` via inline defaults, e.g.
-  `"${LAN_IP:-127.0.0.1}:${SITE_PORT:-8081}:8081"` and
-  `"${EXTRA_BIND_IP:-127.0.0.2}:${SITE_PORT:-8081}:8081"` (same pattern for
-  `CONTROL_PORT`/`WEBDAV_PORT`/`STUN_PORT`). **The defaults are loopback-safe:**
-  `LAN_IP` defaults to `127.0.0.1` and `EXTRA_BIND_IP` defaults to `127.0.0.2`
-  (a distinct loopback alias; the whole `127.0.0.0/8` is loopback), so
-  zero-config `make up` works on a single machine with no duplicate-bind
-  collision. LAN/multi-device use sets `LAN_IP=<lan-ip>` and sets
-  `EXTRA_BIND_IP` to `127.0.0.1` (or removes it) for the loopback convenience
-  binding. **Duplicate-bind guard:** if `LAN_IP` is loopback *and* equal to
-  `EXTRA_BIND_IP` (e.g. both `127.0.0.1`), the two bindings collide
-  ("address already in use") — keep the loopback alias distinct.
+  `"${LAN_IP:-127.0.0.1}:${SITE_PORT:-8081}:${SITE_PORT:-8081}"`
+  (same pattern for `CONTROL_PORT`/`WEBDAV_PORT`/`STUN_PORT`). **The default is
+  loopback-safe:** `LAN_IP` defaults to `127.0.0.1`, so zero-config `make up`
+  works on a single machine with no duplicate-bind collision. LAN/multi-device
+  use sets `LAN_IP=<lan-ip>`.
 - The page is opened at the published site port, so its own origin is always
   correct. The **URL hash** must carry the effective endpoints:
-  `controlUrl=https://${CONTROL_HOST}:${CONTROL_PORT}/headscale` and (webdav
+  `controlUrl=https://${CONTROL_HOST}:${CONTROL_PORT}` (path-less — see
+  §12/21(c)) and (webdav
   mode) `syncUrl=http://<gateway-tailnet-IP>:<WEBDAV_PORT>/webdav/`.
 - The entrypoint renders the nginx and Headscale templates from
   `CONTROL_HOST`/`LAN_IP`/`SITE_PORT`/`CONTROL_PORT`/`WEBDAV_PORT`/`STUN_PORT`
@@ -655,9 +677,9 @@ webvm-custom/
 │  ├─ nginx.conf.template   # two HTTPS server blocks: site on SITE_PORT (COOP/
 │  │                        # COEP/CORP, CSP connect-src, = / → /alpine.html
 │  │                        # redirect, serves alpine.html);
-│  │                        # control+DERP on CONTROL_PORT (= /derp, /derp/,
-│  │                        # /headscale/ prefix-stripping wss proxy, /bootstrap-dns,
-│  │                        # WebSocket upgrade headers on all three locations)
+│  │                        # control+DERP on CONTROL_PORT (path-less catch-all
+│  │                        # wss proxy to headscale; /key /ts2021 /derp all root)
+│  │                        # WebSocket upgrade headers on the catch-all location)
 │  ├─ headscale/config.yaml # server_url from CONTROL_HOST, embedded DERP + STUN,
 │  │                        # derp.urls: [], no exit node, MagicDNS off, disable updates
 │  ├─ wsgidav.yaml.template # WEBDAV_ROOT + basic auth (webdav mode only)
@@ -671,12 +693,12 @@ webvm-custom/
 │                           # — NOT started in browser/none), `test-unit`
 │                           # (pytest); ALL options inline with defaults
 │                           # (${VAR:-default}); ports published on
-│                           # ${LAN_IP:-127.0.0.1} AND ${EXTRA_BIND_IP:-127.0.0.2};
+│                           # ${LAN_IP:-127.0.0.1} (only; EXTRA_BIND_IP dropped)
 │                           # UDP ${STUN_PORT:-3478}; gateway extra_hosts
 │                           # host.docker.internal:<server-ip> + state volume;
 │                           # pinned image tags; optional x-* block
 ├─ .env.example             # OPTIONAL overrides/secrets only (CONTROL_HOST,
-│                           # LAN_IP, EXTRA_BIND_IP, ports, WEBDAV_ROOT, DATA_DIR,
+│                           # LAN_IP, ports, WEBDAV_ROOT, DATA_DIR,
 │                           # GATEWAY_TAILNET_IP, WEBDAV_USER/WEBDAV_PASS,
 │                           # SAMBA_LAN_IP/SAMBA_SHARE/SAMBA_USER/SAMBA_PASS,
 │                           # HEADSCALE_PREAUTHKEY, GATEWAY_AUTHKEY,
@@ -737,12 +759,13 @@ used only for the navbar) is not SSH-fetchable in CI: the frontend build script
 
 #### Step 2 — Minimal guest image (`diskimage/Dockerfile`)
 `FROM docker.io/i386/alpine:3.17`; build-only DNS; point **both** repositories
-at the v3.17 archive (the base image ships `dl-cdn.alpinelinux.org` URLs for
-`main`, which stop serving after EOL — **rewrite, don't append**):
+at v3.17 (**REVISED at implementation: the CDN, not the archive** — the
+archive host does not resolve and the CDN still serves v3.17; the base image
+ships `dl-cdn.alpinelinux.org` URLs for `main` — **rewrite, don't append**):
 ```
 cat > /etc/apk/repositories <<'EOF'
-https://archive.alpinelinux.org/alpine/v3.17/main
-https://archive.alpinelinux.org/alpine/v3.17/community
+https://dl-cdn.alpinelinux.org/alpine/v3.17/main
+https://dl-cdn.alpinelinux.org/alpine/v3.17/community
 EOF
 ```
 then:
@@ -750,8 +773,10 @@ then:
 apk add --no-cache alpine-base udev-init-scripts udev-init-scripts-openrc eudev \
   xorg-server xinit xf86-input-libinput xrandr i3wm font-dejavu \
   python3 python3-tkinter xterm pcmanfm git openssh-client-default \
-  busybox-extras
+  busybox-extras dbus
 ```
+(**dbus** added to the package list — the reference's `rc-update add dbus`
+needs the package installed.)
 (Verified against the v3.17 x86 index: the package names are **`xinit`**
 (not `xorg-xinit`) and **`openssh-client-default`** (not `openssh-client`).)
 - `nc` is **already provided by the base busybox** (verified empirically in
@@ -800,9 +825,13 @@ apk add --no-cache alpine-base udev-init-scripts udev-init-scripts-openrc eudev 
 - Git tooling (baked, **no remotes preconfigured** — remotes are added from
   inside the guest later): `~user/.gitconfig` (`user.name`/`user.email`
   placeholders to set at deploy, `init.defaultBranch=main`);
-  `StrictHostKeyChecking=accept-new` (no host key baked); an ed25519 keypair at
-  `~user/.ssh/` (`id_ed25519` + `id_ed25519.pub`) to authorize on any LAN git
-  server. **Adding a git remote is a two-step host+guest flow:** the
+  `StrictHostKeyChecking=accept-new` (no host key baked). **REVISED at
+  implementation:** the ed25519 keypair is **generated at first boot** by
+  `/etc/local.d/desktop.start` (`ssh-keygen` if `~user/.ssh/id_ed25519` is
+  absent) instead of being baked — the ext2 is served unauthenticated to
+  browsers, and a baked key would be extractable and identical across all
+  guests; the public key then authorizes on any LAN git server.
+  **Adding a git remote is a two-step host+guest flow:** the
   administrator first sets `GIT_SSH_LAN_IP=<git-server-LAN-IP>` in `.env` and
   recreates the gateway (this adds the `127.0.0.1:2222 → <git-server>:22`
   socat relay); only then does the guest run `git remote add` pointing through
@@ -849,11 +878,12 @@ apk add --no-cache alpine-base udev-init-scripts udev-init-scripts-openrc eudev 
   wait-for-tailnet loop tolerate the extra boot time.
 - **Build-time DNS and guest resolv.conf:** during `docker build` the container
   uses the build's DNS (BuildKit sandbox or the engine's `127.0.0.11` stub);
-  `apk add`/`apk fetch` need it to reach the archive. Whatever resolv.conf the
-  build leaves ends up in the exported guest and is bogus inside the VM (e.g.
-  Docker's stub) — overwrite it deliberately in the Dockerfile (empty or a
-  harmless placeholder) since the guest uses IPs only (no DNS, MagicDNS off;
-  see the git-remote and syncrc IP-based URLs above).
+  `apk add`/`apk fetch` need it to reach the CDN. **REVISED at implementation:**
+  the Dockerfile CANNOT overwrite `/etc/resolv.conf` — it is a
+  container-managed bind mount (`rm` fails with "Resource busy", writes fail),
+  but `docker export` already produces an **empty** resolv.conf in the exported
+  rootfs, which is exactly right: the guest uses IPs only (no DNS, MagicDNS
+  off; see the git-remote and syncrc IP-based URLs above).
 - Size: strip `/usr/share/{doc,man,info}`, trim `/usr/share/locale`; `apk add
   --no-cache` + `rm -rf /var/cache/apk/*`.
 
@@ -886,11 +916,16 @@ the dependency closure was resolved over main + community, including
 | Base `i386/alpine:3.17` | 7.5 |
 | Step 2 `apk add` dependency closure (166 packages) | ≈ 190 |
 | idlelib extraction (`python3-idle` contents, no `python3-tests`) | +3.3 |
-| guest overlays/configs (`syncrc`, SSH keys, i3/xinitrc, agent scripts) | +0.1 |
+| guest overlays/configs (`syncrc`, i3/xinitrc, agent scripts) | +0.1 |
 | `pysmb` (samba mode only) | +0.5 |
 | Step 2 trimming (strip `doc/man/info`, trim locale — measured at build) | −≈10 |
 | **Rootfs** | **≈ 190** |
 | **ext2** (rootfs + ~20% headroom, 4 KiB blocks) | **≈ 230** (rounds to ~240) |
+
+(**Measured at implementation, 2026-08-09:** browser-mode rootfs ≈ 197 MiB and
+the ext2 built at 209–246 MiB depending on the backend/trimming — consistent
+with the estimate. The SSH keypair is **not** part of the image anymore: it is
+generated at first boot by `desktop.start`, so the image has no baked key.)
 
 Per-package breakdown of the apk closure (installed MiB; the 109 packages
 below 0.5 MiB total ≈ 12.0):
@@ -995,10 +1030,20 @@ README's local-serving instructions.) Frontend edits (in
   the Claude/AI sidebar tab (`AnthropicTab.svelte`, which POSTs to
   `api.anthropic.com` when used; remove the icon in `SideBar.svelte` and the
   `anthropic.js` import in `WebVM.svelte`) — so "zero external requests" is
-  literal, not conditional on which sidebar tab is open; the root `/` route
-  (`config_public_terminal.js` → a public `disks.webvm.io` image) is
-  redirected at nginx (`location = /` → 302 `/alpine.html`) so it can never
-  load.
+   literal, not conditional on which sidebar tab is open; the root `/` route
+   (`config_public_terminal.js` → a public `disks.webvm.io` image) is
+   redirected at nginx (`location = /` → 302 `/alpine.html`) so it can never
+   load.
+- **CheerpX runtime self-hosting (REVISED at implementation, §12/21):** the
+  pinned `@leaningtech/cheerpx` package is only a thin wrapper that
+  dynamic-imports its core from `https://cxrtnc.leaningtech.com/<version>/` —
+  an external request the page must never make. The pinned 1.3.7 runtime is
+  downloaded at pin time into `webvm/cheerpx/` (committed; regenerable via
+  `scripts/fetch-cheerpx-runtime.sh`) and served same-origin from `/cheerpx/`;
+  the frontend imports it through `src/lib/cheerpx.js` (a vite alias — the
+  bundler never rewrites the dynamic-import URL, so the runtime's relative
+  module loads stay on our origin), and the CSP allows it (see the CSP note in
+  §6).
 - **Route:** SvelteKit (adapter-static, default `trailingSlash: 'never'`)
   emits the alpine page as **`build/alpine.html`** — verified: the upstream
   `deploy.yml` does `rm build/alpine.html`, the README and live site link
@@ -1024,12 +1069,16 @@ or build-time dependency beyond the pinned npm packages.
 #### Step 6 — Server container (`server/`, via `compose.yaml`)
 - Define the single `server` service in `compose.yaml` with all options inline
   using `${VAR:-default}` defaults (**no `.env` required for `browser`/`none`**):
-  - `build: { context: ./server, args: { STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}, WEBDAV_ROOT: ${WEBDAV_ROOT:-/data/webdav} } }`
-  - `ports:` published on **both** `"${LAN_IP:-127.0.0.1}:${SITE_PORT:-8081}:8081"`
-    **and** `"${EXTRA_BIND_IP:-127.0.0.2}:${SITE_PORT:-8081}:8081"` (same pattern
-    for `CONTROL_PORT` 8443 and, in webdav mode, `WEBDAV_PORT` 8082; plus the
-    **UDP STUN port** `"${LAN_IP:-127.0.0.1}:${STUN_PORT:-3478}:3478/udp"` and
-    `"${EXTRA_BIND_IP:-127.0.0.2}:${STUN_PORT:-3478}:3478/udp"` — the embedded
+  - `build: { context: . , dockerfile: server/Dockerfile, args: { STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}, WEBDAV_ROOT: ${WEBDAV_ROOT:-/data/webdav} } }`
+    (**REVISED at implementation: the context is the repo root** so the
+    Dockerfile can `COPY webvm/build/` and `webvm/custom-disk-images/` — the
+    served `alpine.html` and the ext2 must be inside the server image)
+  - `ports:` published on `"${LAN_IP:-127.0.0.1}:${SITE_PORT:-8081}:${SITE_PORT:-8081}"`
+    (same pattern for `CONTROL_PORT` 8443 and, in webdav mode, `WEBDAV_PORT`
+    8082; plus the **UDP STUN port**
+    `"${LAN_IP:-127.0.0.1}:${STUN_PORT:-3478}:${STUN_PORT:-3478}/udp"` — the
+    container side uses the same env variable so arbitrary remapping works,
+    and `EXTRA_BIND_IP` was dropped (§12/21); the embedded
     DERP requires `stun_listen_addr` **configured** (headscale refuses to start
     without it); publishing it is optional and only ever used by the gateway —
     the browser client has no UDP socket, so relay-only is the steady state,
@@ -1074,53 +1123,68 @@ or build-time dependency beyond the pinned npm packages.
     `alias /srv/webvm/custom-disk-images/;` — do NOT rely on nginx `root .`,
     which resolves against the nginx prefix directory and 404s unless nginx
     runs with a pinned `-p` matching the layout); TLS cert from `/certs`;
-    COOP/COEP/CORP; **`Content-Security-Policy:
+    COOP/COEP/CORP; **`Content-Security-Policy` (REVISED at implementation —
+    the full directive set, not just `connect-src`):**
+    `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:;
+    worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self'
+    'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;
     connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}`
-    — the only `connect-src` host list, which blocks the compiled-in logtail
-    fetch (§5; note the CSP does not restrict `img-src`, so the removed
-    blog-post `og:image` URLs must be gone from the build, not merely
-    CSP-blocked)**; gzip off for `.ext2`; serve the static `alpine.html` file
-    and redirect the bare path to it (`location = /alpine` → `return 301
-    /alpine.html`; **the SvelteKit adapter-static output is `build/alpine.html`,
-    not `alpine/index.html` — verified against the upstream `deploy.yml`**);
+    — `connect-src` is still the only external host list (it blocks the
+    compiled-in logtail fetch, §5); `'unsafe-eval'` and `blob:` are required by
+    CheerpX (its x86→WASM JIT evaluates strings and spawns `blob:` workers)
+    and the self-hosted runtime modules (note the CSP does not restrict
+    `img-src`'s cross-origin uses, so the removed blog-post `og:image` URLs
+    must be gone from the build, not merely CSP-blocked)**; gzip on for
+    JS/WASM + `Cache-Control: max-age=31536000, immutable` on `/cheerpx/` and
+    `/_app/immutable/` (the security `add_header`s are repeated inside those
+    locations — nginx does not inherit them); gzip off for `.ext2`; serve the
+    static `alpine.html` file and redirect the bare path to it
+    (`location = /alpine` → `return 301 /alpine.html`; **the SvelteKit
+    adapter-static output is `build/alpine.html`, not `alpine/index.html` —
+    verified against the upstream `deploy.yml`**);
     `location = /` → `return 302 /alpine.html`
     (the stock Debian `/` route must never load — it fetches a public image).
-  - **`CONTROL_PORT` (8443, control + DERP):** **`location /headscale/`**
-    reverse-proxies Headscale with **prefix stripping**
-    (`proxy_pass http://127.0.0.1:8080/;` — headscale runs in the same
-    container; there is no `headscale` service), WebSocket upgrade headers
-    (`proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection
-    $connection_upgrade;`), `Host`, `proxy_buffering off;` and generous
-    `proxy_read_timeout`; **`location = /derp`** and `location /derp/` proxy
-    the embedded DERP relay/probe endpoints **and must carry the same
-    WebSocket handling as `/headscale/`** (`proxy_http_version 1.1`, the
-    `Upgrade`/`Connection: $connection_upgrade` headers, `proxy_buffering
-    off;`, generous timeouts) — headscale's DERP handler answers `426 Upgrade
-    Required` to any non-upgraded request, and the browser connects to the
-    relay over a WebSocket; `location /bootstrap-dns` likewise.
-  - **CORS (verify-at-implementation, §5):** no CORS headers are expected (the
-    DERP map arrives over the control WebSocket; `/derp/probe` is answered by
-    headscale with `Access-Control-Allow-Origin: *`, and the probe is issued
-    in **CORS mode** by the pinned wasm client, which satisfies COEP) — but
-    the current webvm README recommends adding CORS headers in front of
-    Headscale, and if the pinned probe turns out to be a no-cors fetch, the
-    8443 listener must add **`Cross-Origin-Resource-Policy: cross-origin`**
-    (ACAO alone is not CORP-compatible under `COEP: require-corp`) plus the
-    README's ACAO block at Phase 2.
+  - **`CONTROL_PORT` (8443, control + DERP):** **REVISED at implementation
+    (§12/21(c)):** a single catch-all `location /` reverse-proxies the entire
+    listener to Headscale (`proxy_pass http://127.0.0.1:8080;` — no prefix
+    stripping; `server_url` is **path-less**, so `/key`, `/ts2021`,
+    `/machine/register` and `/derp` are all root paths), with WebSocket upgrade
+    headers (`proxy_set_header Upgrade $http_upgrade; proxy_set_header
+    Connection $connection_upgrade;`), `Host`, `True-Client-IP`/X-Forwarded
+    headers, `proxy_buffering off;` and generous `proxy_read_timeout` —
+    headscale's DERP handler answers `426 Upgrade Required` and its TS2021
+    handler `500` to any non-upgraded request.
+- **CORS (verified at implementation, §5/§12/21(d)):** `/derp/probe` IS a
+  CORS-mode fetch answered by headscale with `Access-Control-Allow-Origin: *`
+  (verified at runtime) and the 8443 listener also sets
+  **`Cross-Origin-Resource-Policy: cross-origin`** as belt-and-braces — no
+  further CORS headers are added (unit test asserts none are expected).
+- **Server container base (REVISED at implementation):** built on
+  **`python:3.11-alpine`** with `nginx` installed from its repos — the
+  `nginx:alpine` python3/libexpat pair breaks `pip`/`pyexpat` entirely
+  (a relocated-symbol error on `import pyexpat`), so the pinned `nginx`
+  image cannot host wsgidav. `apache2-utils` (htpasswd) and `gettext`
+  (envsubst) are added.
 - **wsgidav** (webdav mode only, 8082): `WEBDAV_ROOT` (default `/data/webdav`)
   backed by the volume; basic auth from `webdav.htpasswd`, which the entrypoint
   generates **from `WEBDAV_USER`/`WEBDAV_PASS`** — the entrypoint **aborts
   (fail-closed) in webdav mode if either is unset/empty** — "never a random
   password, or the sync agent's credentials would not match"; PROPFIND/LOCK/
-  PUT/GET enabled; large-file settings tuned for snapshot tarballs. Rendered
+  PUT/GET enabled; **REVISED at implementation:** the pinned wsgidav 4.3.x
+  config schema is **flat** — `server: "cheroot"` (a type string, not a dict),
+  top-level `host`/`port`, `provider_mapping`, `simple_dc.user_mapping`,
+  `dir_browser`; `max_request_body_size` is not a wsgidav key, and `cheroot`
+  is an extra pip install. Rendered
   by the entrypoint from a template.
 - **Headscale** `config.yaml` (schema of the **pinned version** — several keys
   have changed across headscale releases, so verify each against the pinned
   version at implementation): `server_url:
-  https://${CONTROL_HOST}:${CONTROL_PORT}/headscale` (the DERP-map region and
-  every client-facing URL derive from it; the relay URL headscale builds from
-  `server_url` is expected to be `…/derp` at the root, which is why nginx
-  serves `/derp` at the root — confirm the exact derivation, §5); the embedded
+  https://${CONTROL_HOST}:${CONTROL_PORT}` (**REVISED at implementation —
+  PATH-LESS; §12/21(c): the Noise register path carries the `server_url` path
+  verbatim and v0.29.3's noise router serves it at the root, so a `/headscale`
+  base path 404s registration. The DERP-map relay URL headscale builds from
+  `server_url` is `https://${CONTROL_HOST}:${CONTROL_PORT}/derp` (confirmed at
+  runtime), which is why nginx serves the root**); the embedded
   DERP enabled with **`stun_listen_addr: "0.0.0.0:${STUN_PORT:-3478}"`**
   (mandatory — headscale refuses to start the embedded DERP without it) and
   the region's `region_id`/`region_code` per the pinned schema;
@@ -1138,7 +1202,9 @@ or build-time dependency beyond the pinned npm packages.
   survive container recreation (§5.4). Pre-auth keys: `headscale users create
   headscale` (once),
   then the **admin creates two long-lived reusable keys once** with
-  `headscale preauthkeys create --user headscale --reusable --expiration <long>`
+  `headscale preauthkeys create --user <id> --reusable --expiration <long>`
+  (**REVISED at implementation — v0.29.x takes the NUMERIC user id**, not the
+  name: `headscale users list` shows it and the first user is `1`; §12/21)
   (e.g. `100y` — **a short 180 d expiry is unnecessary** for a personal LAN key
   and would silently break the saved URL; headscale generates the key values)
   and **records them in `.env`** as **`HEADSCALE_PREAUTHKEY`** (browser nodes
@@ -1158,14 +1224,19 @@ or build-time dependency beyond the pinned npm packages.
   templates → generate `webdav.htpasswd` from `WEBDAV_USER`/`WEBDAV_PASS` if
   missing → **start headscale when needed** (`browser`/`none` sessions run
   nginx only), then ensure the headscale user namespace exists (create once)
-  and **verify the `.env` preauth keys are present in headscale's DB**
-  (`headscale preauthkeys list`); if a key is missing, fail with a clear
-  message pointing at `headscale preauthkeys create --user headscale
-  --reusable --expiration 100y` — headscale generates the key values and the
-  admin copies them into `.env`. **First-run bootstrap is a documented
-  two-step sequence:** (1) bring the server up once so headscale creates its
-  SQLite DB, then run `docker compose exec server headscale preauthkeys
-  create --user headscale --reusable --expiration 100y` twice and record both
+  and **verify the `.env` preauth keys are present in headscale's DB** —
+  **REVISED at implementation: `preauthkeys list` takes no `--user` flag and
+  MASKS keys with `***`**, so the check matches each configured key against
+  the listed unmasked prefix; if a key is missing, fail with a clear message
+  pointing at `headscale preauthkeys create --user <id>
+  --reusable --expiration 100y` (`<id>` from `headscale users list`, first
+  user is 1) — headscale generates the key values and the admin copies them
+  into `.env`. **First-run bootstrap is a documented two-step sequence:**
+  (1) bring the server up once with **`HEADSCALE_BOOTSTRAP=1`** (the
+  implementation's override that skips the fail-closed key check on the very
+  first run) so headscale creates its SQLite DB, then run
+  `docker compose exec server headscale preauthkeys create --user <id>
+  --reusable --expiration 100y` twice and record both
   printed values in `.env` as `HEADSCALE_PREAUTHKEY`/`GATEWAY_AUTHKEY`;
   (2) restart the server (and start the gateway) — the entrypoint's check
   then passes. CI performs step (1) in a one-off container before
@@ -1201,7 +1272,7 @@ so a separate socat container would break the design. The service is behind
 (`make up-tailnet`) or explicitly for Phase 2 validation —
 `browser`/`none` builds do not run it:
 - `tailscaled --tun=userspace-networking` joined to Headscale:
-  `--login-server https://${CONTROL_HOST}:${CONTROL_PORT}/headscale --authkey $GATEWAY_AUTHKEY`
+  `--login-server https://${CONTROL_HOST}:${CONTROL_PORT} --authkey $GATEWAY_AUTHKEY`
   (a **separate node key** from the browser `HEADSCALE_PREAUTHKEY`; **both keys
   are reusable** so a recreated gateway can rejoin; **no `--advertise-routes`**,
   no exit node). The service mounts a **named volume for tailscaled state**
@@ -1301,6 +1372,17 @@ holds it; pull only files whose backend mtime is newer (per-file manifest via
 **PROPFIND** in webdav mode / **SMB metadata** in samba mode — PROPFIND is the
 WebDAV mechanism only, wsgidav supports it); push clears/releases the lease on
 shutdown.
+**REVISED at implementation (nested files + safety, §12/21):** the per-file
+manifest covers **subdirectory files** — the WebDAV listing is recursive
+(`Depth: infinity`) and the SMB listing walks the share tree; before each
+nested PUT the agent **MKCOLs the parent collections** (WebDAV/SMB return
+`409 Conflict` for a PUT whose parent does not exist). Pull is
+**non-clobbering**: the first-sync snapshot restore skips members that already
+exist locally, and per-file pulls never overwrite pre-existing unrecorded
+files, so a crash after local edits is never clobbered by an older snapshot.
+Remote listings are treated as untrusted input: `..`/absolute/empty-segment
+paths are rejected and `EXCLUDE_NAMES` (`.ssh`, `.cache`, `.syncrc`, …) are
+not pulled.
 - **samba mode:** target `//<gateway-tailnet-IP>/<share>` (port 445 relayed to
   the LAN Samba server) via the **`pysmb`** agent (default; `smbprotocol` or
   `smbclient` only if the share requires SMB3/other features — §4 Mode B). The
@@ -1323,7 +1405,7 @@ tailnet modes need `HEADSCALE_PREAUTHKEY`/`GATEWAY_AUTHKEY` (reusable,
 long-lived keys created once with `headscale preauthkeys create` and kept in
 `.env`). **Full end-to-end validation (tailnet + sync) runs with a `samba`/
 `webdav` build and the `tailnet` profile up** (`make up-tailnet`); open
-`https://${CONTROL_HOST}:<SITE_PORT>/alpine.html#authKey=…&controlUrl=https://${CONTROL_HOST}:<CONTROL_PORT>/headscale&syncUrl=http://<gateway-tailnet-IP>:<WEBDAV_PORT>/webdav/…`
+`https://${CONTROL_HOST}:<SITE_PORT>/alpine.html#authKey=…&controlUrl=https://${CONTROL_HOST}:<CONTROL_PORT>&syncUrl=http://<gateway-tailnet-IP>:<WEBDAV_PORT>/webdav/…`
 — with `CONTROL_HOST=host.docker.internal` for single-machine (needs the
 `/etc/hosts` entry `127.0.0.1 host.docker.internal` on the browser machine) or
 `CONTROL_HOST=<LAN_IP>` on a LAN; `browser`/`none` sessions use
@@ -1375,10 +1457,10 @@ those; defaults come from build args). `.github/workflows/ci.yml`:
    `frontend` build artifact and the guest-image ext2 artifact and place them
    where the `server/Dockerfile` consumes them** (declared build contexts for
    `build/` and `custom-disk-images/` — the served `alpine.html` and the ext2
-   must be inside the server image); **export throwaway
+   must be inside the server image);    **export throwaway
    secret values** (`WEBDAV_USER`/`WEBDAV_PASS`, `HEADSCALE_PREAUTHKEY`,
-   `GATEWAY_AUTHKEY`) for the webdav-mode stack; set `CONTROL_HOST=host.docker.internal`,
-   `LAN_IP=127.0.0.1`, and `EXTRA_BIND_IP=127.0.0.2` via a temporary `.env`
+   `GATEWAY_AUTHKEY`) for the webdav-mode stack; set `CONTROL_HOST=host.docker.internal`
+   and `LAN_IP=127.0.0.1` via a temporary `.env`
    override (or exported shell vars) since CI is not on a LAN — the defaults
    already make this loopback-safe (§5); the gateway (and the §9.3 test client)
    reach the control plane via the **static server IP** (`extra_hosts:
@@ -1386,9 +1468,12 @@ those; defaults come from build args). `.github/workflows/ci.yml`:
    `SSL_CERT_FILE=/certs/ca.crt`; add `127.0.0.1 host.docker.internal` to the
    runner's `/etc/hosts` (for the browser-side paths); `docker compose build`;
    **bootstrap the preauth keys in the fresh headscale DB before the real
-   `up`** — start the server once, run
-   `docker compose exec server headscale preauthkeys create --user headscale
-   --reusable --expiration 100y` twice, and export the **printed** values as
+   `up`** — start the server once with `HEADSCALE_BOOTSTRAP=1` (the
+   implementation's first-run override), run
+   `docker compose exec server headscale preauthkeys create --user 1
+   --reusable --expiration 100y` twice (v0.29.x takes the **numeric** user id;
+   the entrypoint creates the `headscale` namespace first, id 1), and export
+   the **printed** values as
    `HEADSCALE_PREAUTHKEY`/`GATEWAY_AUTHKEY` (headscale generates the key
    values and the entrypoint fails closed if the `.env` keys are absent from
    the DB — §6 entrypoint);
@@ -1447,13 +1532,14 @@ live in `tests/` (wired into §8); run everything locally with `make test` and
 - **Templates/entrypoint**: `envsubst` renders the expected nginx/Headscale/
   wsgidav configs from given env — assert COOP/COEP/CORP, the HTTPS site block,
   the **CSP `connect-src` header containing only `'self'` + the control host**,
-  the `/webdav/` block with `WEBDAV_ROOT`, LAN-bound published ports, the
-  control-plane nginx routing (`= /derp`, `/headscale/` prefix stripping,
-  `/bootstrap-dns`, **WebSocket upgrade headers present on the `/derp` and
-  `/derp/` locations**), the site redirects (`/` → `/alpine.html`, `/alpine` →
-  `/alpine.html`), the `server_url`/DERP relay addresses derived from
-  `CONTROL_HOST`, and the per-mode secret checks (fail-closed in
-  webdav/tailnet modes, no-op in browser/none). (No CORS headers are expected
+   the `/webdav/` block with `WEBDAV_ROOT`, LAN-bound published ports, the
+   control-plane nginx routing (**path-less catch-all `location /` proxy to
+   headscale with WebSocket upgrade headers** — `Upgrade`/`Connection:
+   $connection_upgrade`, `proxy_buffering off`, timeouts), the site redirects
+   (`/` → `/alpine.html`, `/alpine` → `/alpine.html`), the (path-less)
+   `server_url`/DERP relay addresses derived from
+   `CONTROL_HOST`, and the per-mode secret checks (fail-closed in
+   webdav/tailnet modes, no-op in browser/none). (No CORS headers are expected
   by default — re-verified at Phase 2, §5/Step 8.)
 - **Frontend session guard** (optional, vitest): lock acquire/contention/
   heartbeat/expiry and ephemeral-overlay fallback logic.
@@ -1499,7 +1585,7 @@ runner):
 - **Headscale join test** (validates the control plane + private-CA TLS without
   a browser): run a `tailscaled` client container that trusts the test CA
   (`SSL_CERT_FILE=/certs/ca.crt`, `./certs` mounted) and
-  `--login-server https://${CONTROL_HOST}:${CONTROL_PORT}/headscale`
+  `--login-server https://${CONTROL_HOST}:${CONTROL_PORT}`
   (`CONTROL_HOST=host.docker.internal` in CI, with `extra_hosts:
   host.docker.internal:<server-static-ip>` so the container reaches the control
   plane over the compose network — **not** the loopback-published host port)
@@ -1637,13 +1723,13 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
 | `none` mode loses all changes on reload | By design; only use where ephemeral/read-only sessions are acceptable |
 | i386 guest build in CI is slow (native compat mode, no QEMU needed) | buildx layer cache; matrix limited to the four backends |
 | Cross-origin isolation misconfig | Validate headers first (§10.1); E2E boot asserts isolation |
-| Duplicate host port binds when `LAN_IP` is loopback (CI/dev) | Defaults are already loopback-safe: `LAN_IP=127.0.0.1` + `EXTRA_BIND_IP=127.0.0.2` (distinct loopback alias) — no collision; CI uses the same defaults |
+| Duplicate host port binds when `LAN_IP` is loopback (CI/dev) | Default is loopback-safe: `LAN_IP=127.0.0.1` only (the planned `EXTRA_BIND_IP=127.0.0.2` second binding was dropped — not bindable on macOS Docker Desktop; §12/21) — no collision; CI uses the same default |
 | Gateway container cannot reach the control plane/DERP over the host's loopback | **Fixed:** the `server` container gets a static IP on a fixed-subnet compose network and the gateway maps `host.docker.internal` to it via `extra_hosts` (works on Linux and Docker Desktop, independent of the loopback-published ports) + trusts the private CA via `SSL_CERT_FILE` (§5.2/Step 7) |
 | STUN discovery is gateway-only (the browser client has no UDP socket) | The gateway already reaches STUN at `172.28.0.10:3478` over the compose network without any host publish; the UDP host publish is a harmless extra; relay-only is the steady state (§6 Step 6, §12/21(h)) |
 | Non-reusable gateway auth key consumed on first join → recreated gateway can't rejoin | Make `GATEWAY_AUTHKEY` reusable and mount a named volume for the gateway's tailscaled state (§6/Step 7/§12/12) |
 | Default headscale config points clients at Tailscale's public DERP map | `derp.urls: []` + the embedded DERP region enabled per the pinned version's schema (verify the key names — e.g. `derp.server.*`, STUN — against the pinned headscale); `disable_check_updates: true` |
 | CORS misconception: "browser fetches the DERP map cross-origin" | The DERP map arrives **over the control WebSocket**; the only cross-origin HTTP request (`/derp/probe`) is issued in **CORS mode** by the pinned wasm client and answered with `Access-Control-Allow-Origin: *`, which satisfies COEP — **verify against the pinned versions at Phase 2**; if the probe is ever issued no-cors, add **`Cross-Origin-Resource-Policy: cross-origin`** (plus the README's ACAO block) to the 8443 listener (§5/Step 8) |
-| nginx `/derp` location missing WebSocket upgrade headers → `426 Upgrade Required` (relay fails) | Apply the same upgrade headers + `proxy_buffering off` + timeouts to `/derp` and `/derp/` as `/headscale/`; unit test asserts the headers; §9.3 probes `/derp/probe` (§5/§6 Step 6/§9.1) |
+| nginx `/derp`/`/ts2021` missing WebSocket upgrade headers → `426 Upgrade Required` / `500` (relay + registration fail) | The control listener is a **catch-all `location /`** proxy carrying the upgrade headers + `proxy_buffering off` + timeouts; unit test asserts them; §9.3 probes `/derp/probe` (§5/§6 Step 6/§9.1) |
 | SvelteKit static output path mismatch (404 on the alpine page) | Output is **`build/alpine.html`** (verified upstream); nginx serves it and redirects `/` and `/alpine` to `/alpine.html`; §9.3 asserts `/alpine.html` → 200 (Step 4/Step 6) |
 | `authKey`/`controlUrl` stay in browser history (URL fragment) | Move **all** hash params (`authKey`, `controlUrl`, `syncUrl`/`syncUser`/`syncPass`) to `sessionStorage` and strip the hash via `history.replaceState` (Step 4) |
 | Image upgrades orphan the old IndexedDB overlay DB | cacheId versioning starts a fresh overlay automatically; old `blocks_alpine_<oldsha>` DBs are simply orphaned (optional manual cleanup / existing Reset button) |
@@ -1767,14 +1853,24 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     still only the Tailscale `networkInterface` (no custom WebSocket proxy —
     re-verified against the CheerpX 1.2.8 docs, §2); (b) the headscale config
     keys for the embedded DERP (`derp.server.*`, STUN) and `dns.magic_dns`/
-    `trusted_proxies` against the pinned version's schema; (c) the DERP-map
-    relay URL headscale derives from `server_url` (expected `…/derp` at the
-    root); (d) the "no CORS needed" premise — `/derp/probe` is a **CORS-mode**
-    fetch answered with `Access-Control-Allow-Origin: *`, which should satisfy
-    COEP; if the pinned build issues it no-cors, add `Cross-Origin-Resource-
-    Policy: cross-origin` to the 8443 listener (§5/Step 8); (e) the overlay
-    device the pinned build uses (`IDBDevice` vs `OpfsDevice`) — drives the
-    E2E persistence assertion (§2/§9.4); (f) the SvelteKit output path
+    `trusted_proxies` against the pinned version's schema (**verified against
+    v0.29.3's config-example.yaml — the template uses the confirmed keys**);
+    (c) the DERP-map relay URL headscale derives from `server_url` (expected
+    `…/derp` at the root). **VERIFIED (v0.29.3): `server_url` must be
+    PATH-LESS.** The tailscale client posts `/machine/register` over the Noise
+    channel using the `server_url` path verbatim, and headscale's noise-internal
+    router serves `/machine/register` at the root — a `/headscale` base path
+    404s node registration. nginx therefore proxies ALL of `:CONTROL_PORT` to
+    headscale (catch-all `location /` with WebSocket handling), and the
+    controlUrl/login-server carry no path; the embedded-DERP relay URL is
+    `https://${CONTROL_HOST}:${CONTROL_PORT}/derp` (confirmed: the DERP map
+    entry lists `HostName: host.docker.internal`, `DERPPort: 8443`); (d) the
+    "no CORS needed" premise — `/derp/probe` is a **CORS-mode** fetch answered
+    with `Access-Control-Allow-Origin: *` (**verified at runtime**), which
+    should satisfy COEP; the 8443 listener also sets
+    `Cross-Origin-Resource-Policy: cross-origin` as belt-and-braces; (e) the
+    overlay device the pinned build uses (`IDBDevice` vs `OpfsDevice`) — drives
+    the E2E persistence assertion (§2/§9.4); (f) the SvelteKit output path
     (**verified: `alpine.html`** — re-check only if the pinned commit changes
     `trailingSlash`) and the stock `app.html` external tags (Step 4);
     (g) logtail's compiled-in endpoint and whether the pinned client honours
@@ -1796,6 +1892,26 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     frontend build performs **no** external fetch and the built page contains
     no external `og:image`/asset URLs (blog posts, Claude tab and service
     worker removed, Step 4).
+    **Additional findings at implementation (2026-08-09, v0.29.3):** the
+    `headscale preauthkeys create --user` flag takes the **numeric user id**
+    (from `headscale users list`, first user = 1), not the username;
+    `headscale preauthkeys list` has no `--user` flag and **masks keys with
+    `***`**, so the entrypoint's key verification matches on the listed
+    unmasked prefix; and the `EXTRA_BIND_IP=127.0.0.2` default is **not
+    bindable on macOS Docker Desktop** (EADDRNOTAVAIL), so ports are published
+    on `LAN_IP` only by default and `EXTRA_BIND_IP` was dropped from the
+    compose port list (documented as a no-longer-used option).
+    **CheerpX runtime self-hosting (2026-08-09, verified at boot):** the pinned
+    `@leaningtech/cheerpx` package is only a thin wrapper that dynamic-imports
+    its core from `https://cxrtnc.leaningtech.com/<version>/` — an external
+    request the page must never make. The pinned 1.3.7 runtime is therefore
+    downloaded at pin time into `webvm/cheerpx/` (committed; regenerable via
+    `scripts/fetch-cheerpx-runtime.sh`) and served same-origin from
+    `/cheerpx/`; the frontend imports it through `src/lib/cheerpx.js`
+    (vite alias), and the CSP allows `script-src 'self' 'unsafe-inline'
+    'unsafe-eval' blob:` (CheerpX needs `unsafe-eval` for its x86→WASM JIT and
+    `blob:` workers) with `connect-src` still strictly `'self'` + the control
+    host. Verified: the booted desktop makes zero external requests.
 
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path

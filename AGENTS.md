@@ -2,17 +2,22 @@
 
 ## What this repo is
 
-Planning repo for building a **WebVM/CheerpX personal Linux desktop in the
-browser** (i386 Alpine + IDLE), with LAN-only networking and configurable
-storage. There is **no implementation code yet** — all work is in `plans/`.
+Implementation of a **WebVM/CheerpX personal Linux desktop in the browser**
+(i386 Alpine + IDLE), with LAN-only networking and configurable storage.
+The authoritative plan is `plans/webvm_implementation.md` (design complete,
+reviewed, decisions closed; implementation started and largely validated
+locally). Work-in-progress is code in `diskimage/`, `server/`, `gateway/`,
+`webvm/`, `tests/`, plus `build.sh`, `compose.yaml`, `Makefile` and the CI
+workflow.
 
 ## Read first
 
 - `plans/webvm_implementation.md` — the authoritative implementation plan.
-  Read it before any work. Current state: complete, four review rounds done,
-  all §12 decisions closed, implementation not started. Follow its phasing
-  (Phase 1 `browser` mode end-to-end → Phase 2 tailnet/gateway → Phase 3
-  git/sync).
+  Read it before any work. Current state: complete, six review rounds done,
+  all §12 decisions closed, **implementation started and largely validated
+  locally** (§12/21 carries the implementation-time verification results).
+  Follow its phasing (Phase 1 `browser` mode end-to-end → Phase 2
+  tailnet/gateway → Phase 3 git/sync).
 - `plans/implementation_options.md` — option comparison that motivated the
   plan.
 - `prompts/research.md` — the original research prompt.
@@ -52,9 +57,13 @@ don't assume.
 
 ## Commands
 
-No scripts or Makefile exist yet (the Makefile is part of the plan: `make
-certs/build/up/up-tailnet/down/logs/test/acceptance/url`). Don't invent build
-or test commands; check the plan first. There is no test suite yet.
+Implemented: `make certs/build/up/up-tailnet/down/logs/test/test-unit/acceptance/
+url` (Makefile), `build.sh` (guest image → ext2 + content fingerprint),
+`scripts/gen-certs.sh`, `scripts/fetch-cheerpx-runtime.sh`, `scripts/
+acceptance.sh`. Test suite lives in `tests/` (see `tests/README.md`): unit
+(pytest via the `test-unit` compose service), rootfs smoke, server integration
+(`tests/server/integration.sh`), Playwright E2E (`tests/e2e`). Check the plan
+and `tests/README.md` before inventing new build or test commands.
 
 ## Working here
 

@@ -1,0 +1,81 @@
+#!/bin/sh
+# Gateway entrypoint: join the self-hosted Headscale control plane with
+# tailscaled in userspace-networking mode, then run the socat TCP relays
+# (bound to 127.0.0.1 — tailscaled forwards inbound tailnet-IP connections to
+# loopback, and socat forwards them on to LAN targets).
+set -eu
+
+: "${GATEWAY_AUTHKEY:?GATEWAY_AUTHKEY is required — create it with 'headscale preauthkeys create --user <id> --reusable --expiration 100y' (v0.29.x takes the numeric user id, first user = 1) and record it in .env}"
+
+STORAGE_BACKEND="${STORAGE_BACKEND:-browser}"
+CONTROL_HOST="${CONTROL_HOST:-host.docker.internal}"
+CONTROL_PORT="${CONTROL_PORT:-8443}"
+WEBDAV_PORT="${WEBDAV_PORT:-8082}"
+GIT_HTTP_PORT="${GIT_HTTP_PORT:-8083}"
+
+# --- tailscaled (userspace networking: no TUN device, no cap_add needed) ----
+tailscaled \
+	--tun=userspace-networking \
+	--state=/var/lib/tailscale/tailscaled.state \
+	--socket=/var/run/tailscale/tailscaled.sock \
+	> /var/log/tailscaled.log 2>&1 &
+TS_PID=$!
+
+for _i in $(seq 1 60); do
+	[ -S /var/run/tailscale/tailscaled.sock ] && break
+	sleep 1
+done
+if [ ! -S /var/run/tailscale/tailscaled.sock ]; then
+	echo "FATAL: tailscaled did not start" >&2
+	exit 1
+fi
+
+# Join the control plane (server_url is PATH-LESS in v0.29.x — see the headscale
+# config template). GATEWAY_AUTHKEY is reusable + long-lived so a recreated
+# container can rejoin; the tailscaled state volume keeps the node key (and
+# therefore the allocated tailnet IP) stable.
+tailscale up \
+	--login-server="https://${CONTROL_HOST}:${CONTROL_PORT}" \
+	--authkey="$GATEWAY_AUTHKEY" \
+	--hostname=gateway \
+	--accept-routes=false \
+	--accept-dns=false
+
+echo "gateway tailnet IP: $(tailscale ip -4 2>/dev/null | head -1)"
+
+# --- socat relays (127.0.0.1 only; the guest reaches ONLY these ports) ------
+RELAY_PIDS=""
+start_relay() {
+	port=$1
+	target=$2
+	socat "TCP-LISTEN:${port},fork,reuseaddr,bind=127.0.0.1" "TCP:${target}" &
+	RELAY_PIDS="${RELAY_PIDS} $!"
+	echo "relay: 127.0.0.1:${port} -> ${target}"
+}
+
+case "$STORAGE_BACKEND" in
+	samba)
+		: "${SAMBA_LAN_IP:?samba mode requires SAMBA_LAN_IP}"
+		start_relay 445 "${SAMBA_LAN_IP}:445"
+		;;
+	webdav)
+		# The WebDAV endpoint lives in the server container (compose network)
+		start_relay "${WEBDAV_PORT}" "server:${WEBDAV_PORT}"
+		;;
+esac
+
+# Git relays (host-side step: set the *_LAN_IP vars in .env and recreate the
+# gateway; the guest then adds remotes like ssh://git@<GATEWAY_TAILNET_IP>:2222/)
+[ -n "${GIT_SSH_LAN_IP:-}" ] && start_relay 2222 "${GIT_SSH_LAN_IP}:22"
+[ -n "${GIT_HTTP_LAN_IP:-}" ] && start_relay "${GIT_HTTP_PORT}" "${GIT_HTTP_LAN_IP}:${GIT_HTTP_PORT}"
+
+# --- Supervisor: stop the container if a supervised process dies -------------
+while :; do
+	for pid in $TS_PID $RELAY_PIDS; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			echo "FATAL: gateway process $pid exited" >&2
+			exit 1
+		fi
+	done
+	sleep 3
+done

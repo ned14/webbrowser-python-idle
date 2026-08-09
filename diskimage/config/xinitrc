@@ -1,0 +1,8 @@
+#!/bin/sh
+# X startup as the 'user' account. Layout defaults to US; override with
+# `setxkbmap <layout>` in a shell or edit this file.
+setxkbmap us 2>/dev/null
+
+xrdb -merge "$HOME/.Xresources" 2>/dev/null
+
+exec i3

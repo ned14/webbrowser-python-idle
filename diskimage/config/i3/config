@@ -1,0 +1,47 @@
+# i3 config for the WebVM personal desktop.
+# IDLE autostarts on login; $mod+Return opens xterm; $mod+Shift+f opens the
+# file manager (pcmanfm).
+
+set $mod Mod4
+
+font pango:DejaVu Sans Mono 10
+
+# Autostart IDLE (the primary editor/REPL for the curriculum)
+exec --no-startup-id idle3.10
+
+# Start a terminal
+bindsym $mod+Return exec xterm
+
+# Start the file manager
+bindsym $mod+Shift+f exec pcmanfm
+
+# Kill focused window
+bindsym $mod+Shift+q kill
+
+# Focus
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+
+# Layout
+bindsym $mod+h split h
+bindsym $mod+v split v
+bindsym $mod+f fullscreen toggle
+
+# Workspaces
+bindsym $mod+1 workspace 1
+bindsym $mod+2 workspace 2
+bindsym $mod+3 workspace 3
+bindsym $mod+4 workspace 4
+
+# Reload / restart / exit
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+r restart
+bindsym $mod+Shift+e exec "i3-msg exit"
+
+# Floating modifier
+floating_modifier $mod
+
+# Gaps-free, simple layout
+default_border pixel 2

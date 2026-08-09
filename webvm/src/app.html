@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>WebVM - Linux virtualization in WebAssembly</title>
+
+		<meta name="description" content="Linux virtual machine, running in the browser via HTML5/WebAssembly. Networking and graphics supported.">
+		<meta name="keywords" content="WebVM, Virtual Machine, CheerpX, x86 virtualization, WebAssembly, Tailscale, JIT">
+		<meta property="og:title" content="WebVM - Linux virtualization in WebAssembly" />
+		<meta property="og:type" content="website" />
+		<meta property="og:site_name" content="WebVM"/>
+		<meta property="og:image" content="/assets/social_2024.png" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<meta name="twitter:site" content="@leaningtech" />
+		<meta name="twitter:title" content="WebVM - Linux virtualization in WebAssembly" />
+		<meta name="twitter:description" content="Linux virtual machine, running in the browser via HTML5/WebAssembly. Networking and graphics supported.">
+		<meta name="twitter:image" content="/assets/social_2024.png" />
+
+		<!-- Apple iOS web clip compatibility tags -->
+		<meta name="application-name" content="WebVM" />
+		<meta name="apple-mobile-web-app-title" content="WebVM" />
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-status-bar-style" content="black" />
+		<link rel="shortcut icon" href="tower.ico">
+		<link rel='stylesheet' href='scrollbar.css'>
+		<script>
+			// Move network/sync secrets out of the URL hash into sessionStorage,
+			// then strip the hash via history.replaceState so no secrets persist
+			// in browser history. This MUST run before the app bundle is
+			// evaluated: network.js reads these values at module-import time.
+			(function () {
+				var hash = window.location.hash;
+				if (!hash || hash.length < 2) return;
+				var params = new URLSearchParams(hash.substring(1));
+				["authKey", "controlUrl", "syncUrl", "syncUser", "syncPass"].forEach(function (k) {
+					var v = params.get(k);
+					if (v) sessionStorage.setItem(k, v);
+				});
+				window.history.replaceState(null, "", window.location.pathname + window.location.search);
+			})();
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

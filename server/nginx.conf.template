@@ -1,0 +1,143 @@
+# nginx configuration (rendered at container start by entrypoint.sh via
+# envsubst with an EXPLICIT variable list — never bare envsubst, which would
+# mangle $ in credentials).
+#
+# Two HTTPS listeners, both binding 0.0.0.0 inside the container:
+#   SITE_PORT (8081)    the WebVM site (COOP/COEP/CORP, CSP connect-src)
+#   CONTROL_PORT (8443) Headscale control + embedded DERP (WSS)
+# Exposure to the host is restricted by compose port bindings (LAN_IP +
+# EXTRA_BIND_IP only).
+
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+	worker_connections 1024;
+}
+
+http {
+	include /etc/nginx/mime.types;
+	default_type application/octet-stream;
+	sendfile on;
+	keepalive_timeout 120s;
+
+	# Compress the (large) JS/WASM runtime and app chunks; the ext2 is exempt.
+	gzip on;
+	gzip_types text/plain text/css application/javascript application/json application/wasm image/svg+xml;
+	gzip_min_length 1024;
+
+	map $http_upgrade $connection_upgrade {
+		default upgrade;
+		''      close;
+	}
+
+	# ----------------------------------------------------------------------
+	# Site (SITE_PORT)
+	# ----------------------------------------------------------------------
+	server {
+		listen ${SITE_PORT} ssl;
+		server_name _;
+
+		ssl_certificate     /certs/server.crt;
+		ssl_certificate_key /certs/server.key;
+
+		# Cross-origin isolation — mandatory for CheerpX (SharedArrayBuffer
+		# requires a secure context; HTTPS is the only access mode).
+		add_header Cross-Origin-Opener-Policy "same-origin" always;
+		add_header Cross-Origin-Embedder-Policy "require-corp" always;
+		add_header Cross-Origin-Resource-Policy "cross-origin" always;
+
+		# The only connect-src host list: self + the control plane. This blocks
+		# the compiled-in Tailscale logtail fetch (and any other third-party
+		# request) — the page and WASM client make ZERO external requests.
+		# script-src 'self' covers the self-hosted CheerpX runtime modules/workers
+		# (/cheerpx/*) and the app bundle.
+		add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}" always;
+
+		root /srv/webvm/build;
+
+		# The stock Debian terminal route must never load (it fetches a public
+		# disk image); always land on the Alpine desktop.
+		location = / {
+			return 302 /alpine.html;
+		}
+		location = /alpine {
+			return 301 /alpine.html;
+		}
+
+		# Guest ext2 image. Explicit absolute alias (never `root .`, which
+		# resolves against the nginx prefix dir). Byte-range serving is native
+		# to nginx; gzip is off for the image.
+		location /custom-disk-images/ {
+			alias /srv/webvm/custom-disk-images/;
+			gzip off;
+		}
+
+		# Self-hosted CheerpX runtime (versioned by the pinned 1.3.7 in
+		# webvm/cheerpx) and the SvelteKit hashed chunks: immutable, cached
+		# hard — the runtime is ~21 MB and must not be re-downloaded per load.
+		# (The security add_headers are repeated here because a location that
+		# defines its own add_header does NOT inherit the server-level ones.)
+		location /cheerpx/ {
+			add_header Cross-Origin-Opener-Policy "same-origin" always;
+			add_header Cross-Origin-Embedder-Policy "require-corp" always;
+			add_header Cross-Origin-Resource-Policy "cross-origin" always;
+			add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}" always;
+			add_header Cache-Control "public, max-age=31536000, immutable";
+			try_files $uri =404;
+		}
+		location /_app/immutable/ {
+			add_header Cross-Origin-Opener-Policy "same-origin" always;
+			add_header Cross-Origin-Embedder-Policy "require-corp" always;
+			add_header Cross-Origin-Resource-Policy "cross-origin" always;
+			add_header Cache-Control "public, max-age=31536000, immutable";
+		}
+
+		location / {
+			try_files $uri $uri/ =404;
+		}
+	}
+
+	# ----------------------------------------------------------------------
+	# Control plane + embedded DERP (CONTROL_PORT)
+	# ----------------------------------------------------------------------
+	server {
+		listen ${CONTROL_PORT} ssl;
+		server_name _;
+
+		ssl_certificate     /certs/server.crt;
+		ssl_certificate_key /certs/server.key;
+
+		# COEP require-corp compatibility for the /derp/probe latency probe
+		# (issued in CORS mode by the pinned wasm client; belt-and-braces).
+		add_header Cross-Origin-Resource-Policy "cross-origin" always;
+
+		# Catch-all reverse proxy to headscale (its v0.29.x control protocol is
+		# PATH-LESS: /key, /ts2021 (Noise upgrade), /derp, /bootstrap-dns and
+		# the legacy /machine/register are all served at the root — the
+		# server_url carries no path. The embedded-DERP relay URL headscale
+		# derives is https://${CONTROL_HOST}:${CONTROL_PORT}/derp, which the
+		# bare /derp path here must match (a trailing-slash location alone
+		# would not).
+		#
+		# All locations need the same WebSocket handling as /headscale/
+		# (headscale's DERP handler answers 426 Upgrade Required and its
+		# TS2021 handler answers 500 to any non-upgraded request).
+		location / {
+			proxy_http_version 1.1;
+			proxy_set_header Upgrade $http_upgrade;
+			proxy_set_header Connection $connection_upgrade;
+			proxy_set_header Host $host;
+			proxy_set_header True-Client-IP $remote_addr;
+			proxy_set_header X-Real-IP $remote_addr;
+			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			proxy_set_header X-Forwarded-Proto $scheme;
+			proxy_buffering off;
+			proxy_read_timeout 3600s;
+			proxy_send_timeout 3600s;
+			proxy_pass http://127.0.0.1:8080;
+		}
+	}
+}

@@ -1,0 +1,28 @@
+# wsgidav configuration (webdav mode only; rendered by entrypoint.sh via
+# envsubst with an explicit variable list). PROPFIND/LOCK/PUT/GET enabled for
+# the sync agent's per-file manifest; basic auth from WEBDAV_USER/WEBDAV_PASS.
+# Schema: wsgidav 4.3.5 (flat config — `server` is the server-type string).
+
+server: "cheroot"
+host: "0.0.0.0"
+port: ${WEBDAV_PORT}
+
+provider_mapping:
+  "/webdav/": "${WEBDAV_ROOT}"
+
+http_authenticator:
+  domain_controller: wsgidav.dc.simple_dc.SimpleDomainController
+  accept_basic: true
+  accept_digest: false
+  default_to_digest: false
+
+simple_dc:
+  user_mapping:
+    "*":
+      "${WEBDAV_USER}":
+        password: "${WEBDAV_PASS}"
+
+dir_browser:
+  enable: true
+
+verbose: 2

@@ -1,0 +1,51 @@
+#!/bin/sh
+# Boot the X desktop as the 'user' account (never as root — Xorg refuses root,
+# and i3's autostarts must land in /home/user).
+set -u
+
+BACKEND=$(cat /etc/webvm-backend 2>/dev/null || echo browser)
+
+# Bring eth0 up once the emulated NIC appears. The CheerpX NIC is only created
+# after the browser-side Tailscale client connects, so configuration is
+# retried here (open spike: baked /etc/network/interfaces + this retry loop).
+(
+	i=0
+	while [ "$i" -lt 60 ]; do
+		ip link show eth0 >/dev/null 2>&1 && break
+		sleep 2
+		i=$((i + 1))
+	done
+	for _j in 1 2 3 4 5; do
+		ip link set eth0 up 2>/dev/null
+		udhcpc -i eth0 -n >/dev/null 2>&1 && break
+		sleep 5
+	done
+) &
+
+# Sync boot-pull before the desktop starts (samba/webdav only; best-effort —
+# waits for the tailnet up to ~90s, then returns regardless so a misconfigured
+# tailnet cannot delay the desktop indefinitely). The push loop then runs as a
+# single background process; it holds the backend lease (a second tab/session
+# is refused).
+case "$BACKEND" in
+	samba|webdav)
+		su user -c /usr/local/bin/sync-home.sh pull
+		su user -c /usr/local/bin/sync-home.sh daemon &
+		;;
+esac
+
+mkdir -p /run/user/1000
+chown user:user /run/user/1000
+chmod 700 /run/user/1000
+
+# Generate the guest SSH keypair on first boot (never baked into the served
+# image). Authorize the public key on any LAN git server to allow pushes.
+if [ ! -f /home/user/.ssh/id_ed25519 ]; then
+	su user -c 'ssh-keygen -q -t ed25519 -N "" -f /home/user/.ssh/id_ed25519'
+fi
+
+# Start the desktop as 'user'. Fall back to a direct Xorg launch if startx
+# cannot handle the (VT-less) WASM guest.
+( su user -c "XDG_RUNTIME_DIR=/run/user/1000 startx" ) || {
+	su user -c 'Xorg :0 -nolisten tcp -noreset >/var/log/xorg.log 2>&1 & sleep 3; DISPLAY=:0 i3 >/var/log/i3.log 2>&1' &
+}

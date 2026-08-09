@@ -1,0 +1,10 @@
+# Git defaults for the guest's 'user' account.
+# Set user.name/user.email at deploy time, or from inside the guest with:
+#   git config --global user.name "Your Name"
+[user]
+	name = WebVM User
+	email = webvm@localhost
+[init]
+	defaultBranch = main
+[push]
+	default = simple

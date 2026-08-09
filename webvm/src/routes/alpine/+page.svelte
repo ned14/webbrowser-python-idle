@@ -1,0 +1,48 @@
+<script>
+	import { onMount } from 'svelte';
+	import WebVM from '$lib/WebVM.svelte';
+	import { acquireSessionLock } from '$lib/sessionGuard.js';
+	import * as configObj from '/config_public_alpine';
+
+	// cacheId per mode:
+	//   browser/samba/webdav -> blocks_alpine_<image-build> (shared overlay,
+	//   versioned to the guest image so a rebuilt image starts a fresh overlay)
+	//   none                 -> random per-session id (fresh overlay every load)
+	function randomCacheId() {
+		return "blocks_alpine_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+	}
+
+	let cacheId;
+	let ready = false;
+	let ephemeral = false;
+
+	if (configObj.storageBackend === "none") {
+		cacheId = randomCacheId();
+		ready = true;
+	} else {
+		cacheId = "blocks_alpine_" + configObj.imageBuild;
+		onMount(async () => {
+			const acquired = await acquireSessionLock();
+			if (!acquired) {
+				// Another live tab holds the shared overlay: boot an ephemeral
+				// session that never writes to the shared overlay.
+				ephemeral = true;
+				cacheId = randomCacheId();
+			}
+			ready = true;
+		});
+	}
+</script>
+
+{#if ready}
+	{#if ephemeral}
+		<div style="position:absolute; top:0; left:0; right:0; z-index:50; padding:8px 16px; background:#fde68a; color:#78350f; font-size:14px;">
+			A WebVM session is already active in another tab — this tab is running an ephemeral session and will not write to shared storage.
+		</div>
+	{/if}
+	<WebVM configObj={configObj} {cacheId}>
+		<p>Personal Linux desktop — Python 3 + IDLE. Files persist in the browser (or sync to your network backend).</p>
+	</WebVM>
+{:else}
+	<p style="padding:16px; font-family:monospace;">Acquiring session lock…</p>
+{/if}

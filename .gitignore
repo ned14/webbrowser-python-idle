@@ -1,0 +1,34 @@
+# Secrets and local overrides — never commit these
+.env
+
+# Generated private CA and certificates
+certs/
+
+# WebDAV data directory
+data/
+
+# Guest artifacts baked with real credentials / keys
+diskimage/rootfs/home/user/.ssh/
+diskimage/rootfs/root/.syncrc
+
+# Build outputs
+*.ext2
+*.tar.gz
+rootfs.tar
+webvm/build/
+webvm/node_modules/
+webvm/custom-disk-images/
+webvm/.svelte-kit/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Test artifacts
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/node_modules/
+
+# Editor / OS cruft
+.DS_Store
+*.swp

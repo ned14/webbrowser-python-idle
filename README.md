@@ -5,59 +5,139 @@
      at .github/workflows/ci.yml; until then the badge shows "no status". -->
 [![CI](https://github.com/OWNER/webvm-custom/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/webvm-custom/actions/workflows/ci.yml)
 
-A **planning repository** for building a personal Linux desktop that runs
-entirely in the browser via [WebVM/CheerpX](https://webvm.io): a minimal
-**i386 Alpine** guest with **stdlib-only Python and IDLE** (`idle3.10`),
-an Xorg/i3 desktop, **LAN-only networking**, and **configurable persistent
-storage**.
+A personal Linux desktop that runs entirely in the browser via
+[WebVM/CheerpX](https://webvm.io): a minimal **i386 Alpine** guest with
+**stdlib-only Python and IDLE** (`idle3.10`), an Xorg/i3 desktop, **LAN-only
+networking**, and **configurable persistent storage** — browser IndexedDB by
+default, or Samba / container WebDAV through a guest sync agent.
 
-There is **no implementation code yet**. All work lives in
-[`plans/`](plans/): the authoritative
-[`webvm_implementation.md`](plans/webvm_implementation.md) (design complete,
-four review rounds, decisions closed — implementation not started) and
-[`implementation_options.md`](plans/implementation_options.md) (the option
-comparison that motivated it). See `prompts/research.md` for the original
-research prompt.
+The authoritative design is
+[`plans/webvm_implementation.md`](plans/webvm_implementation.md) (implementation
+started; phasing per §7). The repo is a planning-turned-implementation repo —
+the plan is fully specified and the code now lives alongside it.
 
-## What this project is
+## Quick start (browser mode — no tailnet)
 
-- A single-machine Docker Compose stack that serves `https://127.0.0.1:<SITE_PORT>`
-  (or `https://<LAN_IP>:<SITE_PORT>` on a LAN) using a **private CA** you trust
-  once in your browser. HTTPS is the only access mode.
-- Guest files persist in the **browser (IndexedDB overlay)** by default, or
-  sync through a guest-side agent to your existing **Samba** share or a
-  **container WebDAV** backend — your choice at build time.
-- **LAN-only by design:** the guest can only reach relayed services; it has no
-  exit node, no public DERP, and the page makes zero external requests.
+```sh
+make certs          # private CA + server cert (trust certs/ca.crt once in the browser)
+make build          # guest ext2 -> webvm/custom-disk-images, frontend, container images
+make up             # https://127.0.0.1:8081/alpine.html
+```
 
-## How it differs from existing projects
+Open `https://127.0.0.1:8081/alpine.html` (the private CA must be trusted in
+the browser — HTTPS is the only access mode; there is no plain-HTTP path). The
+desktop boots, IDLE autostarts, and files in `~/` survive reloads via the
+browser IndexedDB overlay. Use `make url` to print the session URL.
 
-| Existing project | What it is | How this differs |
+## Storage backends (`STORAGE_BACKEND`)
+
+| Backend | Guest files live in | Extra services |
 |---|---|---|
-| **[leaningtech/webvm](https://webvm.io)** | The original Linux-in-the-browser VM (Debian, ~2 GB), hosted publicly. | Public internet + **public Tailscale** login; no LAN-only confinement; no configurable storage backends; big Debian image; telemetry (logtail/plausible) not blocked; multi-user public service. This project is a private, single-user desktop: private CA, self-hosted Headscale, no public network. |
-| **[webvm.io/alpine.html](https://webvm.io/alpine.html)** | The Alpine/Xorg/i3 graphical desktop (basis for this project's UI). | Much larger image (gcc, nodejs, LightDM, rofi/polybar…) vs. a stripped-to-Python+IDLE guest (~230 MB, no display manager); still public Tailscale and browser-only persistence. |
-| **[Mini.WebVM](https://mini.webvm.io)** | Serverless, GitHub-Pages deployment: Dockerfile → ext2 via CI, chunked image streaming, service-worker COOP/COEP injection. | Fully static with **no server side at all**; terminal-only; public Tailscale; no persistence backends. This project needs (and runs) its own container for nginx/Headscale/WebDAV/gateway, so none of the Pages workarounds are needed. |
-| **GitHub Pages forks** of webvm | Any fork deployed via the "Deploy" workflow. | Same as Mini.WebVM, plus unversioned CheerpX and no content control; this project pins exact versions and serves everything from its own private HTTPS origin. |
-| **[PythonFiddle](https://pythonfiddle.com)**, **BrowserPod** (Leaning Technologies) | CheerpX-based, but not WebVM: a hosted REPL and a commercial in-browser sandbox product. | Not WebVM implementations; included for context on CheerpX licensing and the "persistent sandbox" space. |
+| `browser` (default) | browser IndexedDB overlay (per-origin, versioned to the image build) | none — nginx-only server |
+| `none` | nothing (fresh overlay per session) | none |
+| `samba` | your existing LAN Samba share (via the gateway relay + guest `pysmb` agent) | headscale + gateway |
+| `webdav` | a wsgidav container on a Docker volume (PROPFIND/PUT/GET) | headscale + gateway |
 
-None of the WebVM implementations above provides **LAN-only networking,
-self-hosted Headscale/embedded DERP, a gateway relay, configurable storage
-backends, or secret handling** — those are the novel parts of this project
-(and the reason its Phase 1 runs a `browser`-mode desktop end-to-end before
-any tailnet is involved).
+Set it in `.env` (copy `.env.example`), or edit `compose.yaml`'s inline default.
 
-## Current status
+## Tailnet modes (`samba` / `webdav`)
 
-- [x] Research and option comparison (`plans/implementation_options.md`)
-- [x] Implementation plan, reviewed and decisions closed (`plans/webvm_implementation.md`)
-- [ ] Phase 1 — site + guest + browser persistence (no tailnet)
-- [ ] Phase 2 — Headscale control plane + gateway + relays
-- [ ] Phase 3 — guest sync agents + full validation
+```sh
+# 1. one-time key bootstrap (headscale is started in bootstrap mode, which
+#    skips the fail-closed key check)
+cat > .env <<EOF
+STORAGE_BACKEND=webdav
+WEBDAV_USER=webdav
+WEBDAV_PASS=<a-real-password>
+HEADSCALE_BOOTSTRAP=1
+EOF
+make build && docker compose up -d server
+
+# 2. create the two reusable, long-lived preauth keys and record them in .env
+docker compose exec server headscale users list          # note the user id (first user = 1)
+docker compose exec server headscale preauthkeys create --user 1 --reusable --expiration 100y
+docker compose exec server headscale preauthkeys create --user 1 --reusable --expiration 100y
+#   -> copy BOTH printed values into .env as HEADSCALE_PREAUTHKEY and
+#      GATEWAY_AUTHKEY, then set HEADSCALE_BOOTSTRAP=0
+
+# 3. bring up the tailnet stack and read the gateway's assigned tailnet IP
+make up-tailnet
+docker compose exec server headscale nodes list     # record the gateway's IP as GATEWAY_TAILNET_IP
+
+# 4. print the full session URL (carries credentials — treat it like a password)
+make url
+```
+
+LAN/multi-device use: set `CONTROL_HOST=<LAN_IP>` and `LAN_IP=<LAN_IP>` in
+`.env` (and install `certs/ca.crt` on each device). Single machine keeps
+`CONTROL_HOST=host.docker.internal` (add `127.0.0.1 host.docker.internal` to
+`/etc/hosts` on the browser machine).
+
+> The control-plane URL is **path-less** (`https://${CONTROL_HOST}:${CONTROL_PORT}`):
+> verified against headscale v0.29.3, the Noise register path carries the
+> `server_url` path verbatim and headscale's noise router serves it at the root
+> (a `/headscale` base path 404s registration). nginx proxies all of
+> `CONTROL_PORT` to headscale; the embedded-DERP relay is
+> `https://${CONTROL_HOST}:${CONTROL_PORT}/derp`.
+
+## LAN-only by design
+
+- No exit node anywhere, `derp.urls: []` (no public Tailscale DERP), MagicDNS
+  off, `disable_check_updates: true`.
+- The page and WASM client make **zero external requests** — the stock webvm
+  external tags (plausible, Google Fonts, service worker, blog posts, Claude/AI
+  tab) are removed, the **CheerpX runtime is self-hosted** (the pinned
+  `@leaningtech/cheerpx` npm package normally CDN-loads its core from
+  `cxrtnc.leaningtech.com`; the pinned 1.3.7 runtime lives in `webvm/cheerpx/`
+  and is served same-origin — see `scripts/fetch-cheerpx-runtime.sh`), and the
+  compiled-in Tailscale logtail fetch is blocked by a CSP `connect-src`
+  (`'self'` + the control host only).
+- Docker ports are published on `LAN_IP` only (loopback-safe default
+  `127.0.0.1`) — never all interfaces.
+- The guest reaches **only** relayed services through the gateway's tailnet IP
+  (`127.0.0.1` socat relays inside the gateway: `445` samba, `<WEBDAV_PORT>`
+  webdav, `2222` git SSH). Raw LAN IPs are unreachable from the guest.
+
+## Repository layout
+
+```
+diskimage/    i386 Alpine guest (Dockerfile, X/i3 configs, sync agent, rootfs)
+webvm/        webvm frontend @ pinned commit (e58fef0) + persistence wiring
+server/       nginx + headscale + wsgidav container, entrypoint, templates
+gateway/      tailscaled (userspace) + socat relays
+compose.yaml  services `server`, `gateway` (profile tailnet), `test-unit`
+scripts/      gen-certs.sh, print-url.sh, acceptance.sh
+build.sh      guest image -> ext2 pipeline + content fingerprint
+tests/        unit / rootfs / server / e2e (see tests/README.md)
+.github/      CI workflow (guest matrix, frontend, server integration + E2E, lint)
+```
+
+Pinned versions: webvm commit `e58fef0c9a1c815617e57c6704eaaf7c79c3de1c`,
+`@leaningtech/cheerpx` 1.3.7 (exact), `headscale/headscale:0.29.3`,
+`tailscale/tailscale:v1.102.2` — see `webvm/WEBVM_COMMIT` and
+`plans/webvm_implementation.md` §12/21.
+
+## Tests
+
+`make test-unit`, then per-`tests/README.md`: rootfs smoke per backend, server
+integration against the booted stack, Playwright E2E (real VM boot in headless
+Chromium), and `make acceptance` for the manual/LAN checklist.
 
 ## Notes
 
 - **Personal use.** CheerpX is free for personal/exploration use; this project
   is not intended for organizational distribution. See
   [cheerpx.io/licensing](https://cheerpx.io/licensing).
-- **No secrets in this repo.** Nothing here contains credentials; the plan
-  specifies that secrets are supplied at deploy time via `.env`.
+- **No secrets in this repo.** Keys/credentials come from an optional `.env`
+  (see `.env.example`); the entrypoints enforce them fail-closed per mode.
+- **Served-image credentials (accepted tradeoff).** In `samba`/`webdav` builds
+  the baked `/root/.syncrc`/`/home/user/.syncrc` fallback carries the real
+  backend credentials, and the ext2 is served to any browser that can reach
+  the site (`/custom-disk-images/`). Since ports publish to `LAN_IP` only,
+  this is confined to the LAN; on an untrusted LAN, prefer the runtime
+  `/opt/syncrc` injection (webdav) or keep the backend share on a private
+  VLAN. The guest SSH keypair is generated at **first boot**, never baked.
+- **WebDAV is plain HTTP on the LAN.** wsgidav uses Basic auth over `http://`
+  (the guest reaches it through the gateway relay); any LAN device can probe
+  `http://<LAN_IP>:<WEBDAV_PORT>/webdav/`. It exists for host-side testing and
+  the guest relay path; do not expose it past a trusted LAN.

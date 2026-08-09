@@ -1,0 +1,13 @@
+Pinned upstream commit of https://github.com/leaningtech/webvm.
+
+Commit SHA: e58fef0c9a1c815617e57c6704eaaf7c79c3de1c
+Date:       2026-08 (HEAD at clone time)
+Message:    "Update CheerpX version to 1.3.7"
+
+Pinned dependencies (package.json / package-lock.json):
+- @leaningtech/cheerpx: 1.3.7 (exact)
+- labs: https://github.com/leaningtech/labs.git (rewritten from the upstream
+  git@github.com:leaningtech/labs.git so npm ci works in CI)
+
+See plans/webvm_implementation.md §3/9, §12/8 for the pinning policy and the
+§12/21 implementation-time verification checklist.
