@@ -33,6 +33,16 @@ services:
         WEBDAV_ROOT: ${WEBDAV_ROOT:-/data/webdav}
     restart: unless-stopped
     environment: *server-env
+    # Surface container health (docker compose ps / `up --wait`). This does NOT
+    # trigger restarts on its own — auto-recovery lives in the entrypoint
+    # supervisor, which exits the container when headscale/wsgidav/nginx die so
+    # `restart: unless-stopped` re-creates it.
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 $$(cat /var/run/nginx.pid 2>/dev/null) 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     ports:
       # Ports are published ONLY on LAN_IP (never all interfaces). Default
       # 127.0.0.1 = zero-config single machine. LAN use sets LAN_IP=<lan-ip>.

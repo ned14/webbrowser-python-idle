@@ -45,7 +45,13 @@ if [ ! -f /home/user/.ssh/id_ed25519 ]; then
 fi
 
 # Start the desktop as 'user'. Fall back to a direct Xorg launch if startx
-# cannot handle the (VT-less) WASM guest.
-( su user -c "XDG_RUNTIME_DIR=/run/user/1000 startx" ) || {
-	su user -c 'Xorg :0 -nolisten tcp -noreset >/var/log/xorg.log 2>&1 & sleep 3; DISPLAY=:0 i3 >/var/log/i3.log 2>&1' &
-}
+# cannot handle the (VT-less) WASM guest. The whole launch is BACKGROUNDED so
+# OpenRC's `local` service (which executes .start scripts in the foreground)
+# is not blocked for the lifetime of the X session: the boot completes and the
+# desktop comes up either way. A hanging startx (rather than a failing one)
+# therefore cannot stall the boot at "Starting local ...".
+(
+	su user -c "XDG_RUNTIME_DIR=/run/user/1000 startx" || {
+		su user -c 'Xorg :0 -nolisten tcp -noreset >/var/log/xorg.log 2>&1 & sleep 3; DISPLAY=:0 i3 >/var/log/i3.log 2>&1'
+	}
+) &

@@ -75,8 +75,18 @@ jobs:
           name: frontend-${{ matrix.backend }}
           path: webvm/build/
 
+  unit:
+    name: Unit tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the pytest unit suite
+        # No host Python needed: the `test-unit` compose service runs pytest
+        # in a python:3.11-alpine image with the repo mounted.
+        run: docker compose --profile test run --rm test-unit
+
   server:
-    name: Server integration + E2E (webdav)
+    name: Server integration + E2E (browser + webdav)
     runs-on: ubuntu-latest
     needs: [guest-image, frontend]
     steps:
@@ -86,6 +96,66 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: Generate throwaway private CA + cert
+        run: ./scripts/gen-certs.sh
+
+      - name: Install Playwright + browsers
+        working-directory: tests/e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      # --- Phase 1: browser-mode E2E (no tailnet, no secrets) ----------------
+      # The browser matrix case must boot a REAL browser-mode build (nginx-only
+      # server, no sync agent, no controlUrl) — plan §9.4 matrix [browser, webdav].
+      # Start each phase from a clean tree: download-artifact@v4 MERGES into the
+      # destination, and the server Dockerfile COPYs the whole dirs — leftover
+      # browser files would otherwise be baked into the webdav image.
+      - name: Clean phase artifact dirs
+        run: rm -rf webvm/build webvm/custom-disk-images
+      - name: Download browser guest ext2 + frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: guest-browser
+          path: webvm/custom-disk-images/
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-browser
+          path: webvm/build/
+
+      - name: Deployment .env (browser phase)
+        run: |
+          cat > .env <<EOF
+          CONTROL_HOST=host.docker.internal
+          LAN_IP=127.0.0.1
+          STORAGE_BACKEND=browser
+          EOF
+          echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
+
+      - name: Build server image (browser build)
+        run: docker compose build server
+
+      - name: Bring up the server (browser mode, nginx only)
+        # --wait gates on the new compose healthcheck so a slow/failed start
+        # fails here deterministically instead of surfacing as Playwright timeouts.
+        run: docker compose up -d server --wait --wait-timeout 120
+
+      - name: E2E browser-mode (boot, no-egress, persistence, session guard)
+        working-directory: tests/e2e
+        run: |
+          E2E_SITE_URL="https://127.0.0.1:8081/alpine.html" \
+          npx playwright test
+          # sync.spec.js self-skips (no E2E_WEBDAV_* env)
+
+      - name: Tear down browser phase
+        run: docker compose --profile tailnet down
+
+      # --- Phase 2: webdav stack (control plane + sync) ----------------------
+      # Isolate from phase 1: download-artifact@v4 merges, and the server
+      # Dockerfile COPYs the whole dirs into the webdav image.
+      - name: Clean phase artifact dirs
+        run: rm -rf webvm/build webvm/custom-disk-images
       - name: Download webdav guest ext2 + frontend
         uses: actions/download-artifact@v4
         with:
@@ -96,23 +166,18 @@ jobs:
           name: frontend-webdav
           path: webvm/build/
 
-      - name: Generate throwaway private CA + cert
-        run: ./scripts/gen-certs.sh
-
-      - name: Deployment .env (loopback-safe CI defaults)
+      - name: Deployment .env (webdav phase)
         run: |
           cat > .env <<EOF
           CONTROL_HOST=host.docker.internal
           LAN_IP=127.0.0.1
-          EXTRA_BIND_IP=127.0.0.2
           STORAGE_BACKEND=webdav
           WEBDAV_USER=webdav
           WEBDAV_PASS=webdavpass
           HEADSCALE_BOOTSTRAP=1
           EOF
-          echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
 
-      - name: Build images
+      - name: Build images (webdav build)
         run: docker compose build
 
       - name: Bootstrap preauth keys (first run of headscale)
@@ -151,13 +216,7 @@ jobs:
           STORAGE_BACKEND=webdav WEBDAV_USER=webdav WEBDAV_PASS=webdavpass \
             tests/server/integration.sh
 
-      - name: Install Playwright + browsers
-        working-directory: tests/e2e
-        run: |
-          npm ci --no-audit --no-fund
-          npx playwright install --with-deps chromium
-
-      - name: E2E (browser + webdav)
+      - name: "E2E webdav (control plane + sync)"
         working-directory: tests/e2e
         run: |
           GATEWAY_IP=$(docker compose exec -T gateway tailscale ip -4 2>/dev/null | head -1)

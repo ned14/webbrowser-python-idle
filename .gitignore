@@ -3,6 +3,8 @@
 
 # Generated private CA and certificates
 certs/
+# openssl -CAcreateserial side effect (sometimes left in the repo root)
+.srl
 
 # WebDAV data directory
 data/

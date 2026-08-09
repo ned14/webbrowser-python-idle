@@ -98,8 +98,36 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 mv image.ext2 "$OUT_IMAGE"
 rm -f rootfs.tar
 
+# --- 4b. Warn about weak sync credentials (samba/webdav) ---------------------
+# The baked /root/.syncrc (and the fingerprint below) expose credential-derived
+# values to every LAN client that can reach the site; the default 'changeme' or
+# any short password is trivially brute-forceable. Warn (non-fatal: CI builds
+# the samba/webdav matrix with placeholder creds by design).
+if [ "$STORAGE_BACKEND" = "samba" ]; then
+	if [ "$SAMBA_PASS_EFF" = "changeme" ] || [ "${#SAMBA_PASS_EFF}" -lt 8 ]; then
+		echo "WARNING: samba build uses a weak SAMBA_PASS ('changeme' or < 8 chars)." >&2
+		echo "         It is baked into the served ext2 and feeds the served fingerprint —" >&2
+		echo "         set a strong SAMBA_PASS in .env before deploying." >&2
+	fi
+elif [ "$STORAGE_BACKEND" = "webdav" ]; then
+	if [ "$SYNC_PASS_EFF" = "changeme" ] || [ "${#SYNC_PASS_EFF}" -lt 8 ]; then
+		echo "WARNING: webdav build uses a weak SYNC_PASS ('changeme' or < 8 chars)." >&2
+		echo "         It is baked into the served ext2 and feeds the served fingerprint —" >&2
+		echo "         set a strong SYNC_PASS in .env before deploying." >&2
+	fi
+fi
+
 # --- 5. Content-stable fingerprint (cacheId suffix, NOT the ext2 bytes) ----
-# Deterministic inputs: the diskimage tree + STORAGE_BACKEND + sync args.
+# Deterministic inputs: the diskimage tree + STORAGE_BACKEND + sync args
+# (INCLUDING the passwords — a credential change rebuilds a different base
+# image, so it must also start a fresh browser overlay; a fingerprint that
+# omitted them would let stale IndexedDB deltas apply to a changed base).
+# NOTE: because the sync passwords feed this digest and the digest is served
+# at /custom-disk-images/image-build.txt (and embedded in the cacheId), it is
+# a credential VERIFIER — LAN clients can brute-force low-entropy passwords
+# against it. The same plaintext passwords are already baked into the served
+# ext2's /root/.syncrc, so this is defense-in-depth, not a new primary leak;
+# still, never deploy samba/webdav with the default passwords.
 # __pycache__ bytecode is excluded (non-deterministic across Python versions).
 FINGERPRINT_INPUT=$( \
 	cat diskimage/Dockerfile; \
@@ -107,8 +135,8 @@ FINGERPRINT_INPUT=$( \
 		-type f -not -path '*/.git/*' -not -name '*.pyc' -not -path '*/__pycache__/*' \
 		-not -path '*/rootfs/home/user/.ssh/*' -print 2>/dev/null | sort | xargs cat; \
 	echo "$STORAGE_BACKEND"; \
-	echo "SYNC_URL=$SYNC_URL_EFF SYNC_USER=$SYNC_USER_EFF"; \
-	echo "SAMBA_HOST=$SAMBA_HOST_EFF SAMBA_SHARE=$SAMBA_SHARE_EFF SAMBA_USER=$SAMBA_USER_EFF" \
+	echo "SYNC_URL=$SYNC_URL_EFF SYNC_USER=$SYNC_USER_EFF SYNC_PASS=$SYNC_PASS_EFF"; \
+	echo "SAMBA_HOST=$SAMBA_HOST_EFF SAMBA_SHARE=$SAMBA_SHARE_EFF SAMBA_USER=$SAMBA_USER_EFF SAMBA_PASS=$SAMBA_PASS_EFF" \
 )
 FINGERPRINT=$(printf '%s' "$FINGERPRINT_INPUT" | shasum -a 256 | cut -c1-12)
 

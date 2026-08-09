@@ -11,7 +11,6 @@ CONTROL_PORT="${CONTROL_PORT:-8443}"
 WEBDAV_PORT="${WEBDAV_PORT:-8082}"
 CONTROL_HOST="${CONTROL_HOST:-host.docker.internal}"
 LAN_IP="${LAN_IP:-127.0.0.1}"
-EXTRA_BIND_IP="${EXTRA_BIND_IP:-}"
 WEBDAV_USER="${WEBDAV_USER:-}"
 WEBDAV_PASS="${WEBDAV_PASS:-}"
 GATEWAY_AUTHKEY="${GATEWAY_AUTHKEY:-}"
@@ -50,13 +49,6 @@ curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/alpine" | grep -q "301" || fa
 echo "==> ext2 byte ranges"
 curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/custom-disk-images/webvm-custom-disk.ext2" | grep -q "200" || fail "ext2 not 200"
 curl -sk -H "Range: bytes=0-1023" -o /dev/null -w "%{http_code}" "$SITE_URL/custom-disk-images/webvm-custom-disk.ext2" | grep -q "206" || fail "ext2 Range not 206"
-
-echo "==> loopback-alias binding (EXTRA_BIND_IP, when configured)"
-if [ -n "$EXTRA_BIND_IP" ]; then
-	curl -sk -o /dev/null -w "%{http_code}" "https://${EXTRA_BIND_IP}:${SITE_PORT}/alpine.html" | grep -q "200" || fail "EXTRA_BIND_IP binding not serving"
-else
-	echo "   (EXTRA_BIND_IP not set — skipped)"
-fi
 
 if [ "${STORAGE_BACKEND:-browser}" = "webdav" ]; then
 	echo "==> webdav PROPFIND/PUT/GET round-trip"

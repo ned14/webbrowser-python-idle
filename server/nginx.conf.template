@@ -5,8 +5,7 @@
 # Two HTTPS listeners, both binding 0.0.0.0 inside the container:
 #   SITE_PORT (8081)    the WebVM site (COOP/COEP/CORP, CSP connect-src)
 #   CONTROL_PORT (8443) Headscale control + embedded DERP (WSS)
-# Exposure to the host is restricted by compose port bindings (LAN_IP +
-# EXTRA_BIND_IP only).
+# Exposure to the host is restricted by compose port bindings (LAN_IP only).
 
 user nginx;
 worker_processes auto;
@@ -92,6 +91,7 @@ http {
 			add_header Cross-Origin-Opener-Policy "same-origin" always;
 			add_header Cross-Origin-Embedder-Policy "require-corp" always;
 			add_header Cross-Origin-Resource-Policy "cross-origin" always;
+			add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}" always;
 			add_header Cache-Control "public, max-age=31536000, immutable";
 		}
 

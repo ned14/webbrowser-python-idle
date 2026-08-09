@@ -3,17 +3,26 @@
 
 Backends: container WebDAV (stdlib urllib + PROPFIND) or Samba (pysmb).
 
-Flow (a single agent process started by /etc/local.d/desktop.start as the
-`user` account):
+Flow (started by /etc/local.d/desktop.start as the `user` account):
 
   pull   — boot pull: non-destructive, per-file manifest vs last-push record.
            Retries waiting for the tailnet up to ~90s (the guest network comes
            up only after the browser Tailscale client connects), then returns
-           regardless so X is never blocked indefinitely.
+           regardless so X is never blocked indefinitely. The pull is
+           LEASE-GUARDED: a second session that holds the backend lease is
+           refused (only the persistent session may pull).
   daemon — write-triggered push loop: scans ~/ every ~5s, pushes a debounced
            (~2s) delta after changes, holds the backend lease (heartbeat ~15s,
            expiry ~90s), and does a final best-effort push + lease release on
            SIGTERM (tab close / shutdown).
+
+The pull and the daemon share one session id (persisted in the overlay home),
+so the pull's lease hands over to the daemon with no gap, and an ephemeral
+fallback tab (fresh overlay -> fresh id) is refused by both stages. Once a
+session has held the lease it marks `.sync-owned` in its overlay; the daemon
+then RETRIES after a refusal (self-healing against stale leases from crashed
+sessions) instead of permanently giving up, while a session that never owned
+the lease (ephemeral) yields on the first refusal and never becomes a writer.
 
 Sync correctness (clock-safe):
   * The manifest records, per file, the BACKEND mtime observed at last push
@@ -48,8 +57,15 @@ SYNC_AGENT_VERSION = 1
 MANIFEST_FILE = ".sync-manifest.json"
 SNAPSHOT_FILE = "snapshot.tar.gz"
 LEASE_FILE = "webvm.lock"
+NODE_ID_FILE = ".sync-node-id"
+OWNED_FILE = ".sync-owned"
 LEASE_HEARTBEAT_S = 15
 LEASE_EXPIRY_S = 90
+LEASE_RETRY_S = 15
+# Sessions that have never owned the lease (first boot, and ephemeral tabs)
+# retry for about one lease-expiry window, then give up. An established owner
+# (`.sync-owned` marker) retries indefinitely.
+LEASE_RETRY_ATTEMPTS = 6  # 6 * LEASE_RETRY_S = 90s ~= LEASE_EXPIRY_S
 POLL_S = 5
 DEBOUNCE_S = 2
 TAILNET_WAIT_ATTEMPTS = 18  # 18 * 5s = 90s
@@ -66,6 +82,8 @@ EXCLUDE_NAMES = {
     MANIFEST_FILE,
     SNAPSHOT_FILE,
     LEASE_FILE,
+    NODE_ID_FILE,
+    OWNED_FILE,
     ".syncrc",
 }
 
@@ -344,10 +362,68 @@ class SMBTransport:
 # Backend lease
 # --------------------------------------------------------------------------
 
+def session_node_id(home):
+    """Per-session node id, persisted in the (overlay) home directory.
+
+    The boot pull and the push daemon are two processes, but must present ONE
+    identity so the pull can hand the lease to the daemon without a window in
+    which a second session could steal it. The id is persisted in the overlay
+    home: a persistent tab keeps the same id across reloads (shared overlay),
+    while an ephemeral tab (random overlay cacheId) gets a fresh id — so its
+    pull/daemon are refused by the persistent session's lease.
+    """
+    path = home / NODE_ID_FILE
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    import uuid
+
+    ident = uuid.uuid4().hex
+    try:
+        path.write_text(ident, encoding="utf-8")
+    except OSError:
+        # The overlay home is not writable (disk full / permissions). Fall back
+        # to the guest hostname so the pull and the daemon (separate processes)
+        # still share ONE identity and the lease handoff works — a per-process
+        # uuid here would deterministically lock the daemon out of its own
+        # pull's lease. (Tabs share a hostname, but a read-only home is already
+        # a degenerate state; this restores the pre-session-id behaviour.)
+        return os.uname().nodename
+    return ident
+
+
+def session_owned(home):
+    """True once this session has successfully held the backend lease.
+
+    The marker persists in the overlay home: a persistent tab that has ever
+    synced keeps it across reloads, while an ephemeral fallback tab (fresh
+    overlay) never has it. It decides whether the daemon may RETRY after a
+    lease refusal (persistent, self-healing) or must yield immediately
+    (ephemeral — it must never become the writer).
+    """
+    return (home / OWNED_FILE).exists()
+
+
 def acquire_lease(transport, node):
+    """Acquire (or refresh) the backend lease for `node`.
+
+    A lease held by the SAME node is refreshed rather than refused: the boot
+    pull acquires the lease and deliberately leaves it in place so the push
+    daemon (same session id) can take it over without a gap. A lease held by
+    ANY other node (a second tab, ephemeral fallback tab, or another machine)
+    is refused while it is fresh.
+    """
     try:
         raw = transport.get(LEASE_FILE)
         state = json.loads(raw.decode("utf-8"))
+        if state.get("node") == node:
+            transport.put(
+                LEASE_FILE, json.dumps({"ts": time.time(), "node": node}).encode("utf-8")
+            )
+            return
         age = time.time() - float(state.get("ts", 0))
         if age < LEASE_EXPIRY_S:
             raise LeaseRefused(
@@ -359,6 +435,27 @@ def acquire_lease(transport, node):
 
 
 def refresh_lease(transport, node):
+    """Refresh the lease ONLY while we still own it.
+
+    An unconditional PUT could overwrite a lease that another session acquired
+    after ours lapsed (e.g. a long-hidden tab whose guest timers stalled past
+    LEASE_EXPIRY_S), silently creating two writers. If the stored lease is no
+    longer ours, raise LeaseRefused so the push loop stops and re-acquires
+    instead of writing without the lease.
+    """
+    try:
+        raw = transport.get(LEASE_FILE)
+        state = json.loads(raw.decode("utf-8"))
+        if state.get("node") != node:
+            raise LeaseRefused(
+                "backend lease taken over by %s" % state.get("node", "?")
+            )
+    except FileNotFoundError:
+        # Lease vanished (e.g. deleted by the previous owner's shutdown): we no
+        # longer own it — re-acquire rather than blind-write.
+        raise LeaseRefused("backend lease disappeared during refresh") from None
+    except ValueError:
+        pass  # corrupt lease: overwrite it below (unreadable anyway)
     transport.put(LEASE_FILE, json.dumps({"ts": time.time(), "node": node}).encode("utf-8"))
 
 
@@ -613,34 +710,114 @@ def cmd_pull(home, cfg, log=print):
     if not wait_for_tailnet(transport, log=log):
         log("sync: tailnet never came up; skipping boot pull (best-effort)")
         return 0
+    # Lease-guarded boot pull: a second session (ephemeral fallback tab,
+    # another machine) that holds the backend lease must be refused — only
+    # the persistent session may pull. On success the lease is LEFT in place
+    # for the push daemon (same session id) to take over.
+    node = session_node_id(home)
+    try:
+        acquire_lease(transport, node)
+    except LeaseRefused as exc:
+        log("sync: %s — refusing to pull (another session holds the backend)" % exc)
+        return 0
+    except Exception as exc:
+        log("sync: boot pull lease error: %s" % exc)
+        return 0
     manifest = load_manifest(home)
     try:
         pull_home(home, transport, manifest, log=log)
+        # Refresh the handoff to the push daemon OWNERSHIP-AWARE: re-acquire
+        # if a foreign session took the lease over during a long pull (a fresh
+        # foreign lease is refused, so we never blind-write over it).
+        acquire_lease(transport, node)
+    except LeaseRefused as exc:
+        log("sync: boot pull lease taken over: %s" % exc)
     except Exception as exc:
         log("sync: boot pull failed: %s" % exc)
     return 0
 
 
-def cmd_daemon(home, cfg, log=print):
-    transport = build_transport(cfg)
-    node = os.uname().nodename
-    # The tailnet may still be coming up; retry lease acquisition briefly.
-    acquired = False
-    for _attempt in range(6):
+def acquire_or_wait(transport, node, retryable, stop, log=print):
+    """Acquire the backend lease, retrying while `retryable` and not stopped.
+
+    An established owner (`.sync-owned` marker) retries indefinitely — a stale
+    lease from a crashed session expires within LEASE_EXPIRY_S, so the owner
+    self-heals instead of permanently giving up. A session that has never
+    owned the lease (first boot, and ephemeral fallback tabs) retries for one
+    lease-expiry window (LEASE_RETRY_ATTEMPTS), so a first boot can recover
+    from a stale lease, but an ephemeral tab cannot keep probing/clobbering
+    forever. The check applies to BOTH refusals and backend errors: an
+    ephemeral session must never become the writer.
+    """
+    attempts = 0
+    while not stop["flag"]:
         try:
             acquire_lease(transport, node)
-            acquired = True
-            break
+            return True
         except LeaseRefused as exc:
-            log("sync: %s — refusing to sync (another session holds the backend)" % exc)
-            return 0
-        except Exception:
-            time.sleep(10)
-    if not acquired:
-        log("sync: backend unreachable; giving up on push loop")
-        return 0
+            attempts += 1
+            if attempts == 1 or attempts % 5 == 0:
+                log("sync: %s — refusing to sync (another session holds the backend)" % exc)
+        except Exception as exc:
+            attempts += 1
+            if attempts == 1 or attempts % 5 == 0:
+                log("sync: backend unreachable (%s); retrying lease" % exc)
+        if not retryable and attempts >= LEASE_RETRY_ATTEMPTS:
+            return False
+        for _ in range(LEASE_RETRY_S):
+            if stop["flag"]:
+                break
+            time.sleep(1)
+    return False
 
-    log("sync: lease acquired; push loop running")
+
+def _run_push_loop(home, transport, manifest, node, stop, log=print):
+    """Debounced write-triggered push loop; returns on a clean stop.
+
+    Raises LeaseRefused when the lease is taken over mid-run (see
+    refresh_lease), so the caller re-acquires instead of writing without the
+    lease. The final push + lease release run only on a clean shutdown — never
+    when the lease was lost to another session.
+    """
+    last_refresh = 0.0
+    while not stop["flag"]:
+        try:
+            local = scan_local(home)
+            if compute_push_plan(local, manifest):
+                # Debounced push: let the write settle before uploading
+                # (editors can write a file over >1s; pushing mid-write would
+                # upload a torn copy).
+                for _ in range(DEBOUNCE_S):
+                    if stop["flag"]:
+                        break
+                    time.sleep(1)
+                changed = push_home(home, transport, manifest, log=log)
+                if changed:
+                    log("sync: pushed changes")
+            if time.time() - last_refresh >= LEASE_HEARTBEAT_S:
+                refresh_lease(transport, node)  # LeaseRefused propagates
+                last_refresh = time.time()
+        except LeaseRefused:
+            raise
+        except Exception as exc:
+            log("sync: push error: %s" % exc)
+        for _ in range(POLL_S):
+            if stop["flag"]:
+                break
+            time.sleep(1)
+    try:
+        push_home(home, transport, manifest, log=log)
+    except Exception as exc:
+        log("sync: final push failed: %s" % exc)
+    release_lease(transport)
+    log("sync: lease released")
+
+
+def cmd_daemon(home, cfg, log=print):
+    transport = build_transport(cfg)
+    node = session_node_id(home)
+    retryable = session_owned(home)
+
     stop = {"flag": False}
 
     def on_term(_signum, _frame):
@@ -649,30 +826,24 @@ def cmd_daemon(home, cfg, log=print):
     signal.signal(signal.SIGTERM, on_term)
     signal.signal(signal.SIGINT, on_term)
 
-    last_refresh = 0.0
     manifest = load_manifest(home)
-    try:
-        while not stop["flag"]:
-            try:
-                changed = push_home(home, transport, manifest, log=log)
-                if changed:
-                    log("sync: pushed changes")
-                if time.time() - last_refresh >= LEASE_HEARTBEAT_S:
-                    refresh_lease(transport, node)
-                    last_refresh = time.time()
-            except Exception as exc:
-                log("sync: push error: %s" % exc)
-            for _ in range(POLL_S):
-                if stop["flag"]:
-                    break
-                time.sleep(1)
-    finally:
+    while not stop["flag"]:
+        if not acquire_or_wait(transport, node, retryable, stop, log=log):
+            log("sync: backend lease never became available; giving up on push loop")
+            return 0
         try:
-            push_home(home, transport, manifest, log=log)
-        except Exception as exc:
-            log("sync: final push failed: %s" % exc)
-        release_lease(transport)
-        log("sync: lease released")
+            (home / OWNED_FILE).write_text("1", encoding="utf-8")
+        except OSError:
+            pass
+        log("sync: lease acquired; push loop running")
+        try:
+            _run_push_loop(home, transport, manifest, node, stop, log)
+            return 0  # clean shutdown
+        except LeaseRefused:
+            # Our lease was taken over while we pushed (e.g. a long-hidden tab
+            # whose guest timers stalled past LEASE_EXPIRY_S). Stop pushing and
+            # re-acquire — never write without the lease.
+            log("sync: backend lease taken over; re-acquiring")
     return 0
 
 
