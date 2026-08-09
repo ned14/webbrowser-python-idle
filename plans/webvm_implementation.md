@@ -1913,6 +1913,30 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `blob:` workers) with `connect-src` still strictly `'self'` + the control
     host. Verified: the booted desktop makes zero external requests.
 
+22. **X desktop boot (implementation finding, 2026-08-09):** three things
+    contradict the Step 2 assumptions; all are corrected in
+    `desktop.start`/`config/xinitrc`:
+    * `/usr/bin/Xorg` is the **Xorg.wrap security wrapper**, which refuses to
+      run the real X server as a non-root, non-console user — and the guest
+      has no console login session for `user`, so `su user -c startx` could
+      never start X (it silently produced a console `login:` prompt instead).
+      The server is therefore started **as root** (exactly how display
+      managers — LightDM in the reference image — do it), and the user session
+      then runs as `user` via `~/.xinitrc`. The plan's "Xorg refuses to run as
+      root" note is wrong for this Xorg: root is the sanctioned launcher.
+    * `startx` appends `vt<N> -keeptty` to its Xorg command line and Xorg's VT
+      ioctls hang in the VT-less CheerpX guest. The plan's fallback
+      (`Xorg :0 -nolisten tcp -noreset`) is now the **primary** launch, plus
+      `-novtswitch`, with a socket-wait (`/tmp/.X11-unix/X0`) so the session
+      only starts once X is up; X diagnostics go to `/var/log/xorg.log`.
+    * Alpine's default `/etc/inittab` spawns six gettys, so the console showed
+      a `login:` prompt instead of booting the desktop; gettys are disabled
+      (single-user autologin desktop). Two secondary fixes: the system
+      `/etc/X11/xinit/xinitrc` EXECs `~/.xinitrc` before it ever reaches
+      `xinitrc.d`, so the screen-resize hook is sourced from `~/.xinitrc`;
+      and i3 runs under `dbus-run-session` so GTK apps (IDLE, pcmanfm) get a
+      per-session D-Bus.
+
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path
 semantics) is a lookup-and-record step, not a design decision — and the §12/21

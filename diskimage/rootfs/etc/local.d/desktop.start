@@ -44,14 +44,37 @@ if [ ! -f /home/user/.ssh/id_ed25519 ]; then
 	su user -c 'ssh-keygen -q -t ed25519 -N "" -f /home/user/.ssh/id_ed25519'
 fi
 
-# Start the desktop as 'user'. Fall back to a direct Xorg launch if startx
-# cannot handle the (VT-less) WASM guest. The whole launch is BACKGROUNDED so
-# OpenRC's `local` service (which executes .start scripts in the foreground)
-# is not blocked for the lifetime of the X session: the boot completes and the
-# desktop comes up either way. A hanging startx (rather than a failing one)
-# therefore cannot stall the boot at "Starting local ...".
+# X socket directory: Xorg runs as root here (see below); keep the socket dir
+# world-writable so the user session can connect.
+mkdir -p /tmp/.X11-unix
+chmod 1777 /tmp/.X11-unix
+
+# Start the X server as ROOT, then the user session as 'user'.
+#   * /usr/bin/Xorg is the Xorg.wrap security wrapper, which refuses to run
+#     the real X server as a non-root, non-console user; the guest has no
+#     console login session for `user`, so the server MUST be started as root
+#     (exactly how display managers — LightDM in the reference image — do it).
+#   * `startx` appends `vt<N> -keeptty` to the Xorg command line and Xorg's VT
+#     ioctls hang in the VT-less CheerpX guest, so Xorg is launched directly
+#     with VT switching disabled (the plan's sanctioned fallback).
+#   * The session then runs as `user` via ~/.xinitrc (screen-resize hook,
+#     setxkbmap, xrdb, i3 under a per-session D-Bus).
+# The whole launch is BACKGROUNDED so OpenRC's `local` service (which executes
+# .start scripts in the foreground) completes — a failing or hanging X cannot
+# stall the boot. X diagnostics are logged to /var/log/xorg.log.
 (
-	su user -c "XDG_RUNTIME_DIR=/run/user/1000 startx" || {
-		su user -c 'Xorg :0 -nolisten tcp -noreset >/var/log/xorg.log 2>&1 & sleep 3; DISPLAY=:0 i3 >/var/log/i3.log 2>&1'
-	}
+	rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
+	Xorg :0 -nolisten tcp -noreset -novtswitch </dev/null >/var/log/xorg.log 2>&1 &
+	XPID=$!
+	i=0
+	while [ ! -S /tmp/.X11-unix/X0 ] && [ "$i" -lt 60 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	if [ ! -S /tmp/.X11-unix/X0 ]; then
+		echo "Xorg failed to start (see /var/log/xorg.log)" >&2
+		kill "$XPID" 2>/dev/null
+		exit 1
+	fi
+	su user -c "export XDG_RUNTIME_DIR=/run/user/1000; DISPLAY=:0 sh /home/user/.xinitrc"
 ) &

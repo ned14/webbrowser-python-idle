@@ -33,10 +33,13 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	[ -x /sbin/init ] || { echo "FAIL: /sbin/init missing" >&2; exit 1; }
 	[ -x /etc/local.d/desktop.start ] || { echo "FAIL: desktop.start missing" >&2; exit 1; }
 	[ -x /etc/X11/xinit/xinitrc.d/99-screen-resize.sh ] || { echo "FAIL: screen-resize missing" >&2; exit 1; }
-	grep -q "exec i3" /home/user/.xinitrc || { echo "FAIL: .xinitrc does not exec i3" >&2; exit 1; }
+	grep -q "dbus-run-session -- i3" /home/user/.xinitrc || { echo "FAIL: .xinitrc does not exec i3 under a session bus" >&2; exit 1; }
 	grep -q "exec --no-startup-id idle3.10" /home/user/.config/i3/config || { echo "FAIL: i3 does not autostart idle" >&2; exit 1; }
-	grep -q "startx" /etc/local.d/desktop.start || { echo "FAIL: desktop.start does not startx" >&2; exit 1; }
+	grep -q "Xorg :0" /etc/local.d/desktop.start || { echo "FAIL: desktop.start does not launch Xorg" >&2; exit 1; }
+	grep -q "sh /home/user/.xinitrc" /etc/local.d/desktop.start || { echo "FAIL: desktop.start does not run the user session" >&2; exit 1; }
 	[ -f /etc/runlevels/default/local ] || { echo "FAIL: openrc local service not enabled" >&2; exit 1; }
+	# No gettys: the desktop must boot straight to X, never a console login
+	grep -q "^tty[1-6]::respawn:/sbin/getty" /etc/inittab && { echo "FAIL: getty enabled (console login prompt)" >&2; exit 1; }
 
 	# Git tooling baked; the SSH keypair is generated at first boot by
 	# desktop.start (never baked into the served image)

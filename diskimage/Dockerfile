@@ -128,8 +128,10 @@ RUN chmod +x /home/user/.xinitrc && \
 COPY scripts/99-screen-resize.sh /etc/X11/xinit/xinitrc.d/99-screen-resize.sh
 RUN chmod +x /etc/X11/xinit/xinitrc.d/99-screen-resize.sh
 
-# Root filesystem overlays: hosts file, network interfaces, desktop boot
+# Root filesystem overlays: hosts file, network interfaces, desktop boot,
+# inittab (no gettys — single-user autologin desktop, no console login prompt)
 COPY rootfs/etc/hosts /etc/hosts
+COPY rootfs/etc/inittab /etc/inittab
 COPY rootfs/etc/network/interfaces /etc/network/interfaces
 COPY rootfs/etc/local.d/desktop.start /etc/local.d/desktop.start
 RUN chmod +x /etc/local.d/desktop.start
