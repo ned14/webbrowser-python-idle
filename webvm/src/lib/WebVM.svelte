@@ -1,7 +1,6 @@
 <script>
 	import { onMount, tick } from 'svelte';
 	import { get } from 'svelte/store';
-	import Nav from 'labs/packages/global-navbar/src/Nav.svelte';
 	import SideBar from '$lib/SideBar.svelte';
 	import '$lib/global.css';
 	import '@xterm/xterm/css/xterm.css'
@@ -374,8 +373,7 @@
 </script>
 
 <main class="relative w-full h-full">
-	<Nav />
-	<div class="absolute top-10 bottom-0 left-0 right-0">
+	<div class="absolute top-0 bottom-0 left-0 right-0">
 		<SideBar on:connect={handleConnect} on:reset={handleReset} on:sidebarPinChange={handleSidebarPinChange}>
 			<slot></slot>
 		</SideBar>
