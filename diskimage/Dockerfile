@@ -137,6 +137,16 @@ COPY rootfs/etc/local.d/desktop.start /etc/local.d/desktop.start
 RUN chmod +x /etc/local.d/desktop.start
 COPY rootfs/etc/X11/xorg.conf.d/10-cheerpx.conf /etc/X11/xorg.conf.d/10-cheerpx.conf
 
+# CRITICAL FIX (2026-08-10, root cause of the display bug): `docker build`
+# creates a `/.dockerenv` file in the container rootfs. The `docker export`
+# that produces the guest ext2 carries it over, and OpenRC's rc reads
+# `/.dockerenv` to detect a docker container, setting `rc_sys` so that all
+# `keyword -containers` services (udev, udev-trigger, udev-settle) are SKIPPED.
+# Without udevd, X never discovers the virtual input devices, the cursor
+# freezes, and the CheerpX runtime stops presenting frames after the initial
+# mode-set. The reference image has no `/.dockerenv`; we must remove it.
+RUN rm -f /.dockerenv /.dockerinit
+
 # Record the backend so /etc/local.d/desktop.start can branch on it
 RUN echo "$STORAGE_BACKEND" > /etc/webvm-backend
 

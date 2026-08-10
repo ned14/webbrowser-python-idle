@@ -80,6 +80,15 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 	set -eu
 	rm -rf /tmp/rootfs && mkdir -p /tmp/rootfs
 	tar -xf /work/rootfs.tar -C /tmp/rootfs
+	# CRITICAL FIX (2026-08-10, root cause of the display bug): the Docker
+	# daemon creates `/.dockerenv` in the container at start, so the export
+	# tarball always carries it. OpenRC reads `/.dockerenv` to detect a docker
+	# container and then SKIPS all `keyword -containers` services — including
+	# udev/udev-trigger/udev-settle. Without udevd, X never registers the
+	# virtual input devices, the cursor freezes, and the CheerpX runtime stops
+	# presenting after the initial frame. Remove it from the guest rootfs here
+	# (a Dockerfile `RUN rm` cannot help: it is recreated at container start).
+	rm -f /tmp/rootfs/.dockerenv /tmp/rootfs/.dockerinit
 	rootfs_kb=$(du -sk /tmp/rootfs | cut -f1)
 	size_mb=$(( (rootfs_kb * 12 / 10240) + 1 ))   # rootfs + ~20%
 	if [ "$size_mb" -lt 100 ]; then size_mb=100; fi
