@@ -181,6 +181,10 @@
 		term.loadAddon(linkAddon);
 		const consoleDiv = document.getElementById("console");
 		term.open(consoleDiv);
+		// Debug handle for E2E tests: full terminal buffer access (the DOM only
+		// exposes the visible rows; the test reads the scrollback for the
+		// "no login / no hang" assertions).
+		window.__webvmTerm = term;
 		term.scrollToTop();
 		fitAddon.fit();
 		window.addEventListener("resize", handleResize);
@@ -197,6 +201,12 @@
 		consoleDiv.addEventListener("drop", preventDefaults, false);
 		curInnerWidth = window.innerWidth;
 		curInnerHeight = window.innerHeight;
+		// The display canvas must sit ABOVE the console xterm, or the console
+		// intercepts all mouse/keyboard events. The upstream code raises it on
+		// guest VT7 activation, but our VT-less X session never activates a VT
+		// — and initCheerpX() never returns (it runs the guest in a loop) — so
+		// raise it HERE, before the guest starts.
+		raiseDisplay();
 		if(configObj.printIntro)
 			printMessage(introMessage);
 		try
@@ -210,6 +220,18 @@
 			return;
 		}
 	}
+
+	function raiseDisplay()
+	{
+		// The display canvas must sit ABOVE the console xterm, or the console
+		// intercepts all mouse/keyboard events and nothing reaches the guest.
+		// The upstream code only does this on guest VT7 activation; our X
+		// session is VT-less (see desktop.start), so the console would stay on
+		// top forever — raise it unconditionally.
+		const display = document.getElementById("display");
+		if (display && display.parentElement)
+			display.parentElement.style.zIndex = 5;
+	}
 	function handleActivateConsole(vt)
 	{
 		if(curVT == vt)
@@ -217,9 +239,7 @@
 		curVT = vt;
 		if(vt != 7)
 			return;
-		// Raise the display to the foreground
-		const display = document.getElementById("display");
-		display.parentElement.style.zIndex = 5;
+		raiseDisplay();
 	}
 	function handleProcessCreated()
 	{

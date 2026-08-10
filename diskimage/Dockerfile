@@ -135,6 +135,7 @@ COPY rootfs/etc/inittab /etc/inittab
 COPY rootfs/etc/network/interfaces /etc/network/interfaces
 COPY rootfs/etc/local.d/desktop.start /etc/local.d/desktop.start
 RUN chmod +x /etc/local.d/desktop.start
+COPY rootfs/etc/X11/xorg.conf.d/10-cheerpx.conf /etc/X11/xorg.conf.d/10-cheerpx.conf
 
 # Record the backend so /etc/local.d/desktop.start can branch on it
 RUN echo "$STORAGE_BACKEND" > /etc/webvm-backend

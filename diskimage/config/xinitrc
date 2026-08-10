@@ -2,8 +2,7 @@
 # X startup as the 'user' account.
 # The system /etc/X11/xinit/xinitrc EXECs ~/.xinitrc before it ever reaches
 # /etc/X11/xinit/xinitrc.d, so the screen-resize hook is sourced here instead.
-# i3 runs under a per-session D-Bus so GTK apps (IDLE, pcmanfm) get a session
-# bus. Layout defaults to US; override with `setxkbmap <layout>`.
+# Layout defaults to US; override with `setxkbmap <layout>`.
 
 for f in /etc/X11/xinit/xinitrc.d/?*; do
 	[ -x "$f" ] && . "$f"
@@ -13,4 +12,5 @@ setxkbmap us 2>/dev/null
 
 xrdb -merge "$HOME/.Xresources" 2>/dev/null
 
+# i3 runs under a per-session D-Bus so GTK apps (IDLE, pcmanfm) get a bus.
 exec dbus-run-session -- i3
