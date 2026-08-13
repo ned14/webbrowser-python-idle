@@ -1,0 +1,51 @@
+--- a/unix/tclUnixNotfy.c	2026-08-12 21:51:52
++++ b/unix/tclUnixNotfy.c	2026-08-12 21:51:53
+@@ -1067,7 +1067,7 @@
+ 	 * it here.
+ 	 */
+ 
+-	if (numFound == -1) {
++	if (numFound <= 0) {
+ 	    FD_ZERO(&tsdPtr->readyMasks.readable);
+ 	    FD_ZERO(&tsdPtr->readyMasks.writable);
+ 	    FD_ZERO(&tsdPtr->readyMasks.exception);
+@@ -1151,6 +1151,7 @@
+     fd_set writableMask;
+     fd_set exceptionMask;
+     int i;
++    int numFound;
+     int fds[2], receivePipe;
+     long found;
+     struct timeval poll = {0, 0}, *timePtr;
+@@ -1247,15 +1248,29 @@
+ 	}
+ 	FD_SET(receivePipe, &readableMask);
+ 
+-	if (select(numFdBits, &readableMask, &writableMask, &exceptionMask,
+-		timePtr) == -1) {
++	numFound = select(numFdBits, &readableMask, &writableMask,
++		&exceptionMask, timePtr);
++	if (numFound == -1) {
+ 	    /*
+ 	     * Try again immediately on an error.
+ 	     */
+ 
+ 	    continue;
+ 	}
++	if (numFound == 0) {
++	    /*
++	     * CheerpX's virtual select() can return 0 (nothing ready) yet leave
++	     * the descriptor sets populated. A conforming kernel clears every set
++	     * on any return; without clearing here the ready-scan below reports
++	     * the stale bits as ready and the Tcl event loop spins. Mirror the
++	     * kernel contract.
++	     */
+ 
++	    FD_ZERO(&readableMask);
++	    FD_ZERO(&writableMask);
++	    FD_ZERO(&exceptionMask);
++	}
++
+ 	/*
+ 	 * Alert any threads that are waiting on a ready file descriptor.
+ 	 */

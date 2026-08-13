@@ -1,0 +1,21 @@
+^[[A^[[131C ^[[1m^[[34m[^[[1m^[[32m ok ^[[1m^[[34m]^[[m
+TRACE-RUN-START mode=verify-tk-block-sys
+===BEGIN-VERIFY===
+SYS	8.228789	573 getrandom(0xaffc5c24,24,flags=0x1) = 24
+SYS	8.346765	573 readlink("/usr/bin/python3",0xc00fa5ec,4096) = 10
+SYS	8.347030	573 readlink("/usr/bin/python3.10",0xc00fa5ec,4096) = -1
+SYS	8.347285	573 stat("/usr/bin/Modules/Setup.local",0xc00fb55c) = -1
+SYS	8.347419	573 stat("/usr/bin/lib/python3.10/os.py",0xc00fb52c) = -1
+SYS	8.347524	573 stat("/usr/bin/lib/python3.10/os.pyc",0xc00fb52c) = -1
+SYS	8.348504	573 stat("/usr/lib/python3.10/os.py",0xc00fb52c) = 0
+SYS	8.357219	573 stat("/usr/bin/lib/python3.10/lib-dynload",0xc00fb54c) = -1
+SYS	8.357350	573 stat("/usr/lib/python3.10/lib-dynload",0xc00fb54c) = 0
+SYS	8.418204	573 time(0) = 1786555538
+SYS	8.423480	573 stat("/usr/lib/python310.zip",0xc00fe0cc) = -1
+SYS	8.425460	573 stat("/usr/lib",0xc00fe0cc) = 0
+SYS	8.426129	573 stat("/usr/lib/python310.zip",0xc00fdf1c) = -1
+SYS	8.426559	573 stat("/usr/lib/python3.10",0xc00fe0cc) = 0
+SYS	8.426769	573 stat("/usr/lib/python3.10",0xc00fdf1c) = 0
+SYS	8.427214	573 stat("/usr/lib/python3.10",0xc00fe65c) = 0
+SYS	8.450675	573 stat("/usr/lib/python3.10/encodings/__init__.cpython-310-i386-linux-gnu.so",0xc00fe2fc) = -1
+SYS	8.462835	573 stat("/usr/lib/python3.10/encodings/__init__.abi3.so",0xc00fe2fc) = -1

@@ -66,6 +66,14 @@ RUN apk fetch --no-cache python3-idle && \
 	cp -a /tmp/idle/usr/lib/python3.10/idlelib /usr/lib/python3.10/ && \
 	rm -rf /tmp/idle python3-idle-*.apk
 
+# Tcl/Tk workaround (plans/display-bug.md §2.8): override the apk libtcl8.6.so
+# with a locally-built copy from third_party/tcl-8.6.12 + alpine/*.patch. The
+# fix makes the Unix notifier honour select()'s return value (CheerpX leaves
+# stale fd sets populated on a 0 return), so Tcl_DoOneEvent(TCL_DONT_WAIT)
+# drains and tkinter's window.update() terminates.
+COPY trace/libtcl8.6.so.patched /tmp/libtcl8.6.so.patched
+RUN cp -f /tmp/libtcl8.6.so.patched /usr/lib/libtcl8.6.so && rm /tmp/libtcl8.6.so.patched
+
 # Curriculum is stdlib-only (Decision 10): no py3-numpy/matplotlib/requests/
 # pytest. py3-pip is kept so `pip` exists and the environment looks normal.
 # (There is no runtime pip install — the guest has no internet.)
@@ -128,6 +136,26 @@ RUN chmod +x /home/user/.xinitrc && \
 COPY scripts/99-screen-resize.sh /etc/X11/xinit/xinitrc.d/99-screen-resize.sh
 RUN chmod +x /etc/X11/xinit/xinitrc.d/99-screen-resize.sh
 
+# Tk-hang trace tooling (2026-08-12): example.py + the LD_PRELOAD loggers
+# (syscall logger = libc interposer; xcall logger = Xlib interposer) and the
+# i3-autostarted capture script (runs both loggers in parallel because the Tk
+# hang cannot be killed from inside the guest). Remove together with the trace
+# autostart in config/i3/config once done.
+COPY trace/example.py /trace/example.py
+COPY trace/probe.tcl /trace/probe.tcl
+COPY trace/syscall-logger.so /trace/syscall-logger.so
+COPY trace/xcall-logger.so /trace/xcall-logger.so
+COPY trace/xcall-logger-entry.so /trace/xcall-logger-entry.so
+COPY trace/tcl-logger.so /trace/tcl-logger.so
+COPY trace/getsockname-fix.so /trace/getsockname-fix.so
+COPY trace/xblock-fix.so /trace/xblock-fix.so
+COPY trace/xsync-fix.so /trace/xsync-fix.so
+COPY trace/trace-run.sh /trace/trace-run.sh
+COPY trace/run-mode /trace/run-mode
+COPY trace/noxim.xresources /trace/noxim.xresources
+COPY trace/probe /trace/probe
+RUN chmod 755 /trace/trace-run.sh && chmod 644 /trace/example.py /trace/run-mode && chmod 755 /trace/*.so /trace/probe
+
 # Root filesystem overlays: hosts file, network interfaces, desktop boot,
 # inittab (no gettys — single-user autologin desktop, no console login prompt)
 COPY rootfs/etc/hosts /etc/hosts
@@ -135,6 +163,8 @@ COPY rootfs/etc/inittab /etc/inittab
 COPY rootfs/etc/network/interfaces /etc/network/interfaces
 COPY rootfs/etc/local.d/desktop.start /etc/local.d/desktop.start
 RUN chmod +x /etc/local.d/desktop.start
+COPY rootfs/usr/local/bin/idle3.10-launcher /usr/local/bin/idle3.10-launcher
+RUN chmod +x /usr/local/bin/idle3.10-launcher
 COPY rootfs/etc/X11/xorg.conf.d/10-cheerpx.conf /etc/X11/xorg.conf.d/10-cheerpx.conf
 
 # CRITICAL FIX (2026-08-10, root cause of the display bug): `docker build`

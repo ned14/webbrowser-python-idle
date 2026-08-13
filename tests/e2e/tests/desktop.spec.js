@@ -119,9 +119,16 @@ test('boots to a responsive IDLE: no login prompt, no boot hang, keyboard + mous
 		.toBeGreaterThan(0.35);
 
 	// --- 2. No login prompt, 1. no boot hang at "Starting local ...".
+	// OpenRC prints " * Starting local ..." then appends its "[ ok ]" status
+	// via ANSI cursor-up escapes, which the page's xterm renders on a separate
+	// DOM row — so the bare "Starting local ..." line exists even on a
+	// successful boot. The real check is that the boot PROGRESSED past the
+	// local service: desktop.start echoes "launching the X desktop session"
+	// only after the X socket is up and the session is being launched.
 	const bootText = await consoleText(page);
 	expect(bootText).not.toMatch(/login:\s*$/m);
-	expect(bootText).not.toMatch(/Starting local\s+\.\.\.\s*$/m);
+	expect(bootText.trimEnd()).not.toMatch(/Starting local\s+\.\.\.\s*$/);
+	expect(bootText).toMatch(/launching the X desktop session/);
 
 	// --- 4. KEY presses have an effect in IDLE. Click into the shell to focus
 	// the display (the click also drops the insertion point on the prompt),

@@ -1,13 +1,17 @@
 # i3 config for the WebVM personal desktop.
-# IDLE autostarts on login; $mod+Return opens xterm; $mod+Shift+f opens the
-# file manager (pcmanfm).
+# The autostart runs IDLE (idle3.10) as the desktop client. During Tk/CheerpX
+# hang diagnosis the autostart was temporarily /trace/trace-run.sh (see
+# plans/display-bug.md §2.7); with the Tcl notifier fix (§2.8) IDLE is restored.
+# $mod+Return opens xterm; $mod+Shift+f opens the file manager (pcmanfm).
 
 set $mod Mod4
 
 font pango:DejaVu Sans Mono 10
 
-# Autostart IDLE (the primary editor/REPL for the curriculum)
-exec --no-startup-id idle3.10
+# Autostart IDLE. Uses the launcher, which applies IDLE's -n (in-process, no
+# subprocess) ONLY when the guest lacks loopback TCP networking (CheerpX
+# without a tailnet controlUrl); with networking enabled IDLE runs normally.
+exec --no-startup-id /usr/local/bin/idle3.10-launcher
 
 # Start a terminal
 bindsym $mod+Return exec xterm

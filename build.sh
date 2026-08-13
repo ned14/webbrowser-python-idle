@@ -140,7 +140,7 @@ fi
 # __pycache__ bytecode is excluded (non-deterministic across Python versions).
 FINGERPRINT_INPUT=$( \
 	cat diskimage/Dockerfile; \
-	find diskimage/rootfs diskimage/config diskimage/scripts diskimage/sync \
+	find diskimage/rootfs diskimage/config diskimage/scripts diskimage/sync diskimage/trace \
 		-type f -not -path '*/.git/*' -not -name '*.pyc' -not -path '*/__pycache__/*' \
 		-not -path '*/rootfs/home/user/.ssh/*' -print 2>/dev/null | sort | xargs cat; \
 	echo "$STORAGE_BACKEND"; \

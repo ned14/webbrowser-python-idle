@@ -1,0 +1,35 @@
+#!/bin/sh
+# IDLE launch wrapper.
+#
+# IDLE's default mode runs the Python shell in a subprocess connected over a
+# 127.0.0.1 TCP loopback socket. That only works when the guest has working
+# networking. Under CheerpX, guest networking exists only when a tailnet
+# controlUrl is configured (webvm/src/lib/network.js); without it there is no
+# loopback TCP at all, IDLE cannot bind, warns, and degrades (menus stop
+# working).
+#
+# So the -n switch (run in-process, no subprocess, no networking) is applied
+# CONDITIONALLY: only when the loopback bind actually fails. When networking
+# is enabled, IDLE runs normally with its subprocess.
+#
+# The bind probe must not hang: socket()+bind() fail fast under CheerpX with
+# no network (the whole point), and succeed fast when networking exists.
+
+if python3 - <<'EOF' >/dev/null 2>&1
+import socket, sys
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 0))
+    s.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+EOF
+then
+    # Networking available: run IDLE with its subprocess (no -n).
+    exec idle3.10 "$@"
+else
+    # Networking unavailable: run IDLE in-process (-n).
+    exec idle3.10 -n "$@"
+fi
