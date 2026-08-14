@@ -1,14 +1,12 @@
 <script>
 	import PanelButton from './PanelButton.svelte';
-	// TODO(repo-url): the public GitHub repo for this project has not been
-	// created/set yet. Replace PROJECT_REPO_URL with the real URL once it is
-	// known (e.g. https://github.com/<owner>/<repo>). All links below derive
-	// from it, so a single edit covers the panel button, the star link and
-	// the issues link.
+	// The public GitHub repo for this project. All links below derive from it,
+	// so a single edit covers the panel button, the star link and the issues
+	// link.
 	// NOTE: the upstream GitHubStarCount component fetches
 	// api.github.com/repos/<repo> — an external request this LAN-only
 	// deployment must never make — so it is removed.
-	const PROJECT_REPO_URL = 'https://github.com/<owner>/<repo>';
+	const PROJECT_REPO_URL = 'https://github.com/ned14/webbrowser-python-idle';
 </script>
 
 <h1 class="text-lg font-bold">GitHub</h1>

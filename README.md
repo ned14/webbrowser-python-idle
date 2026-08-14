@@ -1,9 +1,6 @@
 # WebVM personal Linux desktop — LAN-only, self-hosted
 
-<!-- CI badge. Replace OWNER with the GitHub owner/org after the first push.
-     The workflow file (planned in plans/webvm_implementation.md §8) will land
-     at .github/workflows/ci.yml; until then the badge shows "no status". -->
-[![CI](https://github.com/OWNER/webvm-custom/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/webvm-custom/actions/workflows/ci.yml)
+[![CI](https://github.com/ned14/webbrowser-python-idle/actions/workflows/ci.yml/badge.svg)](https://github.com/ned14/webbrowser-python-idle/actions/workflows/ci.yml)
 
 A personal Linux desktop that runs entirely in the browser via
 [WebVM/CheerpX](https://webvm.io): a minimal **i386 Alpine** guest with
@@ -16,6 +13,16 @@ The authoritative design is
 started; phasing per §7). The repo is a planning-turned-implementation repo —
 the plan is fully specified and the code now lives alongside it.
 
+## Try it live
+
+The project website **is the VM**: the latest `main` build runs entirely in your
+browser at
+[**https://ned14.github.io/webbrowser-python-idle/alpine.html**](https://ned14.github.io/webbrowser-python-idle/alpine.html)
+— test-drive it there before running it yourself. The first load streams the
+guest image (~230 MB; later visits reuse the browser cache) and needs a
+standards-compliant browser with SharedArrayBuffer — GitHub Pages cannot set the
+COOP/COEP headers WebVM requires, so the site injects them via a service worker.
+
 ## Quick start (browser mode — no tailnet)
 
 ```sh
@@ -26,13 +33,14 @@ make up             # https://127.0.0.1:8081/alpine.html
 
 Open `https://127.0.0.1:8081/alpine.html` (the private CA must be trusted in
 the browser — HTTPS is the only access mode; there is no plain-HTTP path). The
-desktop boots to the **file manager** open on `~/` (it relaunches whenever the
-last window is closed, so the desktop never sits empty); new Python files are
-created via *File ▸ Create New* and opened in **IDLE** on double-click (or
-right-click ▸ *Open with IDLE*). Example scripts are baked read-only into
-`~/python-examples/` (reference material to copy, not edit in place). Files in
-`~/` survive reloads via the browser IndexedDB overlay. Use `make url` to print
-the session URL.
+desktop boots to the **file explorer** open on `~/` (a keep-alive daemon
+relaunches it whenever the last window closes, so the desktop never sits
+empty); new files/folders are created from the toolbar, and `.py` files open in
+**IDLE** via the *Open in IDLE* button (or double-click / Ctrl+O) — the
+explorer yields the whole screen to IDLE and returns, listing refreshed, when
+IDLE exits. Example scripts are baked read-only into `~/python-examples/`
+(reference material to copy, not edit in place). Files in `~/` survive reloads
+via the browser IndexedDB overlay. Use `make url` to print the session URL.
 
 ## Storage backends (`STORAGE_BACKEND`)
 

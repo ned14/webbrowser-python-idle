@@ -1,0 +1,66 @@
+name: Pages (project website — the VM)
+
+# Builds the browser-mode WebVM and publishes it as the project website on
+# GitHub Pages. The site IS the VM: the guest ext2 is served as 128 KiB chunks
+# streamed by CheerpX's GitHubDevice, and a service worker injects the
+# COOP/COEP headers Pages cannot set (the graphical WebVM needs cross-origin
+# isolation / SharedArrayBuffer).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build guest + ext2 (browser backend)
+        run: ./build.sh browser
+
+      - name: Stage the deploy dir (chunked disk image)
+        run: |
+          set -euo pipefail
+          DEPLOY_DIR=/tmp/pages
+          mkdir -p "$DEPLOY_DIR"
+          IMAGE_NAME="webvm-custom-disk_$(date +%Y%m%d)_${{ github.run_id }}.ext2"
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
+          cp webvm/custom-disk-images/webvm-custom-disk.ext2 "$DEPLOY_DIR/$IMAGE_NAME"
+          # CheerpX GitHubDevice protocol: 128 KiB chunks named
+          # <name>.c<hex6>.txt plus a <name>.meta carrying the image size.
+          (cd "$DEPLOY_DIR" && split "$IMAGE_NAME" "$IMAGE_NAME.c" -a 6 -b 128k -x --additional-suffix=.txt)
+          stat -c%s "$DEPLOY_DIR/$IMAGE_NAME" > "$DEPLOY_DIR/$IMAGE_NAME.meta"
+          rm "$DEPLOY_DIR/$IMAGE_NAME"
+
+      - name: Build frontend for GitHub Pages (github disk device)
+        run: |
+          cd webvm
+          npm ci --no-audit --no-fund
+          WEBVM_MODE=browser \
+            WEBVM_IMAGE_BUILD="$(cat ../webvm/custom-disk-images/image-build.txt)" \
+            WEBVM_DISK_IMAGE="$IMAGE_NAME" \
+            npm run build
+          cp -R build/* /tmp/pages/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: /tmp/pages
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

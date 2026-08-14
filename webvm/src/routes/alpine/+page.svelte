@@ -16,6 +16,22 @@
 	let ready = false;
 	let ephemeral = false;
 
+	// GitHub Pages cannot set COOP/COEP server-side, but the WebVM needs
+	// cross-origin isolation (SharedArrayBuffer). sw.js re-serves the document
+	// with the headers; if we are not isolated yet (first visit to a host that
+	// does not send them, e.g. GitHub Pages), register it and reload once so the
+	// browser applies them. The local server already sends the headers, so the
+	// worker is not registered there at all.
+	onMount(() => {
+		if ('serviceWorker' in navigator && !self.crossOriginIsolated) {
+			navigator.serviceWorker.register('/sw.js').catch(() => {});
+			if (!sessionStorage.getItem('webvm-coop-reload')) {
+				sessionStorage.setItem('webvm-coop-reload', '1');
+				navigator.serviceWorker.ready.then(() => location.reload()).catch(() => {});
+			}
+		}
+	});
+
 	if (configObj.storageBackend === "none") {
 		cacheId = randomCacheId();
 		ready = true;

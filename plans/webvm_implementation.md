@@ -2038,6 +2038,26 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `tests/rootfs/smoke.sh`, `tests/unit/test_scripts.py`,
     `.github/workflows/ci.yml`, `tests/e2e/tests/desktop.spec.js`.
 
+26. **GitHub Pages project website — the VM itself (added 2026-08-14):** a
+    second workflow (`.github/workflows/pages.yml`) builds the browser-mode
+    guest, **splits the ext2 into 128 KiB chunks** (`<name>.c<hex6>.txt` +
+    `<name>.meta` size file — the CheerpX `GitHubDevice` protocol, verified
+    against the pinned runtime and by a full boot test on a Pages-like static
+    host), builds the frontend with `diskImageType="github"` (new
+    `webvm/config_public_alpine_github.js`, selected by the `WEBVM_DISK_IMAGE`
+    env via a vite alias) and deploys the site + chunks to GitHub Pages
+    (`https://ned14.github.io/webbrowser-python-idle/alpine.html`). GitHub
+    Pages cannot set the COOP/COEP headers the graphical WebVM needs
+    (cross-origin isolation / SharedArrayBuffer — verified absent without
+    them), so a **service worker** (`webvm/static/sw.js`) re-serves navigations
+    with the headers and `alpine/+page.svelte` registers it and reloads once
+    when `crossOriginIsolated` is false (the local nginx server already sends
+    the headers, so the worker is never registered there). Pages supports the
+    byte-range + `Last-Modified` requests `HttpBytesDevice`/`GitHubDevice`
+    require. Updated: `.github/workflows/pages.yml`, `webvm/vite.config.js`,
+    `webvm/config_public_alpine_github.js`, `webvm/static/sw.js`,
+    `webvm/src/routes/alpine/+page.svelte`, `README.md`.
+
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path
 semantics) is a lookup-and-record step, not a design decision — and the §12/21
