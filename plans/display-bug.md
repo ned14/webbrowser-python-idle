@@ -447,8 +447,7 @@ wired into the i3 autostart): it probes loopback bindability with a fast
 `python3 socket.bind()` and applies IDLE's `-n` (in-process, no subprocess)
 ONLY when the bind fails. **`-n` is intentionally NOT applied when networking
 is enabled** (tailnet controlUrl set, samba/webdav/any net-capable guest) —
-IDLE then runs normally with its subprocess. The E2E desktop test passes
-(keyboard AND mouse menu interaction) in the no-networking browser mode.
+IDLE then runs normally with its subprocess.
 
 ## 2.9 PARTIAL — the GTK3 file manager (pcmanfm) desktop (DONE 2026-08-13)
 
@@ -595,22 +594,19 @@ run-mode-based autostart (`diskimage/trace/trace-run.sh`, `run-mode` =
 
 ## 7. Trace artifacts
 
-- `python-tkinter/standard-linux-trace.txt` (+ `-notes.md`) — known-correct
-  reference (Alpine 3.17 i386 under qemu-user + Xvfb, up to `mainloop()`).
-- `python-tkinter/cheerpx-trace.txt` (+ `-notes.md`) — the same run inside the
-  CheerpX VM; §10 of the notes records the entry-logger/tclsh follow-up.
-- `python-tkinter/probe.c` (+ `cheerpx-probe.txt`, `standard-linux-probe.txt`)
-  — the direct-libc probe that pinned the hang to `getsockname()` on
-  non-socket fds (§2.2).
-- `python-tkinter/getsockname-fix.c` (+ `cheerpx-verify-tclsh.txt`,
-  `cheerpx-verify-tk.txt`) — the workaround shim and its guest verification
-  outputs (§2.3).
-- `python-tkinter/xblock-fix.c` — the blocking-X-socket shim, tested and
+The diagnostic sources live in `diskimage/trace/`; the captured trace/verify
+outputs (`.txt`/`.md`) from the original investigation were removed with the
+`/trace` cleanup (the diagnosis is complete and superseded, §2.9). Surviving
+artifacts:
+- `diskimage/trace/probe.c` — the direct-libc probe that pinned the hang to
+  `getsockname()` on non-socket fds (§2.2).
+- `diskimage/trace/getsockname-fix.c` — the workaround shim (§2.3).
+- `diskimage/trace/xblock-fix.c` — the blocking-X-socket shim, tested and
   negative (§2.4).
-- `python-tkinter/xsync-fix.c` — the sync short-circuit shim, tested and
+- `diskimage/trace/xsync-fix.c` — the sync short-circuit shim, tested and
   negative (§2.6).
-- Loggers: `python-tkinter/{xcall,syscall,tcl}-logger.c`; guest copies and the
-  capture script in `diskimage/trace/` and `tests/e2e/capture-trace.mjs`.
+- `diskimage/trace/syscall-logger.c` — the libc-interposer syscall logger; the
+  capture script is `tests/e2e/capture-trace.mjs`.
 
 ## 8. Current repo state
 
@@ -631,18 +627,6 @@ run-mode-based autostart (`diskimage/trace/trace-run.sh`, `run-mode` =
 - `diskimage/rootfs/usr/local/bin/idle3.10-launcher` — conditional IDLE
   launcher (probes `socket.bind("127.0.0.1")`; `-n` iff bind fails).
 - `build.sh`'s content fingerprint includes `diskimage/trace/`.
-- `/trace/run-mode` (default `both`; probe/verify modes selectable via
-  `probe`/`probe-plain`/`verify-tclsh`/`verify-tk`/`verify-tk-sys`/
-  `verify-tk-x`/`verify-tk-tcl`/`verify-tk-block`/`verify-tk-block-sys`/
-  `verify-tk-noxim`/`verify-tk-noxim-sys`/`verify-tk-noxim-x`/
-  `verify-tk-sync`/`verify-tk-sync-sys`/`verify-tk-sync-x`/`verify-xterm`)
-  plus the baked `/trace/probe` binary (from `python-tkinter/probe.c`),
-  `/trace/getsockname-fix.so` (from `python-tkinter/getsockname-fix.c`),
-  `/trace/xblock-fix.so` (from `python-tkinter/xblock-fix.c`),
-  `/trace/xsync-fix.so` (from `python-tkinter/xsync-fix.c`), and
-  `/trace/noxim.xresources` (`*useXIM: false`).
-- Guest fingerprint at last clean build: `a4f50aa00898` (browser, default
-  `run-mode=both`, patched libtcl8.6.so, file-manager autostart).
 - `reference_images/alpine_20251007.ext2` (1.5 GB) kept for re-inspection;
   safe to gitignore.
 

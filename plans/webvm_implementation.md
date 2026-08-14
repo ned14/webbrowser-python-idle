@@ -172,18 +172,12 @@ that this plan's self-hosted nginx makes unnecessary.
     `idle3.10` from the package with `apk fetch` + `tar` instead of
     `apk add python3-idle`** so the guest stays minimal, Step 2), `xterm`,
     and **the file explorer** — a stdlib-only Tk app
-    (`diskimage/scripts/file-explorer.py`, installed as
-    `/usr/local/bin/file-explorer.py`). **No display manager** (direct
+    (`/usr/local/bin/file-explorer.py`, §12/25). **No display manager** (direct
     `su user -c startx` → i3; fallback LightDM autologin). **The file explorer
-    autostarts on the user's home directory** via i3
-    (`open-file-explorer.sh`, a guarded single-instance launcher); it replaces
-    the earlier pcmanfm/spacefm GTK file managers (which deadlocked under
-    CheerpX, §12/23, plans/display-bug.md §2.9). `.py` files open in IDLE via
-    `idle3.10-launcher` — "Open with IDLE" / double-click **withdraws the
-    explorer** (the whole screen is handed to IDLE) and only re-shows it once
-    IDLE exits, with the folder listing reloaded (§12/25). A keep-alive daemon
-    (`/usr/local/bin/keep-file-explorer.sh`, autostarted by i3) relaunches the
-    explorer whenever the last window closes, so the desktop never sits empty.
+    autostarts on the user's home directory**; `.py` files open in IDLE via
+    `idle3.10-launcher` (the explorer yields the screen to IDLE while it runs);
+    and a keep-alive daemon (`keep-file-explorer.sh`) relaunches the explorer
+    whenever the last window closes, so the desktop never sits empty.
 4. **No guest internet:** enforced by design (no exit node, LAN-bound services,
    host firewall; the page makes **no** public-host requests — Tailscale logtail
    is blocked via CSP `connect-src`, §5) — see §5.
@@ -784,7 +778,7 @@ then:
 ```
 apk add --no-cache alpine-base udev-init-scripts udev-init-scripts-openrc eudev \
   xorg-server xinit xf86-input-libinput xrandr i3wm font-dejavu \
-  python3 python3-tkinter xterm pcmanfm git openssh-client-default \
+  python3 python3-tkinter xterm git openssh-client-default \
   busybox-extras dbus
 ```
 (**dbus** added to the package list — the reference's `rc-update add dbus`
@@ -822,8 +816,8 @@ needs the package installed.)
   needed; `samba-client` at ~25 MB only as a compatibility fallback — see §4
   Mode B); **webdav** → no extra package (Python stdlib `urllib`;
   `curl` optional); **browser**/**none** → nothing extra. **`gvfs-smb` is
-  excluded** (no pcmanfm `smb://` browsing — gio-only, does not help IDLE/Tk
-  dialogs, and adds ~10–20 MB).
+   excluded** (no guest `smb://` browsing — gio-only, does not help IDLE/Tk
+   dialogs, and adds ~10–20 MB).
 - Users/groups: `adduser -D -s /bin/ash user`; `addgroup user video input tty`;
   set `user`/`root` passwords. Bake `/root/.syncrc` from **build args**
   (`ARG SAMBA_LAN_IP`/`SAMBA_SHARE`/`SAMBA_USER`/`SAMBA_PASS`, and
@@ -1581,9 +1575,9 @@ runner):
     sync agent is a single process started by `desktop.start` (samba/webdav
     builds).
   - **In-guest GUI suite:** `tests/rootfs/smoke.sh` runs the full
-    `file-explorer-tests.py` suite (every explorer function, including the
-    withdraw→IDLE→reappear flow) under an in-image `Xvfb` on `DISPLAY=:99` and
-    requires a `PASS ALL` result.
+    `file-explorer-tests.py` suite (98 checks — every explorer function,
+    including the withdraw→IDLE→reappear flow), a real IDLE launch, and an i3
+    keep-alive relaunch check, all under an in-image `Xvfb` (§12/25).
   - `/sbin/init`, the openrc `local` service (enabled via `rc-update add
     local default`), and `/etc/local.d/desktop.start` (`sh -n` valid; starts X
     via `su user -c startx`); `/etc/X11/xinit/xinitrc.d/99-screen-resize.sh`
@@ -1683,9 +1677,9 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
    never carries `#authKey` without a matching `controlUrl` (that would
    auto-register with public Tailscale).
 3. TLS/control: guest shows CONNECTED with a tailnet IP over WSS.
-4. Desktop: the file manager auto-opens on `~/`; xterm + pcmanfm launch; a
-   new `.py` can be created (File ▸ Create New) and opened in IDLE; closing
-   the last window relaunches the file manager; canvas resize works.
+4. Desktop: the file explorer auto-opens on `~/`; a new `.py` can be created
+   (New File) and opened in IDLE; closing the last window relaunches the
+   explorer; canvas resize works.
 5. **Storage sync (per backend):**
    - Samba: from the guest connect to `//<gateway-tailnet-IP>/<share>`; push a
      file and verify it on the server (also browsable from the host).
@@ -1957,31 +1951,19 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
       (single-user autologin desktop). Two secondary fixes: the system
       `/etc/X11/xinit/xinitrc` EXECs `~/.xinitrc` before it ever reaches
       `xinitrc.d`, so the screen-resize hook is sourced from `~/.xinitrc`;
-      and i3 runs under `dbus-run-session` so GTK apps (IDLE, pcmanfm) get a
-      per-session D-Bus.
+      and i3 runs under `dbus-run-session` (a per-session D-Bus).
 
 23. **File-manager-first desktop (implementation change, 2026-08-13):** the
-    autostarted desktop client is now **pcmanfm** (`exec --no-startup-id
-    pcmanfm /home/user` in `config/i3/config`) instead of IDLE; IDLE is
-    launched on demand from the file manager. Wire-up: new `.py` files are
-    created via *File ▸ Create New* from a `~/Templates/Python Script.py`
-    template; `.py` files open in IDLE on double-click via
-    `~/.config/mimeapps.list` → `~/.local/share/applications/idle3.10.desktop`
-    (both exec the `idle3.10-launcher`), and via the right-click *Open with
-    IDLE* custom action (`~/.local/share/file-manager/actions/
-    open-with-idle.desktop`, `MimeTypes=text/x-python`). `shared-mime-info` is
-    added to the guest so `.py` MIME detection works. IDLE's
-    `-n`-conditional launcher is unchanged and is the entry point for every
-    IDLE launch. Updated: `diskimage/config/i3/config`, `diskimage/Dockerfile`,
-    new files under `diskimage/rootfs/home/user/`, `tests/rootfs/smoke.sh`,
-    `tests/e2e/tests/desktop.spec.js`.
-    **Keep-alive (added 2026-08-13):** a pcmanfm keep-alive daemon
-    (`diskimage/rootfs/usr/local/bin/keep-file-manager.sh`, autostarted by i3)
-    polls the i3 layout tree (`i3-msg -t get_tree`) and relaunches
-    `pcmanfm /home/user` whenever the number of real windows drops to zero, so
-    the desktop never ends up with nothing open. Only leaf `con` nodes with a
-    window id count (containers/bar are ignored); i3-msg failures are
-    fail-safe (no relaunch).
+    autostarted desktop client was switched from IDLE to the **pcmanfm** file
+    manager (`exec --no-startup-id pcmanfm /home/user`), with IDLE launched on
+    demand from it — `.py` files opened in IDLE via
+    `~/.config/mimeapps.list` → `idle3.10.desktop` (both exec the
+    `idle3.10-launcher`) and the right-click *Open with IDLE* custom action;
+    new `.py` files came from *File ▸ Create New* (`~/Templates/Python
+    Script.py`); `shared-mime-info` handled `.py` MIME detection. A keep-alive
+    daemon (`diskimage/rootfs/usr/local/bin/keep-file-manager.sh`) polled the
+    i3 layout tree and relaunched `pcmanfm /home/user` whenever the number of
+    real windows dropped to zero.
     **SUPERSEDED (2026-08-14):** pcmanfm is replaced by the Tk file explorer
     (§12/25); the keep-alive became `keep-file-explorer.sh` and the pcmanfm
     integration files/mimeapps/template were removed.
@@ -2014,7 +1996,7 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `mimeapps.list`/`idle3.10.desktop`/`open-with-idle.desktop`/`~/Templates`
     pcmanfm integration, and the `/proc/self/mountinfo` stub in
     `desktop.start`. A starter `/home/user/hello.py` is baked in so a new user
-    (and the E2E suite) can double-click into IDLE immediately.
+    can double-click into IDLE immediately.
     **Screen replacement:** "Open with IDLE" (or double-clicking a `.py`)
     launches `idle3.10-launcher` per file and then **withdraws the explorer
     window** — the whole screen is IDLE's. A watcher thread waits on the IDLE

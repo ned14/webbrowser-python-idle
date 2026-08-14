@@ -33,7 +33,7 @@ which never reaches the browser.
 2. Guest: install `xdotool` (`diskimage/Dockerfile` apk add) and ship a tiny
    helper the host invokes (via the CheerpX `WebDevice`/`DataDevice` or the
    console path) to run `xdotool type --delay 1 "<text>"` on the focused X
-   window — making paste work into IDLE, xterm, pcmanfm, etc.
+   window — making paste work into IDLE, xterm, the file explorer, etc.
 3. Caveats: keyboard layout / special chars (quotes, newlines) must be escaped
    for `xdotool type`; only targets the currently-focused window; needs the
    display canvas to actually hold focus for the paste event.
