@@ -1999,11 +1999,21 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     can double-click into IDLE immediately.
     **Screen replacement:** "Open with IDLE" (or double-clicking a `.py`)
     launches `idle3.10-launcher` per file and then **withdraws the explorer
-    window** — the whole screen is IDLE's. A watcher thread waits on the IDLE
-    processes; when they all exit it reloads the current folder and
-    `deiconify()`s the explorer, so anything IDLE created/edited/saved shows
-    up. Closing the explorer (WM close, or the Ctrl+W shortcut added for it)
-    exits the process and the keep-alive relaunches it. **Touch model
+    window** — the whole screen is IDLE's. A watcher thread decides when IDLE
+    is gone by watching the **i3 window tree** (not the process): under CheerpX
+    closing IDLE can leave the `idle3.10` process alive (it waits on its
+    Python-shell subprocess, which a running program such as the snake game
+    keeps busy), so waiting on the process would never return. The watcher
+    waits for IDLE to map, then waits until its window disappears (IDLE
+    windows report class `Toplevel` / a "Python … Shell" title; a program
+    window like the game's plain `tk` root does not match) or the process
+    exits, then **kills everything IDLE spawned** — the launcher, IDLE's shell
+    subprocess (found in `/proc` by its `idlelib.run` command line), and any
+    children via `pkill -P` (CheerpX does not implement `killpg()`; it is kept
+    as a POSIX fallback) — so no stray program window outlives IDLE and blocks
+    the return to the file manager. Closing the explorer (WM close, or the
+    Ctrl+W shortcut added for it) exits the process and the keep-alive
+    relaunches it. **Touch model
     hardening (2026-08-14):** the release handler no longer drops clicks whose
     release arrives between the old tap and long-press thresholds (CheerpX can
     delay synthetic button releases), and the long-press hold was raised from

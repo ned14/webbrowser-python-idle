@@ -423,8 +423,11 @@ def test_select_all_clear(done):
 def test_columns(done):
     _load(SRC, lambda: _steps([
         (100, lambda: check_columns()),
-        (0, lambda: check("headers", lb.heading("size")["text"] == "Size"
-                          and lb.heading("modified")["text"] == "Last modified")),
+        (0, lambda: check("headers (and no tree-column expand boxes)",
+                          lb.heading("size")["text"] == "Size"
+                          and lb.heading("modified")["text"] == "Last modified"
+                          and [str(x) for x in lb.cget("show")] == ["headings"],
+                          (lb.heading("size")["text"], lb.heading("modified")["text"], lb.cget("show")))),
         (0, lambda: lazy_size()),
     ], lambda: None))
     def check_columns():
@@ -434,12 +437,13 @@ def test_columns(done):
             if os.path.isdir(path):
                 continue
             got = tuple(lb.item(iid, "values"))
-            exp = (pane.human_readable_size(os.path.getsize(path)),
+            exp = ("\u2022 " + os.path.basename(path),
+                   pane.human_readable_size(os.path.getsize(path)),
                    pane._mtime_str(os.path.getmtime(path)))
             if got != exp:
                 ok = False
                 print("  mismatch", path, got, exp, flush=True)
-        check("size + modified columns match fs", ok)
+        check("name + size + modified columns match fs", ok)
     def sub_iid():
         for i in pane.displayed_items:
             if pane.item_path[i].endswith("/subdir"):
@@ -448,9 +452,9 @@ def test_columns(done):
     def lazy_size():
         sub = sub_iid()
         _ORIG_FOLDER_SIZE(pane.item_path[sub])   # run the lazy size computation
-        _wait_until(lambda: (lambda i: i is not None and lb.item(i, "values")[0] == "2.00 KB")(sub_iid()),
+        _wait_until(lambda: (lambda i: i is not None and lb.item(i, "values")[1] == "2.00 KB")(sub_iid()),
                     lambda: (check("folder size fills lazily",
-                                   (lambda i: i is not None and lb.item(i, "values")[0] == "2.00 KB")(sub_iid())),
+                                   (lambda i: i is not None and lb.item(i, "values")[1] == "2.00 KB")(sub_iid())),
                              done()))
 
 @test
@@ -910,14 +914,50 @@ def test_ctrl_w_closes(done):
     done()
 
 @test
+def test_toolbar_buttons_look_like_buttons(done):
+    # The toolbar buttons must read as buttons (raised relief + visible
+    # border), not as bare text.
+    _make_fixtures()
+    _load(SRC, lambda: _steps([
+        (100, lambda: check("toolbar buttons have a visible raised border",
+                            all(str(w.cget("relief")) == "raised"
+                                and int(w.cget("borderwidth")) >= 1
+                                for w in pane.toolbar.winfo_children()
+                                if w.winfo_class() == "Button"),
+                            [(str(w.cget("relief")), int(w.cget("borderwidth")))
+                             for w in pane.toolbar.winfo_children()
+                             if w.winfo_class() == "Button"])),
+    ], done))
+
+@test
+def test_row_icons_are_guest_font_glyphs(done):
+    # The row icons must be glyphs the guest font (DejaVu Sans) actually
+    # ships — emoji (📁/📄) are absent from it and render as boxes.
+    _make_fixtures()
+    _load(SRC, lambda: _steps([
+        (100, lambda: check("no emoji icons (would render as boxes)",
+                            all(not tuple(lb.item(i, "values"))[0].startswith(("\U0001f4c1", "\U0001f4c4"))
+                                for i in lb.get_children()),
+                            [tuple(lb.item(i, "values"))[0] for i in lb.get_children()])),
+        (0, lambda: check("folders get the ▸ glyph, files the • glyph",
+                          any(tuple(lb.item(i, "values"))[0].startswith("\u25b8")
+                              for i in lb.get_children())
+                          and any(tuple(lb.item(i, "values"))[0].startswith("\u2022")
+                                  for i in lb.get_children()),
+                          [tuple(lb.item(i, "values"))[0] for i in lb.get_children()])),
+    ], done))
+
+@test
 def test_open_with_idle_replaces_screen(done):
     _make_fixtures()
     calls = []
     class FakePopen:
-        def __init__(self, args):
-            calls.append(list(args))
-        def wait(self):
-            time.sleep(0.3)
+        def __init__(self, args, **kw):
+            if args and args[0] != "i3-msg":  # ignore the watcher's i3 probes
+                calls.append(list(args))
+            self._end = time.time() + 0.6
+        def poll(self):
+            return None if time.time() < self._end else 0
     orig_popen = subprocess.Popen
     subprocess.Popen = FakePopen
     try:
@@ -928,7 +968,7 @@ def test_open_with_idle_replaces_screen(done):
                                 calls == [["/usr/local/bin/idle3.10-launcher", py]], repr(calls))),
             (100, lambda: check("explorer withdrawn while IDLE runs",
                                 str(root.state()) == "withdrawn", root.state())),
-            (700, lambda: check("explorer reappears once IDLE exits",
+            (900, lambda: check("explorer reappears once IDLE exits",
                                 str(root.state()) == "normal", root.state())),
             (100, lambda: check("folder reloaded after IDLE",
                                 pane.current_path == SRC and pane.displayed_paths,
@@ -936,6 +976,105 @@ def test_open_with_idle_replaces_screen(done):
         ], done)
     finally:
         subprocess.Popen = orig_popen
+
+@test
+def test_idle_window_close_returns_when_process_lingers(done):
+    # Closing IDLE can leave the idle3.10 process alive (it waits on its shell
+    # subprocess, kept busy by a running game). The explorer must detect the
+    # IDLE window disappearing and return to the file manager anyway.
+    _make_fixtures()
+    calls = []
+    class FakePopen:
+        def __init__(self, args, **kw):
+            if args and args[0] != "i3-msg":  # ignore the watcher's i3 probes
+                calls.append(list(args))
+            self.pid = 424242  # process never exits on its own
+        def poll(self):
+            return None
+    orig_popen = subprocess.Popen
+    orig_open = pane._idle_window_open
+    holder = {"open": True}
+    def fake_open(basenames):
+        return holder["open"]
+    subprocess.Popen = FakePopen
+    pane._idle_window_open = fake_open
+    py = os.path.join(SRC, "app.py")
+    _ORIG_IDLE([py])
+    _steps([
+        (200, lambda: check("explorer withdrawn while IDLE runs",
+                            str(root.state()) == "withdrawn", root.state())),
+        (0, lambda: holder.__setitem__("open", False)),  # user closes IDLE
+        (3500, lambda: check("explorer reappears once IDLE's window is gone",
+                             str(root.state()) == "normal", root.state())),
+    ], lambda: (
+        subprocess.__setattr__("Popen", orig_popen),
+        pane.__setattr__("_idle_window_open", orig_open),
+        done(),
+    ))
+
+@test
+def test_kill_idle_tree(done):
+    # A game running in IDLE's shell subprocess must be killed when IDLE is
+    # closed — even if the launcher process itself is still alive.
+    sub = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"])
+    launcher = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        pane._kill_idle_tree(launcher, [sub.pid])
+        rc_sub = sub.wait(timeout=5)
+        rc_launcher = launcher.wait(timeout=5)
+        check("shell subprocess killed", rc_sub == -signal.SIGKILL, rc_sub)
+        check("launcher killed", rc_launcher == -signal.SIGKILL, rc_launcher)
+    finally:
+        for p in (sub, launcher):
+            if p.poll() is None:
+                p.kill()
+    done()
+
+@test
+def test_shell_subprocess_discovery(done):
+    # The watcher finds IDLE's Python-shell subprocess (where programs run) by
+    # scanning /proc for a direct child whose command line mentions idlelib.run.
+    launcher = subprocess.Popen([_sys.executable, "-c",
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', 'idlelib.run'])\n"
+        "time.sleep(60)"])
+    child_pid = None
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            found = pane._shell_subprocesses(launcher)
+            if found:
+                child_pid = found[0]
+                break
+            time.sleep(0.2)
+        check("discovers the idlelib.run shell subprocess",
+              child_pid is not None, found if child_pid is None else child_pid)
+        if child_pid:
+            pane._kill_idle_tree(launcher, [child_pid])
+            dead = False
+            for _ in range(20):
+                try:
+                    with open("/proc/%d/stat" % child_pid, "rb") as f:
+                        stat = f.read()
+                    rp = stat.rfind(b")")
+                    if rp < 0 or stat[rp + 2:].split()[0] == b"Z":
+                        dead = True
+                        break
+                except OSError:
+                    dead = True
+                    break
+                time.sleep(0.25)
+            check("shell subprocess killed with the tree", dead,
+                  "dead" if dead else "still alive")
+    finally:
+        if child_pid:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except OSError:
+                pass
+        if launcher.poll() is None:
+            launcher.kill()
+    done()
 
 # ==================== run =====================================================
 

@@ -1,5 +1,7 @@
+import json
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -91,9 +93,9 @@ _style.configure("Touch.Treeview.Heading", font=F_UI)
 def touch_button(parent, text, command=None):
     """A reliably tall button. tk.Button (not ttk) so the height comes from the
     widget's own `height` option instead of ttk theme padding, which some
-    themes ignore."""
+    themes ignore. Raised + bordered so it visibly reads as a button."""
     return tk.Button(parent, text=text, font=F_ROW, height=2, pady=8,
-                     command=command, relief="flat", bd=0,
+                     command=command, relief="raised", bd=2,
                      highlightthickness=0, activebackground="#a0a0a0",
                      cursor="hand2")
 
@@ -336,13 +338,13 @@ class SingleTab(ttk.Frame):
         # columns, and no right pane.
         split = ttk.Frame(self.main_panel)
         split.pack(fill="both", expand=True)
-        self.file_list = TouchTree(split, columns=("size", "modified"),
-                                   show="tree headings", selectmode="extended",
+        self.file_list = TouchTree(split, columns=("name", "size", "modified"),
+                                   show="headings", selectmode="extended",
                                    style="Touch.Treeview")
-        self.file_list.heading("#0", text="Name", anchor="w")
+        self.file_list.heading("name", text="Name", anchor="w")
         self.file_list.heading("size", text="Size", anchor="e")
         self.file_list.heading("modified", text="Last modified", anchor="w")
-        self.file_list.column("#0", anchor="w", stretch=True)
+        self.file_list.column("name", anchor="w", stretch=True)
         self.file_list.column("size", width=110, minwidth=70, anchor="e", stretch=False)
         self.file_list.column("modified", width=190, minwidth=170, anchor="w", stretch=False)
         self.file_list.pack(side="left", fill="both", expand=True)
@@ -600,10 +602,14 @@ class SingleTab(ttk.Frame):
             reselect = []
             for e in entries:
                 if search_text in e["name"].lower():
-                    icon = "📁 " if e["is_dir"] else "📄 "
+                    # Glyphs that DejaVu Sans actually ships: the previous
+                    # emoji icons (📁/📄) are absent from the guest font and
+                    # render as missing-glyph boxes.
+                    icon = "\u25b8 " if e["is_dir"] else "\u2022 "  # ▸ folder, • file
                     iid = self.file_list.insert("", "end",
-                                                text=icon + e["name"],
-                                                values=(self._size_str(e),
+                                                text="",
+                                                values=(icon + e["name"],
+                                                        self._size_str(e),
                                                         self._mtime_str(e["mtime"])))
                     self.displayed_items.append(iid)
                     self.item_path[iid] = e["path"]
@@ -754,12 +760,19 @@ class SingleTab(ttk.Frame):
 
         IDLE is the only other full-screen app on this desktop. Opening a .py
         therefore withdraws the explorer — the whole screen is handed to IDLE —
-        and only restores it once IDLE has exited, reloading the folder so
-        anything IDLE created/edited/saved shows up."""
+        and only restores it once IDLE is gone, reloading the folder so
+        anything IDLE created/edited/saved shows up.
+
+        "IDLE is gone" is decided by the WINDOW tree, not the process: under
+        CheerpX closing IDLE can leave the idle3.10 process alive (it waits on
+        its Python-shell subprocess, which a running program like the snake game
+        keeps busy), so waiting on the process would never return. See
+        _wait_for_idle."""
         procs = []
         for path in paths:
             try:
-                procs.append(subprocess.Popen(["/usr/local/bin/idle3.10-launcher", path]))
+                procs.append(subprocess.Popen(["/usr/local/bin/idle3.10-launcher", path],
+                                              start_new_session=True))
             except Exception as e:
                 messagebox.showerror("Error", str(e))
         if not procs:
@@ -767,15 +780,139 @@ class SingleTab(ttk.Frame):
             return
         set_status(f"Opened {len(procs)} file(s) in IDLE")
         root.withdraw()
-        threading.Thread(target=self._wait_for_idle, args=(procs,), daemon=True).start()
+        threading.Thread(target=self._wait_for_idle, args=(procs, list(paths)), daemon=True).start()
 
-    def _wait_for_idle(self, procs):
-        for proc in procs:
-            try:
-                proc.wait()
-            except Exception:
-                pass
+    def _wait_for_idle(self, procs, paths):
+        # Never leave the explorer stuck: whatever happens (including watcher
+        # errors), always return to the file manager.
+        try:
+            self._watch_idle(procs, paths)
+        except Exception:
+            pass
         root.after(0, self._idle_finished)
+
+    def _watch_idle(self, procs, paths):
+        basenames = [os.path.basename(p) for p in paths]
+        # Phase 1: wait for IDLE to map its window (or exit on its own).
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if all(self._proc_exited(p) for p in procs):
+                return
+            if self._idle_window_open(basenames):
+                break
+            time.sleep(0.5)
+        # Phase 2: watch for the user closing IDLE. Closing the window (or the
+        # process exiting) ends the IDLE session even if the process lingers.
+        sub_pids = []
+        while True:
+            for proc in procs:
+                for pid in self._shell_subprocesses(proc):
+                    if pid not in sub_pids:
+                        sub_pids.append(pid)
+            if all(self._proc_exited(p) for p in procs):
+                break
+            if not self._idle_window_open(basenames):
+                break
+            time.sleep(0.5)
+        # IDLE is gone: kill everything it spawned (its Python-shell subprocess
+        # and any program running in it, e.g. the snake game) so no stray
+        # window outlives IDLE and blocks the return to the file manager.
+        for proc in procs:
+            self._kill_idle_tree(proc, sub_pids)
+
+    @staticmethod
+    def _proc_exited(proc):
+        try:
+            return proc.poll() is not None
+        except Exception:
+            return False
+
+    @staticmethod
+    def _idle_window_open(basenames):
+        """True while an IDLE window (editor/shell) is present in the i3 tree.
+        IDLE windows report class 'Toplevel' or a 'Python ... Shell' title, or
+        contain the opened file's name; a program window (e.g. the snake game's
+        plain Tk root, titled 'tk') does not match. On i3 failure, assume still
+        open so a transient error never kills IDLE prematurely."""
+        try:
+            out = subprocess.check_output(["i3-msg", "-t", "get_tree"],
+                                          stderr=subprocess.DEVNULL)
+            tree = json.loads(out)
+        except Exception:
+            return True
+        stack = [tree]
+        while stack:
+            node = stack.pop()
+            if node.get("window") is not None:
+                name = node.get("name") or ""
+                wp = node.get("window_properties") or {}
+                if wp.get("class") == "Toplevel" or "Python" in name:
+                    return True
+                for base in basenames:
+                    if base in name:
+                        return True
+            stack.extend(node.get("nodes") or ())
+            stack.extend(node.get("floating_nodes") or ())
+        return False
+
+    @staticmethod
+    def _shell_subprocesses(proc):
+        """PIDs of IDLE's Python-shell subprocess(es) — a direct child of the
+        launcher whose command line mentions idlelib.run. This is where
+        programs run (and where the game window lives)."""
+        pid = getattr(proc, "pid", None)
+        if not pid:
+            return []
+        out = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return []
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open("/proc/%s/stat" % entry, "rb") as f:
+                    stat = f.read()
+                rp = stat.rfind(b")")
+                if rp < 0:
+                    continue
+                ppid = int(stat[rp + 2:].split()[1])
+                if ppid != pid:
+                    continue
+                with open("/proc/%s/cmdline" % entry, "rb") as f:
+                    cmd = f.read()
+                if b"idlelib.run" in cmd:
+                    out.append(int(entry))
+            except (OSError, ValueError, IndexError):
+                continue
+        return out
+
+    @staticmethod
+    def _kill_idle_tree(proc, sub_pids):
+        """Kill the IDLE launcher and everything it spawned. CheerpX does not
+        implement killpg(), so kill by PID (the shell subprocesses we
+        discovered, then the launcher itself) and by parent id (pkill -P for
+        anything pkill can still see); killpg is kept as a POSIX fallback."""
+        pid = getattr(proc, "pid", None)
+        for target in list(sub_pids) + ([pid] if pid else []):
+            try:
+                os.kill(target, signal.SIGKILL)
+            except OSError:
+                pass
+        if pid:
+            for _ in range(3):
+                try:
+                    subprocess.run(["pkill", "-9", "-P", str(pid)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+                time.sleep(0.15)
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+
 
     def _idle_finished(self):
         # IDLE may have created/edited/saved files while the explorer was
