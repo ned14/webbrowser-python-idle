@@ -20,6 +20,8 @@ SHELL_SCRIPTS = [
     ROOT / "diskimage" / "sync" / "sync-home.sh",
     ROOT / "diskimage" / "rootfs" / "etc" / "local.d" / "desktop.start",
     ROOT / "diskimage" / "scripts" / "99-screen-resize.sh",
+    ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "open-file-explorer.sh",
+    ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "keep-file-explorer.sh",
     ROOT / "tests" / "rootfs" / "smoke.sh",
     ROOT / "tests" / "server" / "integration.sh",
     ROOT / "tests" / "server" / "join-test-client.sh",
@@ -27,6 +29,8 @@ SHELL_SCRIPTS = [
 
 PYTHON_SOURCES = [
     ROOT / "diskimage" / "sync" / "sync.py",
+    ROOT / "diskimage" / "scripts" / "file-explorer.py",
+    ROOT / "diskimage" / "scripts" / "file-explorer-tests.py",
     ROOT / "tests" / "fixtures" / "fake_webdav.py",
 ]
 

@@ -165,14 +165,25 @@ that this plan's self-hosted nginx makes unnecessary.
    image ships `main` only): `python3-tkinter` and `python3-idle` live in
    `community`. Note: tkinter/idle build against Python 3.10.11 while `main`
    ships `python3` 3.10.15 — a benign patch-level mismatch (same 3.10 ABI).
-3. **Apps:** `python3`, `python3-tkinter`, **IDLE** (the Alpine `python3-idle`
-   package ships `/usr/bin/idle3.10` + `idlelib` — there is no `idle3`
-   binary — and it hard-depends on `python3-tests`, an ~85 MiB install of the
-   CPython test suite; the Dockerfile therefore **extracts `idlelib` and
-   `idle3.10` from the package with `apk fetch` + `tar` instead of
-   `apk add python3-idle`** so the guest stays minimal, Step 2), `xterm`,
-   `pcmanfm`. **No display manager** (direct `su user -c startx` → i3; fallback
-   LightDM autologin). IDLE autostarts via i3 `exec --no-startup-id idle3.10`.
+ 3. **Apps:** `python3`, `python3-tkinter`, **IDLE** (the Alpine `python3-idle`
+    package ships `/usr/bin/idle3.10` + `idlelib` — there is no `idle3`
+    binary — and it hard-depends on `python3-tests`, an ~85 MiB install of the
+    CPython test suite; the Dockerfile therefore **extracts `idlelib` and
+    `idle3.10` from the package with `apk fetch` + `tar` instead of
+    `apk add python3-idle`** so the guest stays minimal, Step 2), `xterm`,
+    and **the file explorer** — a stdlib-only Tk app
+    (`diskimage/scripts/file-explorer.py`, installed as
+    `/usr/local/bin/file-explorer.py`). **No display manager** (direct
+    `su user -c startx` → i3; fallback LightDM autologin). **The file explorer
+    autostarts on the user's home directory** via i3
+    (`open-file-explorer.sh`, a guarded single-instance launcher); it replaces
+    the earlier pcmanfm/spacefm GTK file managers (which deadlocked under
+    CheerpX, §12/23, plans/display-bug.md §2.9). `.py` files open in IDLE via
+    `idle3.10-launcher` — "Open with IDLE" / double-click **withdraws the
+    explorer** (the whole screen is handed to IDLE) and only re-shows it once
+    IDLE exits, with the folder listing reloaded (§12/25). A keep-alive daemon
+    (`/usr/local/bin/keep-file-explorer.sh`, autostarted by i3) relaunches the
+    explorer whenever the last window closes, so the desktop never sits empty.
 4. **No guest internet:** enforced by design (no exit node, LAN-bound services,
    host firewall; the page makes **no** public-host requests — Tailscale logtail
    is blocked via CSP `connect-src`, §5) — see §5.
@@ -402,7 +413,7 @@ the write-triggered push, i.e. seconds). The IndexedDB overlay remains the
 live overlay, the backend is the durable copy. **The agent is a single
 process** started by `desktop.start` as `user` (`su user -c sync-home.sh …` —
 the boot pull and the push loop are one invocation, so they cannot race the
-lease or the manifest); i3 autostarts IDLE only. **The boot-pull is
+lease or the manifest); i3 autostarts the file manager only. **The boot-pull is
 best-effort: it runs as `user`, and X starts after the timeout regardless** (a
 misconfigured tailnet must not delay the desktop indefinitely). **X itself is
 also started as `user`** (`su user -c startx` in `desktop.start` — never as
@@ -645,8 +656,9 @@ webvm-custom/
 ├─ diskimage/
 │  ├─ Dockerfile            # i386 Alpine guest (ARG STORAGE_BACKEND selects agent;
 │  │                        # ARG SAMBA_*/SYNC_* render /root/.syncrc)
+│  ├─ python-examples/      # curriculum scripts baked READ-ONLY into ~/python-examples
 │  ├─ scripts/99-screen-resize.sh
-│  ├─ config/               # xinitrc, i3 config (IDLE autostart), .Xresources
+│  ├─ config/               # xinitrc, i3 config (file-manager autostart), .Xresources
 │  ├─ sync/                 # sync.py per backend (samba/webdav) + sync-home.sh
 │  │                        # (not built for browser/none)
 │  ├─ rootfs/root/.syncrc   # backend endpoint + credentials; rendered at build
@@ -845,18 +857,19 @@ needs the package installed.)
   `<gateway-tailnet-IP>:2222`. No DNS in the guest (use IPs or `/etc/hosts`).
 - No display manager (saves ~30–50 MB vs LightDM + GTK greeter; autologin is
   implicit — nothing here needs a login screen). Consequences handled manually:
-  `99-screen-resize.sh` → `/etc/X11/xinit/xinitrc.d/`; `config/xinitrc` →
-  `/home/user/.xinitrc` (`exec i3`); `config/i3` → `/home/user/.config/i3`
-  (autostart `idle3.10`, `$mod+Return`→xterm,
-  `$mod+Shift+f`→pcmanfm); optional `.Xresources`; keyboard layout via
-  `setxkbmap` in `.xinitrc`. (The sync agent is a **single process started by
-  `desktop.start`** — not an i3 autostart — so the boot pull and the push loop
-  cannot race, §4.)
+   `99-screen-resize.sh` → `/etc/X11/xinit/xinitrc.d/`; `config/xinitrc` →
+   `/home/user/.xinitrc` (`exec i3`); `config/i3` → `/home/user/.config/i3`
+   (autostart `open-file-explorer.sh`, `$mod+Return`→xterm,
+   `$mod+Shift+f`→`open-file-explorer.sh`); optional `.Xresources`; keyboard
+   layout via
+   `setxkbmap` in `.xinitrc`. (The sync agent is a **single process started by
+   `desktop.start`** — not an i3 autostart — so the boot pull and the push loop
+   cannot race, §4.)
 - X bootstrap without a seat manager: rely on udev + group membership
   (`video`/`input`/`tty`, added above) for the emulated DRM/input devices;
   create `XDG_RUNTIME_DIR=/run/user/1000` (owned by `user`, plus optional dbus
-  session) in `/etc/local.d/desktop.start` so GTK apps (pcmanfm trash/mounts/
-  thumbnails) behave. **Enable the openrc `local` service**
+  session) in `/etc/local.d/desktop.start` so the Tk apps (file explorer, IDLE)
+  behave. **Enable the openrc `local` service**
   (`rc-update add local default`) so `/etc/local.d/*.start` actually runs.
 - Boot to X: `/etc/local.d/desktop.start` starts X **as the `user` account**
   (`su user -c startx` — never as root: Xorg refuses root, and i3's autostarts
@@ -1249,8 +1262,9 @@ or build-time dependency beyond the pinned npm packages.
 (the private CA must be trusted in the browser once — single-machine and LAN
 use share this single trust step; no plain-HTTP path exists) **with no
 `authKey`/`controlUrl` params** (a disconnected session — no tailnet at all),
-confirm the desktop boots, IDLE autostarts, and a file in `~/` survives a
-reload (`browser` mode) or does not (`none` mode). **Never add `#authKey=…`
+confirm the desktop boots to the file manager on `~/` (IDLE opens on demand),
+and a file in `~/` survives a reload (`browser` mode) or does not (`none`
+mode). **Never add `#authKey=…`
 without a `controlUrl`:** WebVM then auto-registers with *Tailscale's public
 control server*, which is both an internet egress attempt and a tailnet-join
 you do not control.
@@ -1556,14 +1570,20 @@ runner):
   - `python3 -c "import tkinter, idlelib"` succeeds; **`/usr/bin/idle3.10`
     exists** (there is no `idle3`; skip a display-dependent `idle3.10 --help`
     check — the E2E covers a real IDLE launch).
-  - `command -v xterm pcmanfm i3 git ssh nc` present (the samba sync agent —
-    `python3 -c "import pysmb"` — in samba mode; `nc` comes from the base
+  - `command -v xterm i3 git ssh nc` present and **`pcmanfm`/`spacefm` absent**
+    (replaced by the Tk file explorer, §12/25; `nc` comes from the base
     busybox, not `busybox-extras`).
   - **curriculum packages are absent:** `python3 -c "import numpy"` and
     `import requests` and `import pytest` each fail (guards against
     re-adding the removed packages); `python3 -c "import pip"` succeeds.
-  - i3 config autostarts `idle3.10`; `~user/.xinitrc` execs i3; the sync agent
-    is a single process started by `desktop.start` (samba/webdav builds).
+  - i3 config autostarts `open-file-explorer.sh` (the file explorer) and
+    `keep-file-explorer.sh` (the keep-alive); `~user/.xinitrc` execs i3; the
+    sync agent is a single process started by `desktop.start` (samba/webdav
+    builds).
+  - **In-guest GUI suite:** `tests/rootfs/smoke.sh` runs the full
+    `file-explorer-tests.py` suite (every explorer function, including the
+    withdraw→IDLE→reappear flow) under an in-image `Xvfb` on `DISPLAY=:99` and
+    requires a `PASS ALL` result.
   - `/sbin/init`, the openrc `local` service (enabled via `rc-update add
     local default`), and `/etc/local.d/desktop.start` (`sh -n` valid; starts X
     via `su user -c startx`); `/etc/X11/xinit/xinitrc.d/99-screen-resize.sh`
@@ -1663,7 +1683,9 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
    never carries `#authKey` without a matching `controlUrl` (that would
    auto-register with public Tailscale).
 3. TLS/control: guest shows CONNECTED with a tailnet IP over WSS.
-4. Desktop: IDLE auto-opens; xterm + pcmanfm launch; canvas resize works.
+4. Desktop: the file manager auto-opens on `~/`; xterm + pcmanfm launch; a
+   new `.py` can be created (File ▸ Create New) and opened in IDLE; closing
+   the last window relaunches the file manager; canvas resize works.
 5. **Storage sync (per backend):**
    - Samba: from the guest connect to `//<gateway-tailnet-IP>/<share>`; push a
      file and verify it on the server (also browsable from the host).
@@ -1821,8 +1843,9 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     is baked in (§3/10, Step 2).
 18. **IDLE provisioning (revised):** `idlelib` + `/usr/bin/idle3.10` are
     **extracted from the `python3-idle` package** (`apk fetch` + `tar`) to skip
-    the 85 MiB `python3-tests` dependency; autostart, rootfs tests and
-    acceptance use `idle3.10` (Step 2).
+    the 85 MiB `python3-tests` dependency; IDLE is launched on demand from the
+    file manager (Step 2) — rootfs tests and acceptance use `idle3.10` and the
+    `idle3.10-launcher`.
 19. **Control-plane hostname:** `CONTROL_HOST` (default `host.docker.internal`;
     `<LAN_IP>` for LAN use) is the single value rendered into headscale
     `server_url`, the URL-hash `controlUrl`, the gateway's `--login-server`,
@@ -1936,6 +1959,92 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
       `xinitrc.d`, so the screen-resize hook is sourced from `~/.xinitrc`;
       and i3 runs under `dbus-run-session` so GTK apps (IDLE, pcmanfm) get a
       per-session D-Bus.
+
+23. **File-manager-first desktop (implementation change, 2026-08-13):** the
+    autostarted desktop client is now **pcmanfm** (`exec --no-startup-id
+    pcmanfm /home/user` in `config/i3/config`) instead of IDLE; IDLE is
+    launched on demand from the file manager. Wire-up: new `.py` files are
+    created via *File ▸ Create New* from a `~/Templates/Python Script.py`
+    template; `.py` files open in IDLE on double-click via
+    `~/.config/mimeapps.list` → `~/.local/share/applications/idle3.10.desktop`
+    (both exec the `idle3.10-launcher`), and via the right-click *Open with
+    IDLE* custom action (`~/.local/share/file-manager/actions/
+    open-with-idle.desktop`, `MimeTypes=text/x-python`). `shared-mime-info` is
+    added to the guest so `.py` MIME detection works. IDLE's
+    `-n`-conditional launcher is unchanged and is the entry point for every
+    IDLE launch. Updated: `diskimage/config/i3/config`, `diskimage/Dockerfile`,
+    new files under `diskimage/rootfs/home/user/`, `tests/rootfs/smoke.sh`,
+    `tests/e2e/tests/desktop.spec.js`.
+    **Keep-alive (added 2026-08-13):** a pcmanfm keep-alive daemon
+    (`diskimage/rootfs/usr/local/bin/keep-file-manager.sh`, autostarted by i3)
+    polls the i3 layout tree (`i3-msg -t get_tree`) and relaunches
+    `pcmanfm /home/user` whenever the number of real windows drops to zero, so
+    the desktop never ends up with nothing open. Only leaf `con` nodes with a
+    window id count (containers/bar are ignored); i3-msg failures are
+    fail-safe (no relaunch).
+    **SUPERSEDED (2026-08-14):** pcmanfm is replaced by the Tk file explorer
+    (§12/25); the keep-alive became `keep-file-explorer.sh` and the pcmanfm
+    integration files/mimeapps/template were removed.
+
+24. **Baked-in Python examples (added 2026-08-13):** the `python-examples/`
+    directory (moved from the repo root into `diskimage/`, so it is in the
+    Docker build context) is copied to `/home/user/python-examples/` at image
+    build time and made **read-only in the image** (`chmod 0555` dir / `0444`
+    files, owned by `user` — the guest FS refuses writes even through the
+    IndexedDB overlay). They are reference material to copy, never to edit in
+    place. `diskimage/python-examples` is added to `build.sh`'s content
+    fingerprint, so example-content changes rebuild a fresh overlay. Updated:
+    `diskimage/Dockerfile`, `build.sh`, `tests/rootfs/smoke.sh`.
+
+25. **Tk file explorer replaces pcmanfm/spacefm (implementation change,
+    2026-08-14):** the GTK file managers are gone from the image. The desktop
+    client is now `diskimage/scripts/file-explorer.py` — a stdlib-only
+    (`tkinter`) app with a touch pointer model (tap/long-press), search/sort,
+    clipboard, zip, rename, move, delete and folder-size columns, written
+    because pcmanfm/spacefm (GTK3 + libfm) still carried a startup
+    deadlock/stall burden under CheerpX even after §2.9's shims. Installed as
+    `/usr/local/bin/file-explorer.py` (+ sibling `file-explorer-tests.py`),
+    autostarted by i3 via the guarded single-instance launcher
+    `/usr/local/bin/open-file-explorer.sh`; `keep-file-manager.sh` became
+    `keep-file-explorer.sh` (same i3-tree polling, plus a "relaunch only when
+    no explorer process exists" guard so a withdrawn explorer is never
+    doubled). Removed from the image: the `pcmanfm`/`spacefm`/`shared-mime-info`
+    packages, the pcmanfm/libfm instrumentation and the whole `/trace`
+    diagnostic tree (the Tcl/Tk `libtcl8.6.so.patched` fix stays), the
+    `mimeapps.list`/`idle3.10.desktop`/`open-with-idle.desktop`/`~/Templates`
+    pcmanfm integration, and the `/proc/self/mountinfo` stub in
+    `desktop.start`. A starter `/home/user/hello.py` is baked in so a new user
+    (and the E2E suite) can double-click into IDLE immediately.
+    **Screen replacement:** "Open with IDLE" (or double-clicking a `.py`)
+    launches `idle3.10-launcher` per file and then **withdraws the explorer
+    window** — the whole screen is IDLE's. A watcher thread waits on the IDLE
+    processes; when they all exit it reloads the current folder and
+    `deiconify()`s the explorer, so anything IDLE created/edited/saved shows
+    up. Closing the explorer (WM close, or the Ctrl+W shortcut added for it)
+    exits the process and the keep-alive relaunches it. **Touch model
+    hardening (2026-08-14):** the release handler no longer drops clicks whose
+    release arrives between the old tap and long-press thresholds (CheerpX can
+    delay synthetic button releases), and the long-press hold was raised from
+    600 ms to 1500 ms so a delayed release still registers as a tap instead of
+    firing a spurious context menu. **Testing:** `file-explorer-tests.py` was
+    extended to cover every function (sorts, wheel scroll, breadcrumbs, go
+    up/to-path, text sniffing, rename/create/delete/batch-rename, zip/unzip,
+    status bar, the real open_selected dir/.py/.txt paths, the late-release
+    tap, the Ctrl+O/Ctrl+W shortcuts, and the withdraw→IDLE→reappear flow —
+    98 checks) and now runs **inside the guest** as part of
+    `tests/rootfs/smoke.sh` under an in-image Xvfb (`xvfb` package added for
+    this); the same smoke block runs a REAL IDLE launch and boots i3 under
+    Xvfb to verify the keep-alive relaunches a killed explorer; `tests/unit`
+    and CI shellcheck cover the new scripts. The E2E
+    (`tests/e2e/tests/desktop.spec.js`) asserts the real-browser boot: no
+    login prompt, no boot hang, and the explorer filling the canvas — synthetic
+    input into the guest is not driven there because CheerpX's delayed
+    release/Meta-key quirks make it non-deterministic (input behaviour is
+    covered by the in-guest suites instead). Updated:
+    `diskimage/Dockerfile`, `diskimage/config/i3/config`,
+    `diskimage/config/xinitrc`, `diskimage/rootfs/etc/local.d/desktop.start`,
+    `tests/rootfs/smoke.sh`, `tests/unit/test_scripts.py`,
+    `.github/workflows/ci.yml`, `tests/e2e/tests/desktop.spec.js`.
 
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path

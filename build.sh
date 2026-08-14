@@ -141,8 +141,9 @@ fi
 FINGERPRINT_INPUT=$( \
 	cat diskimage/Dockerfile; \
 	find diskimage/rootfs diskimage/config diskimage/scripts diskimage/sync diskimage/trace \
+		diskimage/python-examples \
 		-type f -not -path '*/.git/*' -not -name '*.pyc' -not -path '*/__pycache__/*' \
-		-not -path '*/rootfs/home/user/.ssh/*' -print 2>/dev/null | sort | xargs cat; \
+		-not -path '*/rootfs/home/user/.ssh/*' -print0 2>/dev/null | sort -z | xargs -0 cat; \
 	echo "$STORAGE_BACKEND"; \
 	echo "SYNC_URL=$SYNC_URL_EFF SYNC_USER=$SYNC_USER_EFF SYNC_PASS=$SYNC_PASS_EFF"; \
 	echo "SAMBA_HOST=$SAMBA_HOST_EFF SAMBA_SHARE=$SAMBA_SHARE_EFF SAMBA_USER=$SAMBA_USER_EFF SAMBA_PASS=$SAMBA_PASS_EFF" \

@@ -17,7 +17,7 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	[ -x /usr/bin/idle3.10 ] || { echo "FAIL: /usr/bin/idle3.10 missing" >&2; exit 1; }
 
 	# Core binaries (nc comes from the base busybox)
-	for cmd in xterm pcmanfm i3 git ssh nc pip3; do
+	for cmd in xterm i3 git ssh nc pip3; do
 		command -v "$cmd" >/dev/null || { echo "FAIL: $cmd missing" >&2; exit 1; }
 	done
 
@@ -34,7 +34,32 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	[ -x /etc/local.d/desktop.start ] || { echo "FAIL: desktop.start missing" >&2; exit 1; }
 	[ -x /etc/X11/xinit/xinitrc.d/99-screen-resize.sh ] || { echo "FAIL: screen-resize missing" >&2; exit 1; }
 	grep -q "dbus-run-session -- i3" /home/user/.xinitrc || { echo "FAIL: .xinitrc does not exec i3 under a session bus" >&2; exit 1; }
-	grep -q "exec --no-startup-id idle3.10" /home/user/.config/i3/config || { echo "FAIL: i3 does not autostart idle" >&2; exit 1; }
+	grep -q "open-file-explorer.sh" /home/user/.config/i3/config || { echo "FAIL: i3 does not autostart the file explorer" >&2; exit 1; }
+	# Keep-alive: the explorer is relaunched when the last window closes
+	[ -x /usr/local/bin/keep-file-explorer.sh ] || { echo "FAIL: keep-file-explorer.sh missing" >&2; exit 1; }
+	grep -q "keep-file-explorer.sh" /home/user/.config/i3/config || { echo "FAIL: i3 does not autostart the keep-alive daemon" >&2; exit 1; }
+	# File explorer -> IDLE integration: the explorer launches IDLE for .py
+	# files and replaces itself on screen until IDLE exits.
+	[ -f /usr/local/bin/file-explorer.py ] || { echo "FAIL: file-explorer.py missing" >&2; exit 1; }
+	[ -f /usr/local/bin/file-explorer-tests.py ] || { echo "FAIL: file-explorer-tests.py missing" >&2; exit 1; }
+	[ -x /usr/local/bin/open-file-explorer.sh ] || { echo "FAIL: open-file-explorer.sh missing" >&2; exit 1; }
+	grep -q "idle3.10-launcher" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not launch IDLE" >&2; exit 1; }
+	grep -q "root.withdraw()" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not yield the screen to IDLE" >&2; exit 1; }
+	grep -q "root.deiconify()" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not reappear after IDLE" >&2; exit 1; }
+	grep -q "load_folder(self.current_path)" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not refresh after IDLE" >&2; exit 1; }
+	[ -x /usr/local/bin/idle3.10-launcher ] || { echo "FAIL: idle3.10-launcher missing" >&2; exit 1; }
+	# The starter .py that doubles as the E2E IDLE-swap target
+	[ -f /home/user/hello.py ] || { echo "FAIL: ~/hello.py missing" >&2; exit 1; }
+	# The replaced GTK file managers must be GONE (deps no longer installed)
+	command -v pcmanfm >/dev/null && { echo "FAIL: pcmanfm still installed" >&2; exit 1; }
+	command -v spacefm >/dev/null && { echo "FAIL: spacefm still installed" >&2; exit 1; }
+	# Curriculum examples baked into ~/ and read-only (dir 0555, files 0444).
+	# Check the mode bits, not -w: the smoke run is root, and root access
+	# bypasses write permission, so a -w test would falsely pass.
+	[ -d /home/user/python-examples ] || { echo "FAIL: ~/python-examples missing" >&2; exit 1; }
+	[ -f /home/user/python-examples/snake-game.py ] || { echo "FAIL: ~/python-examples/snake-game.py missing" >&2; exit 1; }
+	[ "$(stat -c %a /home/user/python-examples)" = "555" ] || { echo "FAIL: ~/python-examples not read-only (555)" >&2; exit 1; }
+	[ "$(stat -c %a /home/user/python-examples/snake-game.py)" = "444" ] || { echo "FAIL: example file not read-only (444)" >&2; exit 1; }
 	grep -q "Xorg :0" /etc/local.d/desktop.start || { echo "FAIL: desktop.start does not launch Xorg" >&2; exit 1; }
 	grep -q "sh /home/user/.xinitrc" /etc/local.d/desktop.start || { echo "FAIL: desktop.start does not run the user session" >&2; exit 1; }
 	[ -f /etc/runlevels/default/local ] || { echo "FAIL: openrc local service not enabled" >&2; exit 1; }
@@ -49,6 +74,71 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 
 	# Backend marker
 	[ "$(cat /etc/webvm-backend)" = "$BACKEND" ] || { echo "FAIL: backend marker mismatch" >&2; exit 1; }
+'
+
+echo "==> rootfs GUI tests (file explorer, in-image Xvfb)"
+
+docker run --rm --platform=linux/i386 --entrypoint /bin/sh "$IMAGE" -c '
+	set -e
+	# Run the full file-explorer test suite inside the guest, against an Xvfb
+	# display (the same X/Tk stack the desktop uses, minus the CheerpX canvas).
+	Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+	XPID=$!
+	sleep 1
+	RESULT=0
+	timeout 600 env DISPLAY=:99 python3 /usr/local/bin/file-explorer-tests.py \
+		>/tmp/fe-tests.log 2>&1 || RESULT=$?
+	kill "$XPID" 2>/dev/null || true
+	cat /tmp/fe-tests.log
+	[ "$RESULT" = "0" ] || { echo "FAIL: file-explorer tests exited $RESULT" >&2; exit 1; }
+	grep -q "PASS ALL" /tmp/fe-tests.log || { echo "FAIL: file-explorer tests did not report PASS ALL" >&2; exit 1; }
+
+	# A REAL IDLE launch (the explorer Popen target) works under X: start
+	# the launcher on hello.py and verify the IDLE process stays running.
+	Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb2.log 2>&1 &
+	XPID2=$!
+	sleep 1
+	timeout 60 env DISPLAY=:99 /usr/local/bin/idle3.10-launcher /home/user/hello.py \
+		>/tmp/idle.log 2>&1 &
+	IDLEPID=$!
+	sleep 6
+	if kill -0 "$IDLEPID" 2>/dev/null; then
+		echo "IDLE launched and stayed running"
+		pkill -f idle3.10 2>/dev/null || true
+	else
+		echo "FAIL: IDLE exited early (log below)" >&2
+		cat /tmp/idle.log >&2 || true
+		kill "$XPID2" 2>/dev/null || true
+		exit 1
+	fi
+	kill "$XPID2" 2>/dev/null || true
+
+	# The keep-alive daemon relaunches the explorer when it dies: run i3 with
+	# the real config (autostarts the explorer + keep-alive), kill the explorer
+	# process, and verify the keep-alive brings it back.
+	Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb3.log 2>&1 &
+	XPID3=$!
+	sleep 1
+	export DISPLAY=:99
+	i3 -c /home/user/.config/i3/config >/tmp/i3.log 2>&1 &
+	I3PID=$!
+	sleep 4
+	if ! pgrep -f "file-explorer.py" >/dev/null 2>&1; then
+		echo "FAIL: explorer did not start under i3 (i3 log tail below)" >&2
+		tail -n 20 /tmp/i3.log >&2 || true
+		kill "$I3PID" "$XPID3" 2>/dev/null || true
+		exit 1
+	fi
+	pkill -9 -f "file-explorer.py"
+	ALIVE=0
+	for _i in 1 2 3 4 5 6 7 8 9 10; do
+		sleep 2
+		if pgrep -f "file-explorer.py" >/dev/null 2>&1; then ALIVE=1; break; fi
+	done
+	[ "$ALIVE" = "1" ] || { echo "FAIL: keep-alive did not relaunch the explorer" >&2; exit 1; }
+	echo "keep-alive relaunched the explorer"
+	kill "$I3PID" 2>/dev/null || true
+	kill "$XPID3" 2>/dev/null || true
 '
 
 if [ "$BACKEND" = "samba" ] || [ "$BACKEND" = "webdav" ]; then

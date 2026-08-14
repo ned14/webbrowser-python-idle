@@ -450,6 +450,90 @@ is enabled** (tailnet controlUrl set, samba/webdav/any net-capable guest) —
 IDLE then runs normally with its subprocess. The E2E desktop test passes
 (keyboard AND mouse menu interaction) in the no-networking browser mode.
 
+## 2.9 PARTIAL — the GTK3 file manager (pcmanfm) desktop (DONE 2026-08-13)
+
+> **SUPERSEDED (2026-08-14):** pcmanfm/spacefm and every §2.9 shim
+> (setsockopt-fix.so, the instrumented libfm, the instrumented pcmanfm, the
+> `/trace` diagnostics, the `/proc/self/mountinfo` stub) are removed from the
+> image. The desktop client is now the stdlib-only Tk **file explorer**
+> (`diskimage/scripts/file-explorer.py`), which never touches GTK/GIO/dconf —
+> the whole deadlock class this section documents is gone with it (see
+> `plans/webvm_implementation.md` §12/25). The Tcl/Tk `libtcl8.6.so.patched`
+> fix (§2.8) remains, as the explorer and IDLE are both Tk apps.
+
+**Status (historical): pcmanfm now boots and maps its window a large fraction of the time
+(was: never — black canvas). A flaky, timing-dependent startup race remains
+(see below).** The desktop client was switched from IDLE to the file manager
+(pcmanfm, GTK3 + libfm), per the product plan. pcmanfm's startup under CheerpX
+was a sequence of deadlocks, found one by one:
+
+### 2.9.1 `setsockopt(SO_REUSEADDR)` fatal exit — FIXED (shim)
+
+pcmanfm's single-instance setup (`single-inst.c` `single_inst_init`) calls
+`setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, ...)` on a fresh AF_UNIX socket and
+treats ANY failure as fatal (`if(ret || bind(...) == -1) return
+SINGLE_INST_ERROR;` → `main()` exits 1). CheerpX rejects that call on AF_UNIX,
+so pcmanfm exited 1 before mapping any window; the keep-alive relaunched it
+forever → black desktop. **Fix: `diskimage/trace/setsockopt-fix.so`**
+(LD_PRELOAD interposer) returns success for a failed `SO_REUSEADDR` — a no-op
+hint on AF_UNIX. Preloaded into pcmanfm at every launch site (i3 autostart,
+keybinding, keep-file-manager).
+
+### 2.9.2 Deadlock inside `g_file_monitor_directory` — FIXED (custom libfm)
+
+With the setsockopt shim, pcmanfm stalled (no syscalls; futex) inside libfm's
+`fm_monitor_directory` — the GIO `g_file_monitor_directory` call — while the
+main thread held libfm's global `hash` lock. **In isolation the same call
+works** (probe-verified with/without GTK, with/without a held mutex,
+inotify on/off), but in the full app it hangs. GIO file watching is a
+non-essential convenience. **Fix: custom libfm 1.3.2 built from source**
+(`diskimage/trace/libfm.so.4.1.3.instrumented`), with `fm_monitor_directory`
+returning libfm's existing **dummy monitor** (no events) for every path —
+`G_FILE_MONITOR_*` GIO call completely bypassed. Folder views no longer
+auto-refresh (F5 reloads).
+
+### 2.9.3 Deadlock in GIO filesystem-info queries — FIXED (custom libfm)
+
+After the monitor fix, pcmanfm stalled while reading the mount table
+(`/etc/mtab`, `/proc/self/mountinfo`) inside
+`g_file_query_filesystem_info`. Two call sites were the culprits:
+- `_fm_file_info_set_from_native_file` — sync `FILESYSTEM_READONLY` query for
+  every directory file-info (removed; directories assumed writable).
+- `fm_folder_query_filesystem_info` — async `FILESYSTEM_SIZE/FREE` query
+  (disabled; the status bar shows no free-space figure).
+The read-only flag and free-space display are cosmetic; removed in the custom
+libfm. `statvfs` itself works under CheerpX (probe-verified) — the hang was in
+the mount-table machinery around it, not the syscall.
+
+### 2.9.4 Remaining: flaky startup race (NOT yet fixed)
+
+pcmanfm now boots and fills the canvas a good fraction of the time, but a
+timing-dependent deadlock remains in `fm_main_win_init` / early
+`pcmanfm_run`: it sometimes stalls (futex, no syscalls) right after GTK icon
+theme loading, before the main window maps — in production (no at-spi, no
+dconf via `GSETTINGS_BACKEND=memory`) with NO worker thread visibly active.
+`pkill -9` cannot recover it (CheerpX signal delivery to a futex-stuck process
+fails, as in the §2.7 Tk hang). Suspects investigated and ruled out: inotify
+GSource (`inotify-off.so` forced GIO polling — no effect), atk-bridge
+(`NO_AT_BRIDGE=1` — no effect), dconf/GDBusWorker
+(`GSETTINGS_BACKEND=memory` — no effect), the thread-pool dir-list job
+(running it synchronously — no effect), volume monitor (`fm-places-model`
+skips `g_volume_monitor_get()` — not reached at the stall point). The
+`keep-file-manager.sh` now force-kills and relaunches a windowless pcmanfm
+after 30 s as a self-heal (helps only when the stall is killable).
+
+**Repo state:** custom libfm (`libfm.so.4.1.3` + `libfm-gtk3.so.4.1.3`
+built from libfm 1.3.2 source with the §2.9.2/2.9.3 fixes and LIBFM-MARKER
+instrumentation) and custom pcmanfm (`pcmanfm.instrumented`, from 1.3.2 source
+with PCMANFM-MARKER instrumentation) override the apk binaries via the
+Dockerfile. Remove the marker instrumentation for a clean production build
+(the fixes themselves are in the same source). Diagnostic probes shipped in
+`diskimage/trace/`: `setsockopt-fix.so` (fix), `inotify-off.so`,
+`inotify-probe`, `glib-probe`, `gtk-hello`, `gtksync-probe`, `icon-probe`,
+`gtkmonitor-probe`, `statvfs-probe`, `fmgtk-probe` (dlsym-based, needs
+exported symbols so unbuilt), `trace-run.sh` verify-* modes. `run-mode`
+default is `both`.
+
 ## 3. E2E implication
 
 **CLOSED — IDLE works.** `tests/e2e/tests/desktop.spec.js` passes in the
@@ -537,9 +621,13 @@ run-mode-based autostart (`diskimage/trace/trace-run.sh`, `run-mode` =
 - `diskimage/trace/libtcl8.6.so.patched` — the built patched library;
   `diskimage/Dockerfile` overrides `/usr/lib/libtcl8.6.so` with it after
   `apk add`.
-- `diskimage/config/i3/config` autostarts **`/usr/local/bin/idle3.10-launcher`**
-  (applies IDLE's `-n` only when loopback TCP is unavailable; restored from
-  the `/trace/trace-run.sh` diagnosis autostart).
+- `diskimage/config/i3/config` autostarts **`/usr/local/bin/open-file-explorer.sh`**
+  (the stdlib Tk **file explorer** on the user's home; the launcher guards
+  against a second instance) plus **`/usr/local/bin/keep-file-explorer.sh`**
+  (relaunches it whenever the last window closes). IDLE is launched on demand
+  from the explorer — *Open with IDLE* / double-click a `.py` launches
+  **`/usr/local/bin/idle3.10-launcher`** and **withdraws the explorer** for the
+  duration (it reappears, listing refreshed, when IDLE exits).
 - `diskimage/rootfs/usr/local/bin/idle3.10-launcher` — conditional IDLE
   launcher (probes `socket.bind("127.0.0.1")`; `-n` iff bind fails).
 - `build.sh`'s content fingerprint includes `diskimage/trace/`.
@@ -554,7 +642,7 @@ run-mode-based autostart (`diskimage/trace/trace-run.sh`, `run-mode` =
   `/trace/xsync-fix.so` (from `python-tkinter/xsync-fix.c`), and
   `/trace/noxim.xresources` (`*useXIM: false`).
 - Guest fingerprint at last clean build: `a4f50aa00898` (browser, default
-  `run-mode=both`, patched libtcl8.6.so, IDLE launcher autostart).
+  `run-mode=both`, patched libtcl8.6.so, file-manager autostart).
 - `reference_images/alpine_20251007.ext2` (1.5 GB) kept for re-inspection;
   safe to gitignore.
 

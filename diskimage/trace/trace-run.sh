@@ -85,6 +85,115 @@ echo "TRACE-RUN-START mode=$MODE" >/dev/console
 		echo "TRACE-PROBE-RC=$?" >/dev/console
 		echo "===END-PROBE===" >/dev/console
 		;;
+	inotify-probe)
+		# Direct-libc probe of the operations libfm does right where pcmanfm
+		# stalls (plans/display-bug.md §2.9): inotify_init1 (GIO file
+		# monitor), pthread_create (async dir-list job), readdir. A call that
+		# prints ENTER but never RET is the hang. No LD_PRELOAD: must reflect
+		# plain guest libc/runtime behaviour.
+		echo "===BEGIN-PROBE===" >/dev/console
+		/trace/inotify-probe >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-INOTIFY-RC=$?" >/dev/console
+		echo "===END-PROBE===" >/dev/console
+		;;
+	glib-probe)
+		# GLib/GIO probe of the machinery libfm uses right where pcmanfm
+		# stalls (§2.9): g_thread_new (async dir-list job), GIO directory
+		# monitor, GIO directory enumeration. The raw syscalls behind these
+		# all work (inotify-probe), so the blocker is one level up in GLib.
+		echo "===BEGIN-PROBE===" >/dev/console
+		/trace/glib-probe >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-GLIB-RC=$?" >/dev/console
+		echo "===END-PROBE===" >/dev/console
+		;;
+	verify-gtk)
+		# Minimal GTK2 app test: does ANY GTK app work under CheerpX? pcmanfm
+		# stalls in libfm's async-job machinery (§2.9); if a bare GTK window +
+		# gtk_main() works (canvas fills), the blocker is libfm-specific, not
+		# GTK. The window keeps running; the page-side capture bounds it.
+		echo "===BEGIN-GTK===" >/dev/console
+		export DISPLAY=:0
+		export HOME=/home/user
+		export XDG_RUNTIME_DIR=/run/user/1000
+		/trace/gtk-hello >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-GTK-RC=$?" >/dev/console
+		echo "===END-GTK===" >/dev/console
+		;;
+	verify-gtksync)
+		# GTK-from-worker-thread test: pcmanfm's libfm async jobs run in a
+		# GLib thread pool and their "finished" handler touches GTK in the
+		# worker thread. Bare GTK works and bare threads work; this tests the
+		# COMBINATION (GTK active + worker thread calling GTK). The main
+		# thread pumps gtk_main; the worker should print its markers.
+		echo "===BEGIN-GTKSYNC===" >/dev/console
+		export DISPLAY=:0
+		export HOME=/home/user
+		export XDG_RUNTIME_DIR=/run/user/1000
+		/trace/gtksync-probe >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-GTKSYNC-RC=$?" >/dev/console
+		echo "===END-GTKSYNC===" >/dev/console
+		;;
+	verify-spacefm)
+		# spacefm (the GTK3 file-manager desktop client candidate) also fails
+		# to map a window under CheerpX (§2.9). Trace it under the libc
+		# syscall logger + X11 ENTRY logger + the setsockopt shim to find
+		# where it stalls.
+		echo "===BEGIN-VERIFY===" >/dev/console
+		export DISPLAY=:0
+		export HOME=/home/user
+		export XDG_RUNTIME_DIR=/run/user/1000
+		export NO_AT_BRIDGE=1
+		LD_PRELOAD=/trace/setsockopt-fix.so:/trace/syscall-logger.so:/trace/xcall-logger-entry.so \
+			spacefm >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-SPACEFM-RC=$?" >/dev/console
+		echo "===END-VERIFY===" >/dev/console
+		;;
+	verify-icon)
+		# Stock-icon loading test: pcmanfm AND spacefm both stall right after
+		# GTK loads stock icons for their menu bars (§2.9). gtk-hello (no
+		# icons) works; this builds a window with a menu bar of stock icons
+		# to see if icon loading itself stalls.
+		echo "===BEGIN-VERIFY===" >/dev/console
+		export DISPLAY=:0
+		export HOME=/home/user
+		export XDG_RUNTIME_DIR=/run/user/1000
+		/trace/icon-probe >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-ICON-RC=$?" >/dev/console
+		echo "===END-VERIFY===" >/dev/console
+		;;
+	verify-gtkmonitor)
+		# g_file_monitor_directory isolation test: with GTK active, does the
+		# GIO monitor call hang (pcmanfm stalls inside fm_monitor_directory,
+		# libfm's wrapper for this call, §2.9)? Tests with and without a
+		# held GMutex.
+		echo "===BEGIN-VERIFY===" >/dev/console
+		export DISPLAY=:0
+		export HOME=/home/user
+		export XDG_RUNTIME_DIR=/run/user/1000
+		/trace/gtkmonitor-probe >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-GTKMONITOR-RC=$?" >/dev/console
+		echo "===END-VERIFY===" >/dev/console
+		;;
+	verify-statvfs)
+		# statvfs/fstatvfs test: pcmanfm stalls right after reading the mount
+		# table, i.e. inside GIO's g_file_query_filesystem_info which calls
+		# statvfs (§2.9). statvfs is not interposed by the syscall logger, so
+		# a hang there is invisible.
+		echo "===BEGIN-VERIFY===" >/dev/console
+		export DISPLAY=:0
+		export HOME=/home/user
+		/trace/statvfs-probe >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-STATVFS-RC=$?" >/dev/console
+		echo "===END-VERIFY===" >/dev/console
+		;;
 	verify-tclsh)
 		# Workaround verification: tclsh under getsockname-fix.so. Without the
 		# shim this hangs inside getsockname() during channel init; with it the
@@ -251,6 +360,22 @@ echo "TRACE-RUN-START mode=$MODE" >/dev/console
 		wait "$XTERM_PID"
 		echo "TRACE-XTERM-RC=$?" >/dev/console
 		echo "===END-XTERM===" >/dev/console
+		;;
+	verify-pcmanfm)
+		# pcmanfm (the file-manager desktop client) under the libc syscall
+		# logger + X11 ENTRY logger + the setsockopt shim (§2.9).
+		# GSETTINGS_BACKEND=memory avoids the dconf/GDBusWorker thread, a
+		# suspect in the startup race.
+		echo "===BEGIN-VERIFY===" >/dev/console
+		export DISPLAY=:0
+		export HOME=/home/user
+		export XDG_RUNTIME_DIR=/run/user/1000
+		export GSETTINGS_BACKEND=memory
+		LD_PRELOAD=/trace/setsockopt-fix.so:/trace/syscall-logger.so:/trace/xcall-logger-entry.so \
+			pcmanfm /home/user >/dev/null 2>/dev/console &
+		wait "$!"
+		echo "TRACE-PCMANFM-RC=$?" >/dev/console
+		echo "===END-VERIFY===" >/dev/console
 		;;
 	*)
 		echo "===BEGIN-SYSCALL===" >/dev/console

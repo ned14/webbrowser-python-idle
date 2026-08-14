@@ -1,23 +1,32 @@
 # i3 config for the WebVM personal desktop.
-# The autostart runs IDLE (idle3.10) as the desktop client. During Tk/CheerpX
-# hang diagnosis the autostart was temporarily /trace/trace-run.sh (see
-# plans/display-bug.md §2.7); with the Tcl notifier fix (§2.8) IDLE is restored.
-# $mod+Return opens xterm; $mod+Shift+f opens the file manager (pcmanfm).
+# The autostart runs the file explorer (a stdlib-only Tk app,
+# /usr/local/bin/file-explorer.py) on the user's home directory; a keep-alive
+# daemon (/usr/local/bin/keep-file-explorer.sh) relaunches it whenever the last
+# window closes, so the desktop never sits empty. IDLE is launched on demand
+# from it ("Open with IDLE" / double-click a .py) and REPLACES the explorer on
+# screen for the duration: the explorer withdraws itself, waits for IDLE to
+# exit, then reappears with a refreshed listing. $mod+Return opens xterm;
+# $mod+Shift+f reopens the file explorer.
 
 set $mod Mod4
 
 font pango:DejaVu Sans Mono 10
 
-# Autostart IDLE. Uses the launcher, which applies IDLE's -n (in-process, no
-# subprocess) ONLY when the guest lacks loopback TCP networking (CheerpX
-# without a tailnet controlUrl); with networking enabled IDLE runs normally.
-exec --no-startup-id /usr/local/bin/idle3.10-launcher
+# Autostart the file explorer on the user's home directory (the desktop
+# client). The launcher guards against a second instance (the keep-alive uses
+# the same one).
+exec --no-startup-id /usr/local/bin/open-file-explorer.sh
+
+# Keep-alive: relaunch the file explorer whenever the last window closes, so
+# the desktop never ends up empty (see /usr/local/bin/keep-file-explorer.sh).
+exec --no-startup-id /usr/local/bin/keep-file-explorer.sh
 
 # Start a terminal
 bindsym $mod+Return exec xterm
 
-# Start the file manager
-bindsym $mod+Shift+f exec pcmanfm
+# Start the file explorer (no-op when one is already running, e.g. withdrawn
+# behind IDLE)
+bindsym $mod+Shift+f exec /usr/local/bin/open-file-explorer.sh
 
 # Kill focused window
 bindsym $mod+Shift+q kill

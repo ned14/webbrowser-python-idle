@@ -26,8 +26,13 @@ make up             # https://127.0.0.1:8081/alpine.html
 
 Open `https://127.0.0.1:8081/alpine.html` (the private CA must be trusted in
 the browser — HTTPS is the only access mode; there is no plain-HTTP path). The
-desktop boots, IDLE autostarts, and files in `~/` survive reloads via the
-browser IndexedDB overlay. Use `make url` to print the session URL.
+desktop boots to the **file manager** open on `~/` (it relaunches whenever the
+last window is closed, so the desktop never sits empty); new Python files are
+created via *File ▸ Create New* and opened in **IDLE** on double-click (or
+right-click ▸ *Open with IDLE*). Example scripts are baked read-only into
+`~/python-examples/` (reference material to copy, not edit in place). Files in
+`~/` survive reloads via the browser IndexedDB overlay. Use `make url` to print
+the session URL.
 
 ## Storage backends (`STORAGE_BACKEND`)
 

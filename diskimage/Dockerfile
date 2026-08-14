@@ -1,6 +1,8 @@
 # WebVM guest image: minimal i386 Alpine 3.17 with stdlib-only Python + IDLE
-# (autostarted at desktop boot), an Xorg/i3 desktop, terminal + file manager,
-# git tooling, and (for samba/webdav builds) the home-sync agent.
+# (launched from the file explorer — a stdlib-only Tk app that autostarts at
+# desktop boot and is replaced on screen by IDLE while IDLE runs),
+# an Xorg/i3 desktop, terminal, git tooling, and (for
+# samba/webdav builds) the home-sync agent.
 #
 # STORAGE_BACKEND selects the sync agent:
 #   browser/none -> no sync agent, no /root/.syncrc
@@ -33,13 +35,16 @@ https://dl-cdn.alpinelinux.org/alpine/v3.17/community
 EOF
 
 # Desktop + tooling. python3-tkinter and the idlelib extraction come from
-# community; everything else from main.
+# community; everything else from main. xvfb is installed for the
+# in-guest GUI test run (tests/rootfs/smoke.sh runs the file-explorer test
+# suite under Xvfb) — it is not used by the desktop itself.
 RUN apk add --no-cache \
 	alpine-base \
 	udev-init-scripts \
 	udev-init-scripts-openrc \
 	eudev \
 	xorg-server \
+	xvfb \
 	xinit \
 	xf86-input-libinput \
 	xrandr \
@@ -48,7 +53,6 @@ RUN apk add --no-cache \
 	python3 \
 	python3-tkinter \
 	xterm \
-	pcmanfm \
 	git \
 	openssh-client-default \
 	busybox-extras \
@@ -125,36 +129,42 @@ RUN mkdir -p /home/user/.ssh && \
 	chown -R user:user /home/user/.ssh && \
 	chown user:user /home/user/.gitconfig
 
-# Desktop configs (xinitrc execs i3, i3 autostarts idle3.10)
+# Desktop configs (xinitrc execs i3, i3 autostarts the file explorer)
 COPY config/xinitrc /home/user/.xinitrc
 COPY config/.Xresources /home/user/.Xresources
 COPY config/i3/config /home/user/.config/i3/config
 RUN chmod +x /home/user/.xinitrc && \
 	chown -R user:user /home/user/.config /home/user/.xinitrc /home/user/.Xresources
 
+# File explorer (the desktop client): a stdlib-only Tk app autostarted by i3 on
+# the user's home directory. "Open with IDLE" / double-clicking a .py launches
+# IDLE via /usr/local/bin/idle3.10-launcher and REPLACES the explorer on screen
+# until IDLE exits. The keep-alive daemon relaunches it whenever the last
+# window closes. The tests are installed alongside so the rootfs smoke suite
+# can run them in-guest under Xvfb.
+COPY scripts/file-explorer.py /usr/local/bin/file-explorer.py
+COPY scripts/file-explorer-tests.py /usr/local/bin/file-explorer-tests.py
+COPY rootfs/usr/local/bin/open-file-explorer.sh /usr/local/bin/open-file-explorer.sh
+COPY rootfs/usr/local/bin/keep-file-explorer.sh /usr/local/bin/keep-file-explorer.sh
+RUN chmod +x /usr/local/bin/open-file-explorer.sh /usr/local/bin/keep-file-explorer.sh
+
+# A starter .py in the home directory: new users can double-click it to try
+# IDLE right away, and the smoke suite's real-IDLE-launch check uses it.
+COPY rootfs/home/user/hello.py /home/user/hello.py
+RUN chown user:user /home/user/hello.py
+
+# Curriculum examples: bake the python-examples directory into the user's home.
+# It is READ-ONLY in the image (0555 dir / 0444 files, owner 'user') so the
+# guest FS refuses writes even through the IndexedDB overlay — the examples are
+# reference material to copy, never to edit in place.
+COPY python-examples/ /home/user/python-examples/
+RUN chown -R user:user /home/user/python-examples && \
+	chmod 0555 /home/user/python-examples && \
+	chmod 0444 /home/user/python-examples/*
+
 # Display auto-resize support (matches the X resolution to the KMS canvas)
 COPY scripts/99-screen-resize.sh /etc/X11/xinit/xinitrc.d/99-screen-resize.sh
 RUN chmod +x /etc/X11/xinit/xinitrc.d/99-screen-resize.sh
-
-# Tk-hang trace tooling (2026-08-12): example.py + the LD_PRELOAD loggers
-# (syscall logger = libc interposer; xcall logger = Xlib interposer) and the
-# i3-autostarted capture script (runs both loggers in parallel because the Tk
-# hang cannot be killed from inside the guest). Remove together with the trace
-# autostart in config/i3/config once done.
-COPY trace/example.py /trace/example.py
-COPY trace/probe.tcl /trace/probe.tcl
-COPY trace/syscall-logger.so /trace/syscall-logger.so
-COPY trace/xcall-logger.so /trace/xcall-logger.so
-COPY trace/xcall-logger-entry.so /trace/xcall-logger-entry.so
-COPY trace/tcl-logger.so /trace/tcl-logger.so
-COPY trace/getsockname-fix.so /trace/getsockname-fix.so
-COPY trace/xblock-fix.so /trace/xblock-fix.so
-COPY trace/xsync-fix.so /trace/xsync-fix.so
-COPY trace/trace-run.sh /trace/trace-run.sh
-COPY trace/run-mode /trace/run-mode
-COPY trace/noxim.xresources /trace/noxim.xresources
-COPY trace/probe /trace/probe
-RUN chmod 755 /trace/trace-run.sh && chmod 644 /trace/example.py /trace/run-mode && chmod 755 /trace/*.so /trace/probe
 
 # Root filesystem overlays: hosts file, network interfaces, desktop boot,
 # inittab (no gettys — single-user autologin desktop, no console login prompt)
@@ -180,8 +190,8 @@ RUN rm -f /.dockerenv /.dockerinit
 # Record the backend so /etc/local.d/desktop.start can branch on it
 RUN echo "$STORAGE_BACKEND" > /etc/webvm-backend
 
-# OpenRC services: udev for the emulated DRM/input devices, dbus for GTK apps,
-# the 'local' service so /etc/local.d/*.start runs, and networking.
+# OpenRC services: udev for the emulated DRM/input devices, dbus for the
+# session bus, the 'local' service so /etc/local.d/*.start runs, and networking.
 RUN rc-update add bootmisc boot && \
 	rc-update add udev sysinit && \
 	rc-update add udev-trigger sysinit && \
