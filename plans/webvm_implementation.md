@@ -1249,7 +1249,13 @@ or build-time dependency beyond the pinned npm packages.
   then passes. CI performs step (1) in a one-off container before
   `docker compose up` (§8.3). Headscale runs with `restart: unless-stopped`
   + a healthcheck so a headscale crash doesn't silently kill networking →
-  nginx → (webdav mode) wsgidav.
+  nginx → (webdav mode) wsgidav. **Implementation fix (CI bootstrap race):**
+  headscale's socket file appears before its RPC/DB layer is ready, so an
+  immediate `preauthkeys create` can fail with "user not found" (the error
+  goes to **stderr**); the CI bootstrap therefore **retries key creation
+  until a real `hskey-auth-*` value is returned** (never an empty key, which
+  would crash-loop both the server and gateway), and the entrypoint **retries
+  `headscale users create` until the namespace is listed** (2026-08-14).
 
 #### Phase 1 validation
 `make build && make up`, open **`https://127.0.0.1:<SITE_PORT>/alpine.html`**
@@ -2054,8 +2060,21 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     when `crossOriginIsolated` is false (the local nginx server already sends
     the headers, so the worker is never registered there). Pages supports the
     byte-range + `Last-Modified` requests `HttpBytesDevice`/`GitHubDevice`
-    require. Updated: `.github/workflows/pages.yml`, `webvm/vite.config.js`,
+    require. **Base-path fix (2026-08-14):** the first live deployment failed
+    with `Failed to fetch dynamically imported module:
+    https://ned14.github.io/cheerpx/cx.esm.js` — a project site lives at
+    `/webbrowser-python-idle/`, and the runtime import, `sw.js` registration and
+    the `/alpine.html` link were hardcoded root-absolute (they worked only on
+    the root-served Pages-like test host). The runtime entry (`cheerpx.js`) now
+    derives the site base from its own module URL (everything before
+    `/_app/`) and imports `{base}/cheerpx/cx.esm.js`; the alpine page registers
+    `sw.js` relatively; and the root `+page.svelte` redirects to `alpine.html`
+    relatively (matching the local nginx `location = /` rule) instead of
+    mounting the terminal VM with a `/custom-disk-images/` bytes device that
+    Pages does not serve. Updated: `.github/workflows/pages.yml`,
+    `webvm/vite.config.js`,
     `webvm/config_public_alpine_github.js`, `webvm/static/sw.js`,
+    `webvm/src/lib/cheerpx.js`, `webvm/src/routes/+page.svelte`,
     `webvm/src/routes/alpine/+page.svelte`, `README.md`.
 
 No open questions remain. Anything still marked "at implementation time"

@@ -5,13 +5,19 @@
 // default — an EXTERNAL request the site must not make. This module loads the
 // SAME pinned 1.3.7 runtime from our own origin instead (webvm/cheerpx/, copied
 // into the served build by viteStaticCopy). The runtime's own modules resolve
-// relatively against /cheerpx/cx.esm.js, so everything stays same-origin.
+// relatively against the loaded cx.esm.js, so everything stays same-origin.
 //
-// The dynamic import goes through `new Function` so the bundler never rewrites
-// the URL (the browser resolves "/cheerpx/cx.esm.js" against the page origin).
+// The runtime is served at the site base + /cheerpx/, and a GitHub Pages
+// project site lives under a path (e.g. /webbrowser-python-idle/), so the
+// entry URL is resolved against this module's own URL (everything before the
+// SvelteKit /_app/ asset dir) rather than a root-absolute path. The dynamic
+// import goes through `new Function` so the bundler never rewrites the URL
+// (the browser resolves the final string against the page origin).
 const VERSION = "1.3.7";
 const dynImport = new Function("x", "return import(x)");
-const CheerpX = await dynImport("/cheerpx/cx.esm.js");
+const appDir = import.meta.url.indexOf("/_app/");
+const siteBase = appDir === -1 ? "" : import.meta.url.slice(0, appDir);
+const CheerpX = await dynImport(siteBase + "/cheerpx/cx.esm.js");
 
 export const Linux = CheerpX.Linux;
 export const HttpBytesDevice = CheerpX.HttpBytesDevice;

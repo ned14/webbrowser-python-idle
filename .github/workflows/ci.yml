@@ -183,14 +183,27 @@ jobs:
       - name: Bootstrap preauth keys (first run of headscale)
         run: |
           docker compose up -d server
-          for i in $(seq 1 30); do
-            docker compose exec -T server sh -c 'test -S /var/run/headscale/headscale.sock' 2>/dev/null && break
-            sleep 2
-          done
+          # Create a long-lived reusable key, retrying until the control plane
+          # is actually READY: `preauthkeys create` can fail with 'user not
+          # found' while headscale is still starting (the socket appears
+          # before the RPC/DB layer is ready), and the error goes to stderr —
+          # an empty key would silently crash-loop both the server and the
+          # gateway. Only a real `hskey-auth-*` key counts as success.
+          make_key() {
+            for i in $(seq 1 30); do
+              KEY=$(docker compose exec -T server headscale preauthkeys create --user 1 --reusable --expiration 100y 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | tail -1)
+              case "$KEY" in
+                hskey-auth-*) echo "$KEY"; return 0 ;;
+              esac
+              sleep 2
+            done
+            echo "FAIL: headscale never became ready to create preauth keys" >&2
+            exit 1
+          }
           # v0.29.x: --user takes the NUMERIC user id (headscale users list);
           # the entrypoint creates the 'headscale' namespace first (id 1).
-          KEY1=$(docker compose exec -T server headscale preauthkeys create --user 1 --reusable --expiration 100y | sed -E 's/\x1b\[[0-9;]*m//g' | tail -1)
-          KEY2=$(docker compose exec -T server headscale preauthkeys create --user 1 --reusable --expiration 100y | sed -E 's/\x1b\[[0-9;]*m//g' | tail -1)
+          KEY1=$(make_key)
+          KEY2=$(make_key)
           printf 'HEADSCALE_PREAUTHKEY=%s\nGATEWAY_AUTHKEY=%s\nHEADSCALE_BOOTSTRAP=0\n' "$KEY1" "$KEY2" >> .env
           docker compose up -d server
 

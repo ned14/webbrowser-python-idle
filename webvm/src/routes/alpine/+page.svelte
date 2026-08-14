@@ -24,7 +24,8 @@
 	// worker is not registered there at all.
 	onMount(() => {
 		if ('serviceWorker' in navigator && !self.crossOriginIsolated) {
-			navigator.serviceWorker.register('/sw.js').catch(() => {});
+			// Relative: a GitHub Pages project site lives under /<repo>/.
+			navigator.serviceWorker.register('sw.js').catch(() => {});
 			if (!sessionStorage.getItem('webvm-coop-reload')) {
 				sessionStorage.setItem('webvm-coop-reload', '1');
 				navigator.serviceWorker.ready.then(() => location.reload()).catch(() => {});

@@ -75,8 +75,17 @@ if [ "$need_headscale" = "1" ]; then
 		sleep 1
 	done
 
-	# Ensure the user namespace exists (once)
-	headscale users create headscale >/dev/null 2>&1 || true
+	# Ensure the user namespace exists (once). headscale serve creates the
+	# socket before its RPC/DB layer is fully ready, so the very first
+	# `users create` (and any concurrent bootstrap `preauthkeys create`) can
+	# transiently fail with "user not found"; retry until the user shows up.
+	for _i in $(seq 1 30); do
+		headscale users create headscale >/dev/null 2>&1 || true
+		headscale users list 2>/dev/null \
+			| sed -E 's/\x1b\[[0-9;]*m//g' \
+			| grep -q headscale && break
+		sleep 1
+	done
 
 	# Verify the .env preauth keys exist in headscale's DB (fail-closed).
 	# NB v0.29.x: `preauthkeys list` takes no --user flag and MASKS keys with
