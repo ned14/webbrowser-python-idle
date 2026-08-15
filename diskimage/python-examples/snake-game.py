@@ -133,7 +133,7 @@ def game_over():
     canvas.delete(ALL)
     canvas.create_text(canvas.winfo_width()/2, 
                        canvas.winfo_height()/2,
-                       font=('consolas', 70), 
+                       font=('DejaVu Sans Mono', 70), 
                        text="GAME OVER", fill="red", 
                        tag="gameover")
 
@@ -150,7 +150,7 @@ direction = 'down'
 # Display of Points Scored in Game
 
 label = Label(window, text="Points:{}".format(score), 
-              font=('consolas', 20))
+              font=('DejaVu Sans Mono', 20))
 label.pack()
 
 canvas = Canvas(window, bg=BACKGROUND, 

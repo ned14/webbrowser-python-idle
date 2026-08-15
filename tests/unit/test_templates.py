@@ -105,6 +105,15 @@ class TestNginx:
         assert "$connection_upgrade" in nginx
         assert "$uri" in nginx
 
+    def test_control_listener_cors_for_wasm_tailscale(self, nginx):
+        # The browser-side CheerpX tailscale client fetches the control plane
+        # /key endpoint cross-origin (page origin -> CONTROL_PORT); headscale
+        # only answers /derp/probe with ACAO, so nginx must add it for the
+        # whole control listener or the fetch is CORS-blocked and the guest
+        # tailnet never starts.
+        assert 'add_header Access-Control-Allow-Origin $http_origin always;' in nginx
+        assert 'add_header Vary Origin always;' in nginx
+
 
 class TestHeadscale:
     def test_server_url_pathless_from_control_host(self, headscale):

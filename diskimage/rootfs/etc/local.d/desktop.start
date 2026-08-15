@@ -5,6 +5,14 @@ set -u
 
 BACKEND=$(cat /etc/webvm-backend 2>/dev/null || echo browser)
 
+# Warm the font files into the page's block cache before any interactive Tk
+# use. On the GitHub Pages deployment the disk image is streamed lazily as
+# chunks; a font open that needs a COLD network read can transiently fail
+# (Tk: "failed to allocate font due to internal system font engine problem"),
+# so read the installed fonts up front (cheap; the blocks then come from the
+# cached overlay for every later font use, desktop and guest scripts alike).
+(cat /usr/share/fonts/dejavu/*.ttf /usr/share/fonts/misc/*.pcf.gz >/dev/null 2>&1) &
+
 # Bring eth0 up once the emulated NIC appears. The CheerpX NIC is only created
 # after the browser-side Tailscale client connects, so configuration is
 # retried here (open spike: baked /etc/network/interfaces + this retry loop).

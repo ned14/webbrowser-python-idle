@@ -114,6 +114,18 @@ http {
 		# (issued in CORS mode by the pinned wasm client; belt-and-braces).
 		add_header Cross-Origin-Resource-Policy "cross-origin" always;
 
+		# CORS for the browser-side Tailscale client (CheerpX wasm): it fetches
+		# the control-plane /key endpoint cross-origin (page origin on
+		# SITE_PORT -> control plane on CONTROL_PORT), and headscale only
+		# answers /derp/probe with Access-Control-Allow-Origin — every other
+		# control-plane response lacks it, so the fetch is blocked and the
+		# guest tailnet never starts. Echo the request Origin (the browser
+		# fetch is non-credentialed; a LAN-only personal control plane) with
+		# Vary: Origin for correct caching. WebSockets (/ts2021, /derp) are
+		# not subject to CORS, but the header is harmless on them too.
+		add_header Access-Control-Allow-Origin $http_origin always;
+		add_header Vary Origin always;
+
 		# Catch-all reverse proxy to headscale (its v0.29.x control protocol is
 		# PATH-LESS: /key, /ts2021 (Noise upgrade), /derp, /bootstrap-dns and
 		# the legacy /machine/register are all served at the root — the

@@ -176,6 +176,9 @@ RUN chmod +x /etc/local.d/desktop.start
 COPY rootfs/usr/local/bin/idle3.10-launcher /usr/local/bin/idle3.10-launcher
 RUN chmod +x /usr/local/bin/idle3.10-launcher
 COPY rootfs/etc/X11/xorg.conf.d/10-cheerpx.conf /etc/X11/xorg.conf.d/10-cheerpx.conf
+# Fontconfig aliases for common missing font families (consolas, arial, ...)
+# -> the installed DejaVu families (deterministic Tk/Xft font resolution).
+COPY rootfs/etc/fonts/conf.d/99-webvm-aliases.conf /etc/fonts/conf.d/99-webvm-aliases.conf
 
 # CRITICAL FIX (2026-08-10, root cause of the display bug): `docker build`
 # creates a `/.dockerenv` file in the container rootfs. The `docker export`
