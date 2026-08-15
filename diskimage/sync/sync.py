@@ -59,6 +59,9 @@ SNAPSHOT_FILE = "snapshot.tar.gz"
 LEASE_FILE = "webvm.lock"
 NODE_ID_FILE = ".sync-node-id"
 OWNED_FILE = ".sync-owned"
+# Crash-report safety net written by the background daemon (also excluded
+# from the sync — see EXCLUDE_NAMES).
+CRASH_FILE = "_daemon-error.log"
 LEASE_HEARTBEAT_S = 15
 LEASE_EXPIRY_S = 90
 LEASE_RETRY_S = 15
@@ -67,8 +70,13 @@ LEASE_RETRY_S = 15
 # (`.sync-owned` marker) retries indefinitely.
 LEASE_RETRY_ATTEMPTS = 6  # 6 * LEASE_RETRY_S = 90s ~= LEASE_EXPIRY_S
 POLL_S = 5
-DEBOUNCE_S = 2
-TAILNET_WAIT_ATTEMPTS = 18  # 18 * 5s = 90s
+# Debounce disabled: every guest-side wait primitive is unreliable under
+# CheerpX (time.sleep never fires; subprocess sleep is flaky; busy-waits
+# starve the guest clock; socket-timeout sleeps hang too — verified
+# 2026-08-15, plans/networking-bug.md §16). A first sync has nothing to tear
+# (the home is what it is), and the push loop re-checks mtimes each cycle.
+DEBOUNCE_S = 0
+TAILNET_WAIT_ATTEMPTS = 12  # 12 * (3s ping + 5s) ~= 96s; keep the boot pull bounded
 TAILNET_WAIT_S = 5
 
 # Never sync volatile/private state. The .ssh keypair stays in the guest.
@@ -85,6 +93,8 @@ EXCLUDE_NAMES = {
     NODE_ID_FILE,
     OWNED_FILE,
     ".syncrc",
+    # Crash-report safety net written by the background daemon.
+    CRASH_FILE,
 }
 
 
@@ -160,7 +170,9 @@ def load_manifest(home):
 def save_manifest(home, manifest):
     tmp = home / (MANIFEST_FILE + ".tmp")
     tmp.write_text(json.dumps(manifest, indent=0), encoding="utf-8")
+    _chown_home(home, tmp)
     os.replace(tmp, home / MANIFEST_FILE)
+    _chown_home(home, home / MANIFEST_FILE)
 
 
 # --------------------------------------------------------------------------
@@ -173,6 +185,25 @@ PROPFIND_BODY = (
     "<d:prop><d:getlastmodified/><d:getcontentlength/></d:prop>"
     "</d:propfind>"
 ).encode("utf-8")
+
+
+class _SameOriginAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that drops the Authorization header when the target
+    is not on the same scheme+host as the request's original URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        if not req.has_header("Authorization"):
+            return new
+        try:
+            same = urllib.parse.urlsplit(new.full_url)[:2] == urllib.parse.urlsplit(req.full_url)[:2]
+        except ValueError:
+            same = False
+        if not same:
+            new.remove_header("Authorization")
+        return new
 
 
 def _parse_http_date(value):
@@ -190,8 +221,13 @@ class WebDAVTransport:
         self.base = url.rstrip("/") + "/"
         self.user = user
         self.password = password
+        # Never forward Basic credentials to a redirect target on a different
+        # scheme/host: urllib's default redirect handler copies request
+        # headers verbatim, so a redirecting (or compromised) WebDAV server
+        # could leak the sync password elsewhere.
+        self._opener = urllib.request.build_opener(_SameOriginAuthRedirectHandler())
 
-    def _open(self, req):
+    def _open(self, req, timeout=30):
         if self.user:
             import base64
 
@@ -200,7 +236,7 @@ class WebDAVTransport:
             ).decode("ascii")
             req.add_header("Authorization", "Basic " + token)
         try:
-            return urllib.request.urlopen(req, timeout=30)
+            return self._opener.open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             if exc.code in (404, 405):
                 raise FileNotFoundError(req.full_url)
@@ -289,7 +325,18 @@ class WebDAVTransport:
             pass
 
     def ping(self):
-        return self.listdir("")
+        # Short timeout: the tailnet-wait loop calls this up to 18 times and
+        # must give up quickly when the guest's data path is unusable (the
+        # CheerpX guest network is currently broken upstream — a connect()
+        # to a tailnet IP hangs rather than failing — see
+        # plans/networking-bug.md §15). 5s keeps the boot pull bounded.
+        req = urllib.request.Request(self.base, method="PROPFIND")
+        req.add_header("Depth", "0")
+        try:
+            self._open(req, timeout=3).read()
+            return True
+        except Exception:
+            return False
 
 
 # --------------------------------------------------------------------------
@@ -384,6 +431,7 @@ def session_node_id(home):
     ident = uuid.uuid4().hex
     try:
         path.write_text(ident, encoding="utf-8")
+        _chown_home(home, path)
     except OSError:
         # The overlay home is not writable (disk full / permissions). Fall back
         # to the guest hostname so the pull and the daemon (separate processes)
@@ -467,8 +515,38 @@ def release_lease(transport):
 # File walking
 # --------------------------------------------------------------------------
 
+def _home_owner(home):
+    """The uid/gid of the home directory owner (the agent may run as root
+    under CheerpX; files it creates must stay owned by the user session)."""
+    try:
+        st = home.stat()
+        return st.st_uid, st.st_gid
+    except OSError:
+        return None, None
+
+
+def _chown_home(home, path):
+    """chown a path (and its existing parent dirs) to the home owner,
+    best-effort — the agent may run as root, so files it creates must stay
+    owned by the `user` session."""
+    uid, gid = _home_owner(home)
+    if uid is None:
+        return
+    for p in [path] + [c for c in path.parents if c != home.parent]:
+        try:
+            if p.exists():
+                os.chown(p, uid, gid)
+        except OSError:
+            pass
+
+
 def scan_local(home):
-    """Return {relative_path: local_mtime_epoch} for synced files."""
+    """Return {relative_path: local_mtime_epoch} for synced files.
+
+    Symlinks are SKIPPED: the agent may run as root (CheerpX process quirks),
+    so following a symlink could upload files outside the home tree — the
+    synced tree must never escape /home/user.
+    """
     entries = {}
 
     def walk(directory):
@@ -479,8 +557,10 @@ def scan_local(home):
         for child in children:
             if child.name in EXCLUDE_NAMES:
                 continue
+            if child.is_symlink():
+                continue
             rel = child.relative_to(home).as_posix()
-            if child.is_symlink() or not child.is_dir():
+            if not child.is_dir():
                 try:
                     entries[rel] = child.stat().st_mtime
                 except OSError:
@@ -509,6 +589,7 @@ def write_local(home, rel, data):
     target = home / rel
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
+    _chown_home(home, target)
     return target.stat().st_mtime
 
 
@@ -556,6 +637,7 @@ def extract_snapshot(home, data, skip_existing=False):
             if skip_existing and (home / name).exists():
                 continue
             tf.extract(member, home)
+            _chown_home(home, home / name)
 
 
 # --------------------------------------------------------------------------
@@ -697,12 +779,45 @@ def push_home(home, transport, manifest, log=print):
 def wait_for_tailnet(transport, log=print):
     for attempt in range(1, TAILNET_WAIT_ATTEMPTS + 1):
         try:
-            transport.ping()
-            return True
+            if transport.ping():
+                return True
         except Exception:
-            log("sync: tailnet not up yet (%d/%d)" % (attempt, TAILNET_WAIT_ATTEMPTS))
-            time.sleep(TAILNET_WAIT_S)
+            pass
+        log("sync: tailnet not up yet (%d/%d)" % (attempt, TAILNET_WAIT_ATTEMPTS))
+        _sleep(TAILNET_WAIT_S)
     return False
+
+
+def _sleep(seconds):
+    # CheerpX quirks (verified 2026-08-15, plans/networking-bug.md §16):
+    # Python time.sleep() timers never fire (hang forever); busybox `sleep`
+    # via subprocess is flaky; busy-waits starve the guest clock; emulated
+    # socket-timeout waits hang too. NO wait primitive is reliable, so the
+    # sync's critical path avoids sleeping entirely (DEBOUNCE_S=0); this is
+    # a best-effort wait for the non-critical loops (poll interval, lease
+    # retry), which may stall under CheerpX without breaking the sync.
+    # On native runtimes the socket wait errors out instantly, so the
+    # remaining time is busy-waited on the (reliable) native clock.
+    t0 = time.time()
+    try:
+        import socket
+        s = socket.socket()
+        s.settimeout(seconds)
+        try:
+            s.recv(1)
+        except socket.timeout:
+            pass
+        except Exception:
+            pass
+        finally:
+            s.close()
+    except Exception:
+        pass
+    remaining = seconds - (time.time() - t0)
+    if remaining > 0:
+        end = time.time() + remaining
+        while time.time() < end:
+            pass
 
 
 def cmd_pull(home, cfg, log=print):
@@ -767,12 +882,12 @@ def acquire_or_wait(transport, node, retryable, stop, log=print):
         for _ in range(LEASE_RETRY_S):
             if stop["flag"]:
                 break
-            time.sleep(1)
+            _sleep(1)
     return False
 
 
 def _run_push_loop(home, transport, manifest, node, stop, log=print):
-    """Debounced write-triggered push loop; returns on a clean stop.
+    """Write-triggered push loop; returns on a clean stop.
 
     Raises LeaseRefused when the lease is taken over mid-run (see
     refresh_lease), so the caller re-acquires instead of writing without the
@@ -783,14 +898,15 @@ def _run_push_loop(home, transport, manifest, node, stop, log=print):
     while not stop["flag"]:
         try:
             local = scan_local(home)
-            if compute_push_plan(local, manifest):
+            plan = compute_push_plan(local, manifest)
+            if plan:
                 # Debounced push: let the write settle before uploading
                 # (editors can write a file over >1s; pushing mid-write would
                 # upload a torn copy).
                 for _ in range(DEBOUNCE_S):
                     if stop["flag"]:
                         break
-                    time.sleep(1)
+                    _sleep(1)
                 changed = push_home(home, transport, manifest, log=log)
                 if changed:
                     log("sync: pushed changes")
@@ -804,7 +920,7 @@ def _run_push_loop(home, transport, manifest, node, stop, log=print):
         for _ in range(POLL_S):
             if stop["flag"]:
                 break
-            time.sleep(1)
+            _sleep(1)
     try:
         push_home(home, transport, manifest, log=log)
     except Exception as exc:
@@ -823,8 +939,13 @@ def cmd_daemon(home, cfg, log=print):
     def on_term(_signum, _frame):
         stop["flag"] = True
 
-    signal.signal(signal.SIGTERM, on_term)
-    signal.signal(signal.SIGINT, on_term)
+    # CheerpX's emulated Linux may not support signal registration; the daemon
+    # must not die on it.
+    try:
+        signal.signal(signal.SIGTERM, on_term)
+        signal.signal(signal.SIGINT, on_term)
+    except Exception as exc:
+        log("sync: signal registration unsupported (%s); continuing" % exc)
 
     manifest = load_manifest(home)
     while not stop["flag"]:
@@ -833,6 +954,7 @@ def cmd_daemon(home, cfg, log=print):
             return 0
         try:
             (home / OWNED_FILE).write_text("1", encoding="utf-8")
+            _chown_home(home, home / OWNED_FILE)
         except OSError:
             pass
         log("sync: lease acquired; push loop running")
@@ -847,9 +969,18 @@ def cmd_daemon(home, cfg, log=print):
     return 0
 
 
+def _report_crash(cfg, tb):
+    """Report a background-agent crash to the backend (guest stderr is not
+    forwarded to the page console)."""
+    try:
+        build_transport(cfg).put(CRASH_FILE, tb.encode("utf-8"))
+    except Exception:
+        pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="WebVM guest home-sync agent")
-    parser.add_argument("command", choices=("pull", "daemon"))
+    parser.add_argument("command", choices=("pull", "daemon", "both"))
     parser.add_argument("--home", default=str(Path.home()))
     args = parser.parse_args(argv)
 
@@ -861,7 +992,29 @@ def main(argv=None):
 
     if args.command == "pull":
         return cmd_pull(home, cfg)
-    return cmd_daemon(home, cfg)
+    if args.command == "both":
+        # One process runs the boot pull and then becomes the push daemon —
+        # see sync-home.sh `both` and plans/networking-bug.md §16 (process
+        # spawning and teardown are unreliable under CheerpX). BOTH phases
+        # are crash-netted: a pull-phase failure (e.g. an SMB share that is
+        # unreachable at boot) must not kill the process before the push
+        # loop gets a chance to run.
+        import traceback
+        try:
+            cmd_pull(home, cfg)
+        except Exception:
+            _report_crash(cfg, traceback.format_exc())
+        try:
+            return cmd_daemon(home, cfg)
+        except Exception:
+            _report_crash(cfg, traceback.format_exc())
+            return 1
+    try:
+        return cmd_daemon(home, cfg)
+    except Exception:
+        import traceback
+        _report_crash(cfg, traceback.format_exc())
+        return 1
 
 
 if __name__ == "__main__":

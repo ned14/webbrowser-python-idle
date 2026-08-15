@@ -23,11 +23,20 @@ BACKEND=$(cat /etc/webvm-backend 2>/dev/null || echo browser)
 		sleep 2
 		i=$((i + 1))
 	done
-	for _j in 1 2 3 4 5; do
-		ip link set eth0 up 2>/dev/null
-		udhcpc -i eth0 -n >/dev/null 2>&1 && break
-		sleep 5
-	done
+	# Only run DHCP when eth0 actually exists. When the NIC never appears
+	# (CheerpX core defect — the guest device is never created even with the
+	# browser-side client Running, see plans/networking-bug.md §15), udhcpc
+	# still opens a raw socket on the missing interface, which crashes the
+	# CheerpX core with `RuntimeError: function signature mismatch` (a wasm
+	# call_indirect trap inside the core's socket dispatch) and takes the
+	# whole VM down — deterministically ~120s after boot.
+	if ip link show eth0 >/dev/null 2>&1; then
+		for _j in 1 2 3 4 5; do
+			ip link set eth0 up 2>/dev/null
+			udhcpc -i eth0 -n >/dev/null 2>&1 && break
+			sleep 5
+		done
+	fi
 ) &
 
 # Sync boot-pull before the desktop starts (samba/webdav only; best-effort —
@@ -37,8 +46,22 @@ BACKEND=$(cat /etc/webvm-backend 2>/dev/null || echo browser)
 # is refused).
 case "$BACKEND" in
 	samba|webdav)
-		su user -c /usr/local/bin/sync-home.sh pull
-		su user -c /usr/local/bin/sync-home.sh daemon &
+		# One backgrounded root process runs the boot pull and then becomes
+		# the push daemon (sync-home.sh both). CheerpX quirks worked around
+		# here (verified 2026-08-15, plans/networking-bug.md §16):
+		#   * a backgrounded `su user -c …` never executes its child, while
+		#     a plain root background child works — so this runs as root
+		#     (HOME set explicitly: root's Path.home() would be /root, not
+		#     /home/user);
+		#   * spawning a second process after the pull (daemon) never runs,
+		#     and the pull's process teardown can wedge the guest — so pull
+		#     and push loop share ONE process and never tear it down;
+		#   * concurrent guest processes doing overlay FS work can wedge —
+		#     one process avoids it;
+		#   * python time.sleep() timers never fire — sync.py's critical
+		#     path avoids sleeping (DEBOUNCE_S=0) and _sleep() is a
+		#     best-effort socket-timeout wait for the non-critical loops.
+		HOME=/home/user /usr/local/bin/sync-home.sh both </dev/null >/dev/null 2>&1 &
 		;;
 esac
 

@@ -11,7 +11,15 @@
 # image must be inside the server image.
 
 # --- Pinned headscale (binary only; the official image is distroless) -------
-FROM headscale/headscale:0.29.3 AS headscale
+# 0.28.0: originally pinned because it was the newest headscale that accepts
+# the CheerpX runtime's bundled wasm client (Tailscale v1.78, capver 109):
+# MinSupportedCapabilityVersion=106 AND no /key capability-version gate AND
+# /ts2021 registered for WebSocket GET (0.29.x rejects capver 109 — headscale
+# #3391 / rejectUnsupported). Since 2026-08-15 the browser client is REBUILT
+# from source (v1.102.2, capver 142 — scripts/rebuild-tailscale-wasm.sh,
+# plans/networking-bug.md §16), so 0.29.x would accept it too; the pin stays
+# at 0.28.0 as the known-good combination (unpinning is a one-line change).
+FROM headscale/headscale:0.28.0 AS headscale
 
 FROM python:3.11-alpine
 

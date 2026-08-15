@@ -12,6 +12,7 @@ CONTROL_HOST="${CONTROL_HOST:-host.docker.internal}"
 LAN_IP="${LAN_IP:-127.0.0.1}"
 SITE_PORT="${SITE_PORT:-8081}"
 CONTROL_PORT="${CONTROL_PORT:-8443}"
+CONTROL_WSS_PORT="${CONTROL_WSS_PORT:-443}"
 WEBDAV_PORT="${WEBDAV_PORT:-8082}"
 STUN_PORT="${STUN_PORT:-3478}"
 WEBDAV_ROOT="${WEBDAV_ROOT:-/data/webdav}"
@@ -49,7 +50,7 @@ fi
 # --- Render configuration templates -----------------------------------------
 mkdir -p /etc/nginx /etc/headscale /etc/webvm /var/lib/headscale /var/run/headscale
 
-envsubst '$CONTROL_HOST $CONTROL_PORT $SITE_PORT' \
+envsubst '$CONTROL_HOST $CONTROL_PORT $CONTROL_WSS_PORT $SITE_PORT' \
 	< /etc/webvm/nginx.conf.template > /etc/nginx/nginx.conf
 envsubst '$CONTROL_HOST $CONTROL_PORT $STUN_PORT' \
 	< /etc/webvm/headscale/config.yaml.template > /etc/headscale/config.yaml

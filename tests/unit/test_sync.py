@@ -170,7 +170,9 @@ class TestWebDAVTransport:
 
     def test_ping_empty(self, server):
         t = sync.WebDAVTransport(server.url(), "webdav", "secret")
-        assert t.ping() == {}
+        # ping returns a boolean (short-timeout reachability probe; the
+        # tailnet-wait loop consumes it — see sync.py wait_for_tailnet).
+        assert t.ping() is True
 
 
 # --------------------------------------------------------------------------

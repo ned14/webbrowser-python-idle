@@ -12,6 +12,11 @@ export default defineConfig({
 		ignoreHTTPSErrors: true,
 		headless: true,
 		viewport: { width: 1400, height: 900 },
+		// macOS has no /etc/hosts entry for host.docker.internal; CI adds one
+		// on the runner (`.github/workflows/*`), so this is a no-op there.
+		launchOptions: {
+			args: ['--host-resolver-rules=MAP host.docker.internal 127.0.0.1'],
+		},
 	},
 	projects: [
 		{

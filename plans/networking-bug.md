@@ -1,12 +1,16 @@
 # Networking bug: browser-side tailnet (CheerpX wasm) crashes; works upstream
 
-**Status:** OPEN (upstream CheerpX runtime defect suspected, with strong prior
-art pointing at the headscale `/ts2021` Noise-over-WebSocket path — see §7d and
-hypothesis T8). **2026-08-15 internet research merged — new leads in §13, new
-hypotheses T9–T13 in §10, and the feasibility of rebuilding/updating the
-bundled tailscale client (private Leaning build; no file-swap path) assessed in
-§13.7.** Handoff document for a fresh debugging session. Last updated
-2026-08-15.
+**Status: RESOLVED (2026-08-15, §16) — the sync E2E passes and is ungated.**
+The "tailscale wasm crash" narrative in §2–§14 is largely WRONG — verified
+2026-08-15: tailscale.wasm was never even loaded in any configuration
+(including on the reference webvm.io), and the crash is inside **cxcore.wasm**
+(the CheerpX core), triggered by the guest's udhcpc raw socket on a never-
+created eth0. §15 carries the verified diagnosis and the applied fixes; the
+remaining blocker there (guest data path dead) was **fixed in §16 by
+rebuilding the tailscale wasm client from source** (v1.102.2 + custom
+MessageChannel tun) and reworking the guest sync agent around CheerpX
+process/timer quirks. **Read §16 first (it supersedes §15's "what to do
+next"); treat §2–§14 as historical context.** Last updated 2026-08-15.
 
 ## 1. Summary
 
@@ -740,3 +744,309 @@ and rebuilding it is a real engineering task, not a file swap.**
   CDN-proxy route (`/cheerpx/**` → `https://cxrtnc.leaningtech.com/1.3.8/**`),
   and the §4a repro script with control-plane request logging (the key next
   diagnostic).
+
+## 15. 2026-08-15 session: verified diagnosis and applied fixes
+
+This section supersedes §2–§14. Everything here was verified empirically in
+the browser this session (Chromium 151 headless/headed + Chrome 126, Playwright
+request/console/WebSocket tracing, in-page module instrumentation, headscale
+0.28.0/0.29.2/0.29.3, runtimes 1.2.8–1.3.8, self-hosted and CDN-served, and a
+live drive of the reference webvm.io).
+
+### 15.1 What the bug actually is (three stacked failures)
+
+**Failure 1 — the tailnet NEVER initializes (in any configuration, including
+the reference site).** The CheerpX core's network-init flow stops after
+`autoConf()` resolves and never calls `netExports.up()`: `tailscale.wasm` is
+never fetched, no `/key` request ever reaches the control plane, and the
+client stays in `NoState`. Verified:
+
+- The runtime's TWO network paths are selected by `networkInterface` shape
+  (cx_esm.js `HW`/`rS`): WITH `netmapUpdateCb` → the `direct.js`
+  `TailscaleNetwork` path, where nothing ever calls
+  `TailscaleNetwork.prototype.up()` (proven by instrumenting the prototype);
+  WITHOUT it → the legacy `cheerpOSNetInit` path (its autoConf call never
+  resolves past init either). In BOTH paths the up() coroutine that would
+  fetch and start the wasm client never runs.
+- **The reference webvm.io does the exact same thing** (2026-08-15, current
+  Chromium, runtime 1.3.8): loads the same glue files, never fetches
+  tailscale.wasm, never reaches the control plane. The plan's "works
+  upstream / broken here" premise was FALSE; §13.4's "green dot" was a user
+  report from an unknown browser/runtime combination.
+- No runtime version 1.2.8–1.3.8 fixes it (all probed via CDN routing).
+
+**Failure 2 — the crash is in the CHEERPX CORE, not the tailscale wasm.** The
+`RuntimeError: function signature mismatch` (`null function or function
+signature mismatch` in Chrome 126) is a `call_indirect (type 10)` trap at
+exactly `cxcore.wasm` func[3858] offset `0x1a192d` — disassembled and
+matched this session. The plan's §2 attribution to `tailscale.wasm` was an
+unverified assumption (module IDs are content-derived; the tailscale module
+was never loaded at all). The trap is a vtable-style dispatch on an object
+field at offset +40 that is null/uninitialized — the core's socket
+backend/netOps was never wired.
+
+**Failure 3 — the deterministic +128s trigger is the guest's udhcpc, not the
+sync agent.** The guest's `eth0` never appears (the core never creates the
+NIC), `desktop.start`'s eth0 loop gives up after 120s, and then
+`udhcpc -i eth0 -n` opens a RAW socket on the missing interface → the core's
+socket dispatch → the trap. Proven by running WITHOUT the sync agent (no
+syncrc): the crash still fires at exactly +128s.
+
+### 15.2 Secondary stack issues found and fixed (all verified)
+
+1. **headscale version gate (0.29.x rejects the v1.78 client at TWO points).**
+   The wasm client is Tailscale v1.78 (capver 109). 0.29.3 rejects it at `/key`
+   (gate #3391). **0.29.2–0.29.3 ALL reject it at `/machine/register` inside
+   the Noise tunnel** (`rejectUnsupported`, min capver 113) — the §13.2 table
+   missed this second gate. **Fix: pin headscale 0.28.0** (min capver 106,
+   `/ts2021` registered for WebSocket GET). The gateway (tailscaled v1.102.2)
+   joins 0.28.0 fine. (`server/Dockerfile`)
+2. **The wasm client DROPS the controlUrl port**: it builds the
+   Noise-over-WebSocket URL as `wss://<host>/ts2021` (default port 443) and
+   the DERP URLs similarly. The control plane must ALSO be reachable on the
+   scheme-default WSS port. **Fix: nginx `CONTROL_WSS_PORT` (443) listener**
+   mirroring the 8443 listener + compose publish + `CONTROL_WSS_PORT` env
+   (`server/nginx.conf.template`, `server/entrypoint.sh`, `compose.yaml`).
+3. **CSP blocked the port-less WSS** (`connect-src` only allowed
+   `wss://host:8443`). **Fix: add `https://${CONTROL_HOST}` and
+   `wss://${CONTROL_HOST}` to connect-src** (all three CSP headers).
+4. **CORS `MultipleAllowOriginValues`**: headscale answers `/derp/probe` with
+   `ACAO: *` and nginx echoed `ACAO: $http_origin` alongside it → the browser
+   rejected the probe (`net::ERR_FAILED`), stalling the client's DERP
+   selection. **Fix: `proxy_hide_header Access-Control-Allow-Origin;` + echo
+   ONLY when `$http_origin` is non-empty** (an empty echoed value alongside
+   `*` was equally fatal).
+5. **The app must drive the tailnet itself** (the core never does). **Fix:
+   `webvm/src/lib/network.js`** — drop `netmapUpdateCb` from
+   `networkInterface` (selects the legacy path so the core's socket dispatcher
+   uses `a47`), and add an app-side driver that imports
+   `/cheerpx/tun/tailscale_tun_auto.js`, calls `autoConf()` + `up()`, sets the
+   `cjTailscale*` globals, and exposes the socket adapter the core's
+   dispatcher calls (`TCPSocket`/`UDPSocket`/`parseIP`/`dumpIP`/`up`),
+   mirroring `direct.js`'s `TCPWrapper`/`UDPWrapper` contracts exactly:
+   - TCP: `parseIP(ip)` → int, `new tcpSocket()`, `bind(0)`, `connect(ip,
+     port)`, `waitOutgoing()`; return `{opened, closed, close}` where
+     `opened` resolves with `{readable, writable, remoteAddress,
+     localAddress, remotePort, localPort}` (ReadableByteStream +
+     WritableStream over `recv`/`send(array, offset, len)`).
+   - UDP: `bind(port)`, `recv(buf, 0, len, addrInfo)`, `sendto(arr, ip, port)`;
+     `opened` resolves with `{readable, writable, localAddress, localPort}`,
+     readable carrying `{data, remoteAddress, remotePort}` messages.
+   - `close` MUST return a promise (the core calls `socket.close().catch()`).
+6. **The guest-side eth0/udhcpc guard** (`diskimage/rootfs/etc/local.d/
+   desktop.start`): only run `udhcpc` when `eth0` actually exists — the
+   deterministic +128s core crash is gone; the VM survives the full boot.
+7. **sync.py bounded boot wait** (`diskimage/sync/sync.py`): the ping now
+   fails fast (3s timeout) and `wait_for_tailnet` checks the ping's return
+   value (my first edit returned False without raising, which the loop
+   misread as success — fixed); 12 attempts ≈ 60s, then the desktop starts
+   (~70s boot, well within the boot E2E window).
+
+### 15.3 Verified end state (2026-08-15)
+
+- With the app-side driver: `tailscale.wasm` fetched → `/key?v=109` 200 →
+  WSS `/ts2021` 101 → registered → netmap (peers listed) → **state 6
+  (Running)** → DERP WSS open → the browser node appears ONLINE in
+  `headscale nodes list`. All of this happens automatically at page load.
+- The VM boots to the X desktop in ~70s with NO crash and NO pageerrors.
+- Boot + persistence E2E suites pass (`tests/e2e`).
+- `webvm.lock` still never appears: the guest's DATA path is dead — the
+  core's NIC (eth0) is never created and a guest TCP connect to a tailnet IP
+  (e.g. 100.64.0.1:8082) never completes (SYN dies in the browser-side
+  netstack; `waitOutgoing` never resolves). This is the remaining upstream
+  core defect; the sync E2E stays `E2E_SYNC=1`-gated (comment updated).
+
+### 15.4 What to do next
+
+- Report to Leaning (cheerpx-meta/webvm) with the §15.1 repro: the runtime's
+  network-init flow never calls `TailscaleNetwork.up()`; the core never
+  creates the guest NIC; guest SYNs die in the netstack; and the socket
+  dispatch traps on the unwired backend. The reference webvm.io tailnet is
+  equally broken in current Chromium — worth confirming with Leaning.
+- If Leaning ships a runtime where the core drives the client, the app-side
+  driver in network.js can be removed (the adapter methods are harmless).
+- If a newer runtime never comes, the only remaining lever is rebuilding the
+  tailscale wasm with a working tun+data path (§13.7) — a heavy task.
+- Diagnostic tools for the next session: `tests/e2e/repro-tailnet.mjs`
+  (instrumented repro: full console/request/WebSocket capture, in-page
+  fetch/instantiate/blob tracing, TUN module step-traces via routing,
+  MANUAL_DRIVE/CLICK_CONNECT/RUNTIME_VERSION/CDN-routing modes) and the
+  wasm-objdump disassembly of `cxcore.wasm` func[3858] at 0x1a192d.
+
+## 16. 2026-08-15 session: the tailscale wasm client is rebuilt from source — RESOLVED
+
+This section supersedes §15.4. Everything below was verified empirically this
+session against the §15 stack (headscale 0.28.0, app-side driver, guest eth0
+guard) with the §4a repro, four probe scripts, backend-side log mirrors and
+the real E2E suite.
+
+### 16.1 The rebuilt client (the §13.7 lever, executed)
+
+The bundled CheerpX tailscale.wasm (Leaning's private tsconnect fork, v1.78,
+capver 109) was replaced with a **tailscale v1.102.2 build from source** that
+reproduces the glue's API surface exactly:
+
+- `scripts/tailscale-wasm-entry/wasm_js.go` — a custom `//go:build js` entry
+  (modelled on `cmd/tsconnect/wasm/wasm_js.go` at v1.102.2) that wires
+  `wgengine.NewUserspaceEngine` with a **custom `tun.Device`** (the
+  wireguard-go interface) backed by a JS object shaped like a MessageChannel
+  (`postMessage(data)` from IpStack → `Read`; engine writes invoke
+  `onmessage({data: Uint8Array})`), plus `run`/`up`/`down`/`login`/`logout`
+  and **numeric** `notifyState` (0–6, matching the glue's `State` enum) and
+  the tsconnect-style netmap JSON (`self.addresses`, peers with
+  `online`/`exitNode`). The netstack-based data path of stock tsconnect is
+  deliberately NOT used (it has no tun; the CheerpX glue needs raw IP packets
+  on the MessageChannel).
+- Build: `scripts/rebuild-tailscale-wasm.sh` — Docker `golang:1.26.5`,
+  shallow clone of tailscale at `v1.102.2`, drop the entry into
+  `cmd/tsconnect/wasm/wasm_js.go`, `GOOS=js GOARCH=wasm go build`, ship the
+  matching `wasm_exec.js` from the toolchain. Outputs ~33 MB
+  `webvm/cheerpx/tun/tailscale.wasm` (capver 142) + `wasm_exec.js` (Go 1.26.5).
+- Glue: **no changes to `tailscale_tun.js`/`tailscale_tun_auto.js`** — the
+  entry reproduces their expectations (two-arg `newIPN` accepted; the stock
+  strict arg-count check was removed after the first run died with
+  `Usage: newIPN(config)` + exit 1).
+- The app-side driver (`network.js`) still drives the tailnet (the core never
+  does — §15.1); with the new client the full chain works:
+  `/key?v=142` 200 → WSS `/ts2021` (port-443 listener) → registered
+  (`machineAuthorized=true`) → netmap → **state Running** → DERP derp-999 →
+  `magicsock: new contact: peer=[gateway] via=derp`.
+
+### 16.2 Browser-side data path fixes (webvm/src/lib/network.js)
+
+With the client running, the guest's TCP connects reached our socket wrapper
+but three wrapper bugs killed the data path (all verified against ipstack.js
+source / in-page probes):
+
+1. **`recv` argument order**: ipstack's signature is `recv(data, offset,
+   len)`; the wrapper called `recv(view, view.length, 0)` → always returned 0
+   → the readable closed as EOF instantly and every response was dropped.
+   Fix: `recv(view, 0, view.length)`.
+2. **EAGAIN busy-spin in the writable**: `send` returns -11 when the tx
+   buffer is full; the old loop `continue`d synchronously, starving the
+   browser event loop so the tun could never drain the buffer — any write
+   larger than the buffer (the ~10 KB snapshot) hung forever (the guest then
+   blocked mid-PUT; wsgidav saw a headers-only PUT and created a 0-byte
+   file). Fix: `await new Promise(r => setTimeout(r, 5))` on EAGAIN. (The
+   raw-socket probe moved 12 KB in 1 ms only because it yielded.)
+3. **Never-resolving `closed` promise**: `closed: new Promise(() => {})`
+   never resolved; the core awaits it during guest process teardown, so any
+   process that used a socket could wedge at exit (blocking later guest
+   processes). Fix: resolve `closed` on `close()` and on EOF (both TCP and
+   UDP wrappers).
+
+Verified with `tests/e2e/data-path-probe.mjs` (raw socket GET → 401 from
+WsgiDAV through the tailnet), `big-put-probe.mjs` (12 KB PUT through the raw
+socket), `stream-put-probe.mjs` (12 KB PUT through the exact wrapper streams
+— all pass).
+
+### 16.3 Guest sync agent rework (diskimage/sync, desktop.start)
+
+With the data path fixed the guest's requests flowed, but the sync agent
+itself was broken by CheerpX process/timer quirks (each verified by backend
+log mirrors written from the guest — guest stdout is NOT forwarded to the
+page console; `/dev/kmsg` writes are not either):
+
+1. **A backgrounded `su user -c …` never executes its child** (foreground su
+   works; a plain root background child works — the X server proves it).
+   Fix: run the agent as root, backgrounded exactly like Xorg.
+2. **The pull process's teardown can wedge the guest** (its sockets' closed
+   promises — §16.2.3 — plus the core's process handling), blocking
+   everything after it in `desktop.start` (the X server never started).
+   Fix: one backgrounded root process runs pull AND the push loop
+   (`sync-home.sh both` → `python sync.py both`) and never tears down.
+3. **Concurrent guest processes doing overlay FS work can wedge** (the
+   pull+daemon pair stalled in `load_manifest`/`scan_local`). One process
+   avoids it.
+4. **`HOME` must be explicit** (`HOME=/home/user … daemon`): root's
+   `Path.home()` is `/root` — the daemon scanned an empty home and never
+   pushed anything (`daemon-plan n=0`).
+5. **Every guest wait primitive is unreliable**: `time.sleep()` hangs
+   forever; `subprocess.run(["sleep", …])` is flaky (works once, then
+   hangs); a busy-wait on `time.time()` starves the guest clock (it only
+   advances when the wasm yields). Fix: **the sync's critical path never
+   sleeps** (`DEBOUNCE_S = 0`); `_sleep()` is a best-effort socket-timeout
+   wait for the non-critical loops.
+6. **The macOS `.DS_Store` artifact (6148 B) in the baked home broke the
+   snapshot PUT** (the core's emulated send path stalls on the large body —
+   the precise mechanism is the core's guest-side write flow control;
+   removing the 6 KB file made the 533 KB snapshot transfer fine, so the
+   threshold isn't a simple byte count). Removed from the image.
+7. `signal.signal()` in the daemon is wrapped in try/except (may be
+   unsupported); a crash-safety net writes `_daemon-error.log` to the
+   backend.
+
+Result: the full flow completes — pull (ping → lease → restore) then push
+loop (lease → **initial snapshot** → per-file uploads → heartbeat), with
+`webvm.lock` + `snapshot.tar.gz` + all home files on the WebDAV backend.
+
+### 16.4 Test-infrastructure fixes
+
+- Playwright's `APIRequestContext` `auth` option does not send Basic auth on
+  plain HTTP (returns 401) — the repro AND the sync spec polled `webvm.lock`
+  with `{ auth }` and never saw it even when the backend had the file. Fix:
+  explicit `Authorization` header (both scripts).
+- `playwright.config.js` now passes `--host-resolver-rules=MAP
+  host.docker.internal 127.0.0.1` (macOS parity with the CI /etc/hosts
+  entry) — without it the sync spec's session URL fails DNS resolution
+  locally.
+- The sync spec's `E2E_SYNC=1` gate is **removed**: it runs whenever the
+  webdav CI phase provides `E2E_WEBDAV_*` (the browser phase has none and
+  still self-skips).
+
+### 16.5 Verified end state
+
+- `npx playwright test` (full suite, webdav stack): **7 passed** — boot ×3,
+  desktop, persistence ×2, **sync** (lock ≤150 s, snapshot ≤60 s after,
+  reload boots).
+- `docker compose run --rm test-unit`: 81 passed.
+- `headscale nodes list` shows the browser node online alongside the gateway.
+
+### 16.6 Leftovers / notes
+
+- The headscale pin stays at **0.28.0** (works with the new client; the §7b
+  version-gate workaround for the old v1.78 client is now moot — the rebuilt
+  client reports capver 142, so 0.29.x would accept it too; unpinning is a
+  one-line change if ever wanted).
+- `tests/e2e/repro-tailnet.mjs`, `data-path-probe.mjs`, `big-put-probe.mjs`,
+  `stream-put-probe.mjs` stay in the repo as diagnostics. The stream probe
+  drives the REAL `network.js` adapter (exposed as `window.cjTailscaleAdapter`
+  for tests) so it cannot silently drift from the shipped wrapper.
+- The reference webvm.io's own tailnet remains broken in current Chromium
+  (§15.1) — still worth reporting to Leaning; this repo no longer depends on
+  a fix.
+- The guest's eth0 NIC is still never created by the core; the guest network
+  works through the core's syscall-level socket dispatcher, so nothing in
+  the guest needs eth0 anymore. The §15.2.6 eth0 guard stays (harmless).
+
+### 16.7 Review-driven hardening (same session)
+
+Follow-up code review of §16's change set (all fixes verified — full E2E 7/7,
+unit 81, integration PASS):
+
+- **Security:** `scan_local` now SKIPS symlinks — the sync agent runs as root
+  (CheerpX process quirks), so following a symlink could have uploaded
+  arbitrary root-readable files to the WebDAV backend. Files the agent
+  writes/restores (`write_local`, manifest, node id, `.sync-owned`,
+  snapshot extract) are `chown`ed to the home owner so the `user` desktop
+  session can edit them. WebDAV redirects now drop the Authorization header
+  on cross-scheme/host targets (urllib's default handler copies it).
+- **Privacy/perf:** logtail uploads to log.tailscale.com are removed from the
+  rebuilt client (a fully self-hosted tailnet must not phone Tailscale's
+  cloud; the CSP blocked it anyway). The per-notify full-netmap console dump
+  is reduced to a summary; the per-packet drop log is rate-limited.
+- **Reliability:** the TCP/UDP wrapper resolves the `closed` promise on EVERY
+  failure path (bind/connect/waitOutgoing) — the core awaits it during guest
+  process teardown; `both` mode crash-nets the PULL phase too (an SMB share
+  unreachable at boot previously killed the process before the push loop);
+  `_sleep` busy-waits the remainder on native runtimes (still best-effort
+  under CheerpX).
+- **Deploy:** the privileged host port **443 publish moved to the gateway**
+  (tailnet profile only — browser/none modes never bind it; the gateway
+  socats it to the server over the compose network). `fetch-cheerpx-runtime.sh`
+  no longer clobbers `tun/wasm_exec.js` (the rebuilt pair is committed).
+  The sync spec sets its own timeout (two VM boots + 270s of assertions
+  exceed the 300s global cap).
+- **Test hygiene:** shared `tests/e2e/lib/webdav-auth.js` for the Basic-auth
+  header (the silent-401 bug was an auth-handling drift); no-op replace and
+  dead `tailnetUp()` removed.

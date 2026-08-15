@@ -64,6 +64,18 @@ case "$STORAGE_BACKEND" in
 		;;
 esac
 
+# Control plane on the DEFAULT WSS port (443): the CheerpX wasm client drops
+# the controlUrl port when building the /ts2021 Noise WebSocket URL
+# (wss://<host>/ts2021). The host publishes 443 on THIS container (tailnet
+# profile only — browser/none modes never bind the privileged port), and
+# socat forwards it to the server's control listener over the compose
+# network (host.docker.internal -> 172.28.0.10). Unlike the tailscaled
+# relays it must listen on ALL interfaces (Docker's port publish forwards to
+# the container's eth0, not its loopback).
+socat "TCP-LISTEN:443,fork,reuseaddr" "TCP:host.docker.internal:443" &
+RELAY_PIDS="${RELAY_PIDS} $!"
+echo "relay: :443 -> host.docker.internal:443 (control plane WSS)"
+
 # Git relays (host-side step: set the *_LAN_IP vars in .env and recreate the
 # gateway; the guest then adds remotes like ssh://git@<GATEWAY_TAILNET_IP>:2222/)
 [ -n "${GIT_SSH_LAN_IP:-}" ] && start_relay 2222 "${GIT_SSH_LAN_IP}:22"

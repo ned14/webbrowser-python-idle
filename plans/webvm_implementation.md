@@ -2104,32 +2104,21 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `diskimage/python-examples/snake-game.py`.
 
 27. **Browser-side tailnet blocked by an upstream CheerpX runtime crash
-    (2026-08-15).** The webdav sync E2E (`tests/e2e/tests/sync.spec.js`)
-    consistently failed on CI with `webvm.lock` never appearing. Diagnosis
-    (browser console + headscale logs + controlled experiments): the
-    **CheerpX wasm tailscale client crashes the moment the guest uses the
-    network** — `RuntimeError: function signature mismatch` (a wasm
-    `call_indirect` type mismatch inside the tailscale module when its
-    netstack processes the first packet), surfaced by the core as `Unexpected
-    exit` + a secondary `TypeError: e is not a function`. Reproduced
-    identically with runtime **1.3.7 and 1.3.8**, self-hosted **and**
-    CDN-loaded (proxy test), headed and headless Chromium, and with headscale
-    **0.28.0 and 0.29.3** — i.e. an upstream runtime bug, not a stack
-    configuration issue. Two adjacent findings surfaced along the way and ARE
-    fixed here: (a) the control plane was **missing CORS** for the wasm
-    client's `/key` fetch (§5 CORS note, nginx 8443 listener); (b) headscale
-    **0.29.x raises the minimum client capability version to v1.80 (113)** and
-    rejects the wasm client's v1.78 (109) with 400 `unsupported client
-    version` — the client is therefore rejected by 0.29.x even before the
-    crash (verified by pinning 0.28.0, min v1.74, in a throwaway build; the
-    crash persisted, so the version pin stays at 0.29.3 and this is recorded
-    as a limitation to revisit when the runtime tailnet is rebuilt). **CI
-    action:** the sync E2E now **self-skips by default** (`E2E_SYNC=1` to run
-    it); the control plane (gateway join), WebDAV backend and sync agent
-    presence remain covered by the server integration tests and the rootfs
-    smoke suite. Re-enable the E2E when the runtime tailnet works. Updated:
-    `server/nginx.conf.template` (CORS), `tests/e2e/tests/sync.spec.js` (skip
-    gate).
+    (2026-08-15) — RESOLVED 2026-08-15 (see networking-bug.md §16).** The webdav sync E2E
+    (`tests/e2e/tests/sync.spec.js`) consistently failed on CI with
+    `webvm.lock` never appearing. The full diagnosis is in
+    `plans/networking-bug.md` §15 (the crash narrative was largely wrong: the
+    tailscale wasm was never even loaded; the core's network-init never
+    starts the client) and the fix in §16 (tailscale wasm rebuilt from
+    source, app-side driver, guest sync rework). The sync E2E now passes and
+    is **no longer gated**. Updated:
+    `webvm/cheerpx/tun/tailscale.wasm` (+matching `wasm_exec.js`),
+    `webvm/src/lib/network.js`, `webvm/cheerpx/cxcore.js`(unchanged —
+    upstream), `diskimage/sync/*`, `diskimage/rootfs/etc/local.d/desktop.start`,
+    `server/nginx.conf.template` (CORS, 443 WSS), `server/Dockerfile`
+    (headscale 0.28.0 pin — keeps accepting the rebuilt v1.102 client too),
+    `tests/e2e/tests/sync.spec.js` (ungated), `tests/e2e/playwright.config.js`
+    (host-resolver rule), `tests/e2e/repro-tailnet.mjs` + probe scripts.
 
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path

@@ -126,7 +126,7 @@ tests/        unit / rootfs / server / e2e (see tests/README.md)
 ```
 
 Pinned versions: webvm commit `e58fef0c9a1c815617e57c6704eaaf7c79c3de1c`,
-`@leaningtech/cheerpx` 1.3.7 (exact), `headscale/headscale:0.29.3`,
+`@leaningtech/cheerpx` 1.3.7 (exact), `headscale/headscale:0.28.0`,
 `tailscale/tailscale:v1.102.2` — see `webvm/WEBVM_COMMIT` and
 `plans/webvm_implementation.md` §12/21.
 

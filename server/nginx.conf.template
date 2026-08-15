@@ -53,7 +53,11 @@ http {
 		# request) — the page and WASM client make ZERO external requests.
 		# script-src 'self' covers the self-hosted CheerpX runtime modules/workers
 		# (/cheerpx/*) and the app bundle.
-		add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}" always;
+		# The portless https/wss entries cover the wasm client's DEFAULT-PORT
+		# URLs: the bundled client drops the controlUrl port when it builds the
+		# Noise-over-WebSocket URL (wss://<host>/ts2021) and the DERP URLs, so
+		# CONTROL_WSS_PORT (443) must be allowed too.
+		add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT} https://${CONTROL_HOST} wss://${CONTROL_HOST}" always;
 
 		root /srv/webvm/build;
 
@@ -83,7 +87,7 @@ http {
 			add_header Cross-Origin-Opener-Policy "same-origin" always;
 			add_header Cross-Origin-Embedder-Policy "require-corp" always;
 			add_header Cross-Origin-Resource-Policy "cross-origin" always;
-			add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}" always;
+			add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT} https://${CONTROL_HOST} wss://${CONTROL_HOST}" always;
 			add_header Cache-Control "public, max-age=31536000, immutable";
 			try_files $uri =404;
 		}
@@ -91,7 +95,7 @@ http {
 			add_header Cross-Origin-Opener-Policy "same-origin" always;
 			add_header Cross-Origin-Embedder-Policy "require-corp" always;
 			add_header Cross-Origin-Resource-Policy "cross-origin" always;
-			add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}" always;
+			add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT} https://${CONTROL_HOST} wss://${CONTROL_HOST}" always;
 			add_header Cache-Control "public, max-age=31536000, immutable";
 		}
 
@@ -123,9 +127,13 @@ http {
 		# fetch is non-credentialed; a LAN-only personal control plane) with
 		# Vary: Origin for correct caching. WebSockets (/ts2021, /derp) are
 		# not subject to CORS, but the header is harmless on them too.
-		add_header Access-Control-Allow-Origin $http_origin always;
-		add_header Vary Origin always;
-
+		#
+		# NB the echo is CONDITIONAL on a non-empty Origin: headscale already
+		# answers /derp/probe with ACAO: * and the wasm client's DERP probe
+		# (HEAD, no Origin header) must NOT receive an empty
+		# "Access-Control-Allow-Origin: " alongside it — a second invalid ACAO
+		# value makes the browser reject the probe (net::ERR_FAILED) and the
+		# client never finishes its DERP selection.
 		# Catch-all reverse proxy to headscale (its v0.29.x control protocol is
 		# PATH-LESS: /key, /ts2021 (Noise upgrade), /derp, /bootstrap-dns and
 		# the legacy /machine/register are all served at the root — the
@@ -138,6 +146,60 @@ http {
 		# (headscale's DERP handler answers 426 Upgrade Required and its
 		# TS2021 handler answers 500 to any non-upgraded request).
 		location / {
+			# Echo the request Origin ONLY when present, and HIDE headscale's
+			# own ACAO (it answers /derp/probe with ACAO: *): two
+			# Access-Control-Allow-Origin values ("*" + the echoed origin)
+			# make the browser reject the wasm client's DERP probe with
+			# net::ERR_FAILED (MultipleAllowOriginValues) and the client never
+			# finishes its DERP selection.
+			proxy_hide_header Access-Control-Allow-Origin;
+			if ($http_origin) {
+				add_header Access-Control-Allow-Origin $http_origin always;
+				add_header Vary Origin always;
+			}
+			proxy_http_version 1.1;
+			proxy_set_header Upgrade $http_upgrade;
+			proxy_set_header Connection $connection_upgrade;
+			proxy_set_header Host $host;
+			proxy_set_header True-Client-IP $remote_addr;
+			proxy_set_header X-Real-IP $remote_addr;
+			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			proxy_set_header X-Forwarded-Proto $scheme;
+			proxy_buffering off;
+			proxy_read_timeout 3600s;
+			proxy_send_timeout 3600s;
+			proxy_pass http://127.0.0.1:8080;
+		}
+	}
+
+	# ----------------------------------------------------------------------
+	# Control plane on the DEFAULT WSS port (CONTROL_WSS_PORT, default 443).
+	# The bundled CheerpX wasm client builds its Noise-over-WebSocket URL as
+	# wss://<control-host>/ts2021 (the controlUrl PORT IS DROPPED — Leaning's
+	# fork always uses the scheme-default port), so the control plane must
+	# also be reachable on 443. Same config as the CONTROL_PORT listener.
+	# ----------------------------------------------------------------------
+	server {
+		listen ${CONTROL_WSS_PORT} ssl;
+		server_name _;
+
+		ssl_certificate     /certs/server.crt;
+		ssl_certificate_key /certs/server.key;
+
+		add_header Cross-Origin-Resource-Policy "cross-origin" always;
+
+		location / {
+			# Echo the request Origin ONLY when present, and HIDE headscale's
+			# own ACAO (it answers /derp/probe with ACAO: *): two
+			# Access-Control-Allow-Origin values ("*" + the echoed origin)
+			# make the browser reject the wasm client's DERP probe with
+			# net::ERR_FAILED (MultipleAllowOriginValues) and the client never
+			# finishes its DERP selection.
+			proxy_hide_header Access-Control-Allow-Origin;
+			if ($http_origin) {
+				add_header Access-Control-Allow-Origin $http_origin always;
+				add_header Vary Origin always;
+			}
 			proxy_http_version 1.1;
 			proxy_set_header Upgrade $http_upgrade;
 			proxy_set_header Connection $connection_upgrade;

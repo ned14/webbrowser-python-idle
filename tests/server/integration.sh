@@ -65,7 +65,17 @@ fi
 
 echo "==> control listener + DERP probe"
 [ -n "$GATEWAY_AUTHKEY" ] || fail "GATEWAY_AUTHKEY not set (needed for the join test)"
-curl -sk -D - -o /dev/null "$CONTROL_URL/derp/probe" | grep -qi "access-control-allow-origin: \*" || fail "/derp/probe ACAO missing"
+# CORS: nginx hides headscale's own ACAO (*) and echoes the request Origin
+# only when present (a second/empty ACAO value breaks the browser's CORS
+# check — MultipleAllowOriginValues — see plans/networking-bug.md §15.2).
+# So the probe WITHOUT an Origin must NOT carry ACAO, and WITH an Origin it
+# must echo exactly that origin (never "*").
+if curl -sk -D - -o /dev/null "$CONTROL_URL/derp/probe" | grep -qi "access-control-allow-origin"; then
+	fail "/derp/probe without Origin must not carry Access-Control-Allow-Origin"
+fi
+PROBE_ACAO=$(curl -sk -D - -o /dev/null -H "Origin: https://example.test" "$CONTROL_URL/derp/probe" \
+	| tr -d '\r' | awk -F': ' 'tolower($1)=="access-control-allow-origin" {print $2}')
+[ "$PROBE_ACAO" = "https://example.test" ] || fail "/derp/probe with Origin must echo it (got '$PROBE_ACAO')"
 
 echo "==> headscale join test (tailscaled client, private CA)"
 # Shared helper: joins a throwaway tailscaled node to the control plane. The

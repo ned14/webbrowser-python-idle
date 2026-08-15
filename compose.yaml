@@ -13,6 +13,7 @@ x-server-env: &server-env
   LAN_IP: ${LAN_IP:-127.0.0.1}
   SITE_PORT: ${SITE_PORT:-8081}
   CONTROL_PORT: ${CONTROL_PORT:-8443}
+  CONTROL_WSS_PORT: ${CONTROL_WSS_PORT:-443}
   WEBDAV_PORT: ${WEBDAV_PORT:-8082}
   STUN_PORT: ${STUN_PORT:-3478}
   WEBDAV_ROOT: ${WEBDAV_ROOT:-/data/webdav}
@@ -75,6 +76,14 @@ services:
       context: ./gateway
     profiles: ["tailnet"]
     restart: unless-stopped
+    # The default WSS port (443) is published HERE, on the tailnet profile
+    # only: the CheerpX wasm client drops the controlUrl port when building
+    # the /ts2021 Noise WebSocket URL (wss://<host>/ts2021), so the control
+    # plane must also be reachable on the scheme-default WSS port. Browser/
+    # none modes must never bind the privileged host port (it can conflict
+    # with other HTTPS services and take the whole stack down at startup).
+    ports:
+      - "${LAN_IP:-127.0.0.1}:${CONTROL_WSS_PORT:-443}:443"
     environment:
       STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}
       GATEWAY_AUTHKEY: ${GATEWAY_AUTHKEY:-}

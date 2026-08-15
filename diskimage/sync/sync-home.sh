@@ -14,8 +14,16 @@ case "$CMD" in
 	daemon)
 		exec python3 "$SYNC_PY" daemon
 		;;
+	both)
+		# One process runs the boot pull and then becomes the push daemon:
+		# spawning a second process after the pull is unreliable under
+		# CheerpX (background `su` children never run; the pull's process
+		# teardown can wedge the guest), so the push loop continues in the
+		# same process.
+		exec python3 "$SYNC_PY" both
+		;;
 	*)
-		echo "usage: sync-home.sh {pull|daemon}" >&2
+		echo "usage: sync-home.sh {pull|daemon|both}" >&2
 		exit 1
 		;;
 esac
