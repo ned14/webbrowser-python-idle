@@ -150,9 +150,10 @@ if [ "$BACKEND" = "samba" ] || [ "$BACKEND" = "webdav" ]; then
 		[ -f /root/.syncrc ] || { echo "FAIL: /root/.syncrc missing" >&2; exit 1; }
 		[ -f /home/user/.syncrc ] || { echo "FAIL: /home/user/.syncrc missing" >&2; exit 1; }
 		grep -q "backend = $BACKEND" /home/user/.syncrc || { echo "FAIL: syncrc backend mismatch" >&2; exit 1; }
-		# Boot pull runs before X
-		grep -q "sync-home.sh pull" /etc/local.d/desktop.start || { echo "FAIL: desktop.start lacks boot pull" >&2; exit 1; }
-		grep -q "sync-home.sh daemon" /etc/local.d/desktop.start || { echo "FAIL: desktop.start lacks push daemon" >&2; exit 1; }
+		# Boot pull + push daemon run as ONE process before X (networking-bug.md
+		# §16.3: `sync-home.sh both` — pull, then the push loop in the same
+		# process; never a second `daemon` invocation).
+		grep -q "sync-home.sh both" /etc/local.d/desktop.start || { echo "FAIL: desktop.start lacks boot pull + push daemon (sync-home.sh both)" >&2; exit 1; }
 		if [ "$BACKEND" = "samba" ]; then
 			python3 -c "import smb" || { echo "FAIL: pysmb not importable" >&2; exit 1; }
 		fi
