@@ -70,6 +70,22 @@ http {
 			return 301 /alpine.html;
 		}
 
+		# Baked networking/sync config (entrypoint-rendered): the page seeds
+		# sessionStorage from it when the URL hash carries nothing, so visiting
+		# the site root auto-wires the tailnet. NEVER cached — it changes when
+		# .env keys rotate and the container is recreated. (The add_header here
+		# suppresses the server-level security headers on this same-origin
+		# script; same-origin resources are exempt from COEP require-corp.)
+		# CORP same-origin is REQUIRED: without it any webpage could load this
+		# classic script cross-origin and read window.__webvmConfig (the
+		# preauth key + sync credentials) — PNA does not cover private->private
+		# (LAN) loads and Safari does not enforce PNA.
+		location = /webvm-config.js {
+			alias /etc/webvm/webvm-config.js;
+			add_header Cache-Control "no-store";
+			add_header Cross-Origin-Resource-Policy "same-origin";
+		}
+
 		# Guest ext2 image. Explicit absolute alias (never `root .`, which
 		# resolves against the nginx prefix dir). Byte-range serving is native
 		# to nginx; gzip is off for the image.

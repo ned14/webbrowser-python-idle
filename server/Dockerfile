@@ -40,6 +40,7 @@ COPY webvm/custom-disk-images/ /srv/webvm/custom-disk-images/
 COPY server/nginx.conf.template /etc/webvm/nginx.conf.template
 COPY server/headscale/config.yaml.template /etc/webvm/headscale/config.yaml.template
 COPY server/wsgidav.yaml.template /etc/webvm/wsgidav.yaml.template
+COPY server/render-webvm-config.py /etc/webvm/render-webvm-config.py
 COPY server/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

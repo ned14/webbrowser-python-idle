@@ -65,7 +65,10 @@ down:
 logs:
 	docker compose --profile tailnet logs -f
 
-## Print the session URL(s) for the current deployment
+## Print the session URL(s) for the current deployment (OPTIONAL: tailnet
+## modes bake the keys into the served page at container start, so visiting
+## the site root auto-wires the tailnet; the hash URL is for other devices
+## and explicit overrides)
 url:
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; ./scripts/print-url.sh
 

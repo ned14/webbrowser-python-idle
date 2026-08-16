@@ -25,20 +25,41 @@
 		<meta name="apple-mobile-web-app-status-bar-style" content="black" />
 		<link rel="shortcut icon" href="tower.ico">
 		<link rel='stylesheet' href='scrollbar.css'>
+		<!-- Baked networking/sync config (entrypoint-rendered on the server,
+		     same-origin): supplies authKey/controlUrl/syncUrl/... so visiting
+		     the site root works with NO hash URL. Absent (GitHub Pages) or
+		     empty (browser/none mode) it is simply a no-op. -->
+		<script src="/webvm-config.js"></script>
 		<script>
 			// Move network/sync secrets out of the URL hash into sessionStorage,
 			// then strip the hash via history.replaceState so no secrets persist
 			// in browser history. This MUST run before the app bundle is
 			// evaluated: network.js reads these values at module-import time.
+			//
+			// Values come from /webvm-config.js (entrypoint-rendered, same-
+			// origin) when the URL carries NO hash — visiting the site root
+			// auto-wires the tailnet. Any explicit hash is a fully explicit
+			// session: the baked config is ignored and only the hash params
+			// apply (identical to the pre-baked behavior, so saved `make url`
+			// URLs work unchanged). The explicit state is STICKY for the
+			// tab's lifetime: a later hash-less navigation/reload never
+			// re-arms the baked config (and never overwrites the tab's
+			// explicit sessionStorage params).
 			(function () {
+				var params = null;
 				var hash = window.location.hash;
-				if (!hash || hash.length < 2) return;
-				var params = new URLSearchParams(hash.substring(1));
+				if (hash && hash.length > 1) params = new URLSearchParams(hash.substring(1));
+				var baked = (!params && !sessionStorage.getItem("webvm-explicit-session"))
+					? (window.__webvmConfig || {})
+					: {};
 				["authKey", "controlUrl", "syncUrl", "syncUser", "syncPass"].forEach(function (k) {
-					var v = params.get(k);
+					var v = (params && params.get(k)) || baked[k];
 					if (v) sessionStorage.setItem(k, v);
 				});
-				window.history.replaceState(null, "", window.location.pathname + window.location.search);
+				if (params) {
+					sessionStorage.setItem("webvm-explicit-session", "1");
+					window.history.replaceState(null, "", window.location.pathname + window.location.search);
+				}
 			})();
 		</script>
 		%sveltekit.head%

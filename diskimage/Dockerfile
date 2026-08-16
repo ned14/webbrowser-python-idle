@@ -1,6 +1,7 @@
 # WebVM guest image: minimal i386 Alpine 3.17 with stdlib-only Python + IDLE
 # (launched from the file explorer — a stdlib-only Tk app that autostarts at
 # desktop boot and is replaced on screen by IDLE while IDLE runs),
+# the Tk file viewer (images via py3-pillow, text/Markdown via py3-mistune),
 # an Xorg/i3 desktop, terminal, git tooling, and (for
 # samba/webdav builds) the home-sync agent.
 #
@@ -38,6 +39,9 @@ EOF
 # community; everything else from main. xvfb is installed for the
 # in-guest GUI test run (tests/rootfs/smoke.sh runs the file-explorer test
 # suite under Xvfb) — it is not used by the desktop itself.
+# py3-pillow + py3-mistune are the Tk file viewer's image/Markdown engines
+# (see plans/future-feature-ideas.md): Pillow ships PIL.ImageTk + _imagingtk
+# on this arch; both come from the v3.17 community repo, nothing pip.
 RUN apk add --no-cache \
 	alpine-base \
 	udev-init-scripts \
@@ -57,7 +61,9 @@ RUN apk add --no-cache \
 	openssh-client-default \
 	busybox-extras \
 	dbus \
-	py3-pip
+	py3-pip \
+	py3-pillow \
+	py3-mistune
 
 # IDLE without the 85 MiB python3-tests dependency: `python3-idle` (community)
 # hard-depends on python3-tests, so extract just the binary + idlelib from the
@@ -81,6 +87,8 @@ RUN cp -f /tmp/libtcl8.6.so.patched /usr/lib/libtcl8.6.so && rm /tmp/libtcl8.6.s
 # Curriculum is stdlib-only (Decision 10): no py3-numpy/matplotlib/requests/
 # pytest. py3-pip is kept so `pip` exists and the environment looks normal.
 # (There is no runtime pip install — the guest has no internet.)
+# py3-pillow/py3-mistune are NOT curriculum: they are the Tk file viewer's
+# image/Markdown engines (added 2026-08-16, see plans/future-feature-ideas.md).
 RUN ln -sf /usr/bin/pip3 /usr/bin/pip
 
 # Sync agent (samba/webdav modes only)
@@ -144,14 +152,26 @@ RUN chmod +x /home/user/.xinitrc && \
 # can run them in-guest under Xvfb.
 COPY scripts/file-explorer.py /usr/local/bin/file-explorer.py
 COPY scripts/file-explorer-tests.py /usr/local/bin/file-explorer-tests.py
+# Shared file-type contract (explorer routing + viewer rendering) — importable
+# from /usr/local/bin by both scripts (underscore name: it is a module, not
+# an executable).
+COPY scripts/file_types.py /usr/local/bin/file_types.py
+# Tk file viewer (images/text/Markdown) + its test suite. The explorer
+# launches it for every non-Python file and swaps screens with it, exactly
+# like IDLE (the keep-alive daemon guards it like IDLE too).
+COPY scripts/file-viewer.py /usr/local/bin/file-viewer.py
+COPY scripts/file-viewer-tests.py /usr/local/bin/file-viewer-tests.py
 COPY rootfs/usr/local/bin/open-file-explorer.sh /usr/local/bin/open-file-explorer.sh
 COPY rootfs/usr/local/bin/keep-file-explorer.sh /usr/local/bin/keep-file-explorer.sh
-RUN chmod +x /usr/local/bin/open-file-explorer.sh /usr/local/bin/keep-file-explorer.sh
+RUN chmod +x /usr/local/bin/open-file-explorer.sh /usr/local/bin/keep-file-explorer.sh /usr/local/bin/file-viewer.py
 
 # A starter .py in the home directory: new users can double-click it to try
 # IDLE right away, and the smoke suite's real-IDLE-launch check uses it.
 COPY rootfs/home/user/hello.py /home/user/hello.py
-RUN chown user:user /home/user/hello.py
+# The welcome README shown in the file manager's home folder (explicit COPY,
+# like hello.py — rootfs/home/user is not synced wholesale into the image).
+COPY rootfs/home/user/Readme.md /home/user/Readme.md
+RUN chown user:user /home/user/hello.py /home/user/Readme.md
 
 # Curriculum examples: bake the python-examples directory into the user's home.
 # It is READ-ONLY in the image (0555 dir / 0444 files, owner 'user') so the

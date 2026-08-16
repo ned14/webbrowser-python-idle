@@ -1,44 +1,19 @@
 import { expect, test } from '@playwright/test';
+import { waitForDesktop } from '../lib/desktop.js';
 
 // E2E boot + no-egress assertions (plan §9.4).
 // The browser-mode case is opened with NO authKey/controlUrl (a disconnected
 // session — asserting no auto-login attempt occurs); network params are only
-// present in the webdav case (E2E_WEBDAV_URL env).
+// present in the webdav case (E2E_WEBDAV_URL env). In the webdav CI phase the
+// server BAKES the tailnet/sync keys into /webvm-config.js, so the browser
+// case pins a dummy hash (`#e2e`) there: any explicit hash disables the baked
+// seeding in app.html, keeping this spec a disconnected session.
 
-const CONTROL_HOST = process.env.E2E_CONTROL_HOST || 'host.docker.internal';
+const CONTROL_HOST = process.env.E2E_CONTROL_HOST || '127.0.0.1';
 const CONTROL_PORT = process.env.E2E_CONTROL_PORT || '8443';
 const SITE_URL =
 	process.env.E2E_SITE_URL ||
 	`https://127.0.0.1:${process.env.E2E_SITE_PORT || 8081}/alpine.html`;
-
-async function waitForDesktop(page) {
-	// The display canvas must exist and eventually contain rendered pixels.
-	await expect(page.locator('#display')).toBeVisible({ timeout: 30_000 });
-	await expect
-		.poll(
-			async () =>
-				page.evaluate(() => {
-					const display = document.getElementById('display');
-					if (!display || !display.width || !display.height) return false;
-					try {
-						const scratch = document.createElement('canvas');
-						scratch.width = display.width;
-						scratch.height = display.height;
-						const ctx = scratch.getContext('2d');
-						ctx.drawImage(display, 0, 0);
-						const data = ctx.getImageData(0, 0, scratch.width, scratch.height).data;
-						for (let i = 0; i < data.length; i += 4) {
-							if (data[i] || data[i + 1] || data[i + 2]) return true;
-						}
-					} catch (e) {
-						// canvas not readable yet — keep polling
-					}
-					return false;
-				}),
-			{ timeout: 240_000, intervals: [5000] }
-		)
-		.toBe(true);
-}
 
 test('boots the desktop over HTTPS with cross-origin isolation intact', async ({ page }) => {
 	const consoleErrors = [];

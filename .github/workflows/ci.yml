@@ -127,11 +127,10 @@ jobs:
       - name: Deployment .env (browser phase)
         run: |
           cat > .env <<EOF
-          CONTROL_HOST=host.docker.internal
+          CONTROL_HOST=127.0.0.1
           LAN_IP=127.0.0.1
           STORAGE_BACKEND=browser
           EOF
-          echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
 
       - name: Build server image (browser build)
         run: docker compose build server
@@ -169,7 +168,7 @@ jobs:
       - name: Deployment .env (webdav phase)
         run: |
           cat > .env <<EOF
-          CONTROL_HOST=host.docker.internal
+          CONTROL_HOST=127.0.0.1
           LAN_IP=127.0.0.1
           STORAGE_BACKEND=webdav
           WEBDAV_USER=webdav
@@ -204,8 +203,14 @@ jobs:
           # the entrypoint creates the 'headscale' namespace first (id 1).
           KEY1=$(make_key)
           KEY2=$(make_key)
-          printf 'HEADSCALE_PREAUTHKEY=%s\nGATEWAY_AUTHKEY=%s\nHEADSCALE_BOOTSTRAP=0\n' "$KEY1" "$KEY2" >> .env
-          docker compose up -d server
+          # Keep HEADSCALE_BOOTSTRAP=1 here: `--profile tailnet up -d` below
+          # RECREATES the server (the .env change alters its computed env),
+          # and with BOOTSTRAP=0 the entrypoint fail-closes on the still-
+          # unrecorded GATEWAY_TAILNET_IP before the gateway joins. Bootstrap
+          # mode runs headscale normally (only the key/IP checks are
+          # skipped — the keys above are already in the DB). BOOTSTRAP=0 is
+          # written together with GATEWAY_TAILNET_IP after the join.
+          printf 'HEADSCALE_PREAUTHKEY=%s\nGATEWAY_AUTHKEY=%s\n' "$KEY1" "$KEY2" >> .env
 
       - name: Bring up tailnet stack (gateway)
         run: docker compose --profile tailnet up -d
@@ -223,6 +228,13 @@ jobs:
           [ "$joined" = "1" ] || { echo "FAIL: the gateway did not join the tailnet" >&2; exit 1; }
           docker compose exec -T server headscale nodes list
 
+      - name: Record gateway tailnet IP + restart server (baked page config)
+        run: |
+          GATEWAY_IP=$(docker compose exec -T gateway tailscale ip -4 2>/dev/null | head -1)
+          [ -n "$GATEWAY_IP" ] || { echo "FAIL: gateway tailnet IP is empty" >&2; exit 1; }
+          printf 'GATEWAY_TAILNET_IP=%s\nHEADSCALE_BOOTSTRAP=0\n' "$GATEWAY_IP" >> .env
+          docker compose up -d server
+
       - name: Server integration tests
         run: |
           set -a; . ./.env; set +a
@@ -234,8 +246,12 @@ jobs:
         run: |
           GATEWAY_IP=$(docker compose exec -T gateway tailscale ip -4 2>/dev/null | head -1)
           echo "gateway tailnet IP: $GATEWAY_IP"
-          E2E_SITE_URL="https://127.0.0.1:8081/alpine.html" \
-          E2E_WEBDAV_URL="https://host.docker.internal:8081/alpine.html#authKey=$(grep '^HEADSCALE_PREAUTHKEY=' ../../.env | cut -d= -f2)&controlUrl=https://host.docker.internal:8443&syncUrl=http://${GATEWAY_IP}:8082/webdav/&syncUser=webdav&syncPass=webdavpass" \
+          # boot.spec's browser-mode case must stay a DISCONNECTED session in
+          # the webdav phase too (its header comment asserts no auto-login):
+          # any explicit hash disables the baked /webvm-config.js seeding.
+          E2E_SITE_URL="https://127.0.0.1:8081/alpine.html#e2e" \
+          E2E_GATEWAY_IP="$GATEWAY_IP" \
+          E2E_WEBDAV_URL="https://127.0.0.1:8081/alpine.html#authKey=$(grep '^HEADSCALE_PREAUTHKEY=' ../../.env | cut -d= -f2)&controlUrl=https://127.0.0.1:8443&syncUrl=http://${GATEWAY_IP}:8082/webdav/&syncUser=webdav&syncPass=webdavpass" \
           E2E_WEBDAV_BASE="http://127.0.0.1:8082/webdav/" \
           E2E_WEBDAV_USER=webdav E2E_WEBDAV_PASS=webdavpass \
           npx playwright test

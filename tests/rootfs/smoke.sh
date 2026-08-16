@@ -16,6 +16,9 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	python3 -c "import tkinter, idlelib"
 	[ -x /usr/bin/idle3.10 ] || { echo "FAIL: /usr/bin/idle3.10 missing" >&2; exit 1; }
 
+	# Tk file viewer deps: Pillow (with the Tk bridge _imagingtk) + mistune
+	python3 -c "import PIL, PIL.ImageTk, mistune" || { echo "FAIL: PIL.ImageTk/mistune import failed" >&2; exit 1; }
+
 	# Core binaries (nc comes from the base busybox)
 	for cmd in xterm i3 git ssh nc pip3; do
 		command -v "$cmd" >/dev/null || { echo "FAIL: $cmd missing" >&2; exit 1; }
@@ -48,6 +51,14 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	grep -q "root.deiconify()" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not reappear after IDLE" >&2; exit 1; }
 	grep -q "load_folder(self.current_path)" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not refresh after IDLE" >&2; exit 1; }
 	[ -x /usr/local/bin/idle3.10-launcher ] || { echo "FAIL: idle3.10-launcher missing" >&2; exit 1; }
+	# Tk file viewer integration: the explorer routes non-Python files to the
+	# viewer and swaps screens with it; the keep-alive daemon guards it.
+	[ -f /usr/local/bin/file-viewer.py ] || { echo "FAIL: file-viewer.py missing" >&2; exit 1; }
+	[ -x /usr/local/bin/file-viewer.py ] || { echo "FAIL: file-viewer.py not executable" >&2; exit 1; }
+	[ -f /usr/local/bin/file-viewer-tests.py ] || { echo "FAIL: file-viewer-tests.py missing" >&2; exit 1; }
+	grep -q "file-viewer.py" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not launch the viewer" >&2; exit 1; }
+	grep -q "_open_in_viewer" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer lacks the viewer swap" >&2; exit 1; }
+	grep -q "file-viewer.py" /usr/local/bin/keep-file-explorer.sh || { echo "FAIL: keep-alive does not guard the viewer" >&2; exit 1; }
 	# The starter .py that doubles as the E2E IDLE-swap target
 	[ -f /home/user/hello.py ] || { echo "FAIL: ~/hello.py missing" >&2; exit 1; }
 	# The replaced GTK file managers must be GONE (deps no longer installed)
@@ -92,6 +103,43 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh "$IMAGE" -c '
 	cat /tmp/fe-tests.log
 	[ "$RESULT" = "0" ] || { echo "FAIL: file-explorer tests exited $RESULT" >&2; exit 1; }
 	grep -q "PASS ALL" /tmp/fe-tests.log || { echo "FAIL: file-explorer tests did not report PASS ALL" >&2; exit 1; }
+
+	# Tk file viewer test suite (images via Pillow, text, Markdown via
+	# mistune, Prev/Next navigation) under the same X/Tk stack.
+	Xvfb :98 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb4.log 2>&1 &
+	XPID4=$!
+	sleep 1
+	RESULT=0
+	timeout 600 env DISPLAY=:98 python3 /usr/local/bin/file-viewer-tests.py \
+		>/tmp/fv-tests.log 2>&1 || RESULT=$?
+	kill "$XPID4" 2>/dev/null || true
+	cat /tmp/fv-tests.log
+	[ "$RESULT" = "0" ] || { echo "FAIL: file-viewer tests exited $RESULT" >&2; exit 1; }
+	grep -q "PASS ALL" /tmp/fv-tests.log || { echo "FAIL: file-viewer tests did not report PASS ALL" >&2; exit 1; }
+
+	# A REAL viewer launch works under X: generate a PNG with Pillow, open it
+	# in the viewer, and verify the process stays running.
+	Xvfb :97 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb5.log 2>&1 &
+	XPID5=$!
+	sleep 1
+	python3 - <<'EOF'
+from PIL import Image
+Image.new("RGB", (320, 200), (60, 120, 200)).save("/tmp/viewer-test.png")
+EOF
+	timeout 60 env DISPLAY=:97 /usr/local/bin/file-viewer.py /tmp/viewer-test.png \
+		>/tmp/viewer.log 2>&1 &
+	VIEWERPID=$!
+	sleep 6
+	if kill -0 "$VIEWERPID" 2>/dev/null; then
+		echo "viewer launched and stayed running"
+		pkill -f "file-viewer.py" 2>/dev/null || true
+	else
+		echo "FAIL: viewer exited early (log below)" >&2
+		cat /tmp/viewer.log >&2 || true
+		kill "$XPID5" 2>/dev/null || true
+		exit 1
+	fi
+	kill "$XPID5" 2>/dev/null || true
 
 	# A REAL IDLE launch (the explorer Popen target) works under X: start
 	# the launcher on hello.py and verify the IDLE process stays running.

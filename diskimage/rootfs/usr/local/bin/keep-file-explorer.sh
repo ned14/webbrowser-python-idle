@@ -56,6 +56,13 @@ idle_running() {
 	pgrep -f "idle3.10" >/dev/null 2>&1
 }
 
+viewer_running() {
+	# The Tk file viewer (file-viewer.py) launched from the explorer: same
+	# model as idle_running — the explorer is withdrawn while the viewer is
+	# up, and a slow viewer startup must not read as a stuck desktop.
+	pgrep -f "file-viewer.py" >/dev/null 2>&1
+}
+
 launch() {
 	# Backgrounded (not exec) so the keep-alive keeps polling. The launcher
 	# guards against a second instance itself, but a fresh process means a
@@ -71,12 +78,12 @@ while :; do
 	NOW=$(date +%s 2>/dev/null || echo 0)
 	if [ "$(count_windows 2>/dev/null)" = "0" ]; then
 		if explorer_running; then
-			# Windowless but alive: either still mapping its window, or
-			# withdrawn while IDLE is being shown. The force-kill applies
-			# only when IDLE is NOT running (a withdrawn explorer behind a
-			# running IDLE is healthy). A stuck explorer gets STUCK_SECONDS,
-			# then is force-killed so the desktop can start fresh.
-			if ! idle_running && [ "$WINDOWLESS_SINCE" != "0" ] && \
+		# Windowless but alive: either still mapping its window, or
+		# withdrawn while IDLE / the viewer is being shown. The force-kill
+		# applies only when neither is running (a withdrawn explorer behind
+		# a running app is healthy). A stuck explorer gets STUCK_SECONDS,
+		# then is force-killed so the desktop can start fresh.
+		if ! idle_running && ! viewer_running && [ "$WINDOWLESS_SINCE" != "0" ] && \
 				 [ "$NOW" -gt "$WINDOWLESS_SINCE" ] && \
 				 [ $((NOW - WINDOWLESS_SINCE)) -ge "$STUCK_SECONDS" ]; then
 				pkill -9 -f "$EXPLORER" 2>/dev/null

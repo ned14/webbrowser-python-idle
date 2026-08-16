@@ -7,7 +7,7 @@
 	import '@fortawesome/fontawesome-free/css/all.min.css'
 	import { networkInterface, startLogin } from '$lib/network.js'
 	import { cpuActivity, diskActivity, cpuPercentage, diskLatency } from '$lib/activities.js'
-	import { introMessage, errorMessage, unexpectedErrorMessage } from '$lib/messages.js'
+	import { introMessage } from '$lib/messages.js'
 
 	export let configObj = null;
 	export let processCallback = null;
@@ -24,6 +24,29 @@
 	var processCount = 0;
 	var curVT = 0;
 	var sideBarPinned = false;
+	// Fatal VM failure shown as a full-screen overlay with the exact reason:
+	// phase "boot" = the guest never started, "runtime" = it was running and
+	// stopped. `bootedOnce` flips after the first cx.run() completes.
+	let fatal = null;
+	let bootedOnce = false;
+	function showFatal(phase, err)
+	{
+		var message = err && err.message ? err.message : String(err);
+		var detail = err && err.stack ? err.stack : "";
+		console.error("[WebVM] " + phase + " failed:", err);
+		fatal = { phase: phase, message: message, detail: detail };
+	}
+	async function copyFatal()
+	{
+		try
+		{
+			await navigator.clipboard.writeText((fatal.message + "\n" + (fatal.detail || "")).trim());
+		}
+		catch(e)
+		{
+			console.warn("copy fatal details failed:", e);
+		}
+	}
 	function writeData(buf, vt)
 	{
 		if(vt != 1)
@@ -209,16 +232,7 @@
 		raiseDisplay();
 		if(configObj.printIntro)
 			printMessage(introMessage);
-		try
-		{
-			await initCheerpX();
-		}
-		catch(e)
-		{
-			printMessage(unexpectedErrorMessage);
-			printMessage([e.toString()]);
-			return;
-		}
+		await initCheerpX();
 	}
 
 	function raiseDisplay()
@@ -283,6 +297,12 @@
 			default:
 				throw new Error("Unrecognized device type");
 		}
+		// Test-only hook (tests/e2e/tests/error-overlay.spec.js): force a boot
+		// failure so the fatal overlay's exact-reason display is assertable.
+		if (sessionStorage.getItem("webvm-test-bootfail"))
+		{
+			throw new Error("test-forced boot failure (webvm-test-bootfail)");
+		}
 		blockCache = await CheerpX.IDBDevice.create(cacheId);
 		var overlayDevice = await CheerpX.OverlayDevice.create(blockDevice, blockCache);
 		var webDevice = await CheerpX.WebDevice.create("");
@@ -331,16 +351,10 @@
 				}
 			}
 		}
-		try
-		{
-			cx = await CheerpX.Linux.create({mounts: mountPoints, networkInterface: networkInterface});
-		}
-		catch(e)
-		{
-			printMessage(errorMessage);
-			printMessage([e.toString()]);
-			return;
-		}
+		// Any rejection here propagates to the boot catch in onMount ->
+		// showFatal: a boot failure must be visible on screen, not just in
+		// the hidden console.
+		cx = await CheerpX.Linux.create({mounts: mountPoints, networkInterface: networkInterface});
 		cx.registerCallback("cpuActivity", cpuCallback);
 		cx.registerCallback("diskActivity", hddCallback);
 		cx.registerCallback("diskLatency", latencyCallback);
@@ -353,13 +367,29 @@
 			setScreenSize(display);
 			cx.setActivateConsole(handleActivateConsole);
 		}
-		// Run the command in a loop, in case the user exits
-		while (true)
+		// Run the command in a loop, in case the user exits. A REJECTED
+		// cx.run() is the VM stopping (a resolved run is a guest exit, which
+		// is normal and re-runs) — show exactly why it stopped instead of an
+		// unhandled promise rejection.
+		try
 		{
-			await cx.run(configObj.cmd, configObj.args, configObj.opts);
+			while (true)
+			{
+				await cx.run(configObj.cmd, configObj.args, configObj.opts);
+				bootedOnce = true;
+			}
+		}
+		catch(e)
+		{
+			showFatal(bootedOnce ? "runtime" : "boot", e);
 		}
 	}
-	onMount(initTerminal);
+	onMount(() => {
+		// Any error while booting (terminal setup, CheerpX runtime, disk
+		// image, Linux.create) surfaces as the visible fatal overlay — a
+		// failed load must never be silent.
+		initTerminal().catch((e) => { showFatal("boot", e); });
+	});
 	async function handleConnect()
 	{
 		const w = window.open("login.html", "_blank");
@@ -376,9 +406,14 @@
 	}
 	async function handleReset()
 	{
-		// Be robust before initialization
-		if(blockCache == null)
+		// Be robust before initialization: a boot-phase failure leaves
+		// blockCache null, and the fatal overlay's Reload button must still
+		// work (a plain reload is all we can do without a cache to reset).
+		if (blockCache == null)
+		{
+			location.reload();
 			return;
+		}
 		await blockCache.reset();
 		location.reload();
 	}
@@ -405,4 +440,40 @@
 		<div class="absolute top-0 bottom-0 {sideBarPinned ? 'left-[23.5rem]' : 'left-14'} right-0 p-1 scrollbar" id="console">
 		</div>
 	</div>
+	{#if fatal}
+		<div
+			class="absolute top-0 bottom-0 left-0 right-0 z-[100] flex items-center justify-center bg-black/80"
+			role="alert"
+		>
+			<div class="max-w-2xl w-[90%] bg-[#1e1e2e] border border-red-500 rounded-lg p-6 text-white font-mono text-sm shadow-2xl">
+				<div class="text-red-400 font-bold text-lg mb-1">
+					{fatal.phase === "runtime" ? "The VM stopped unexpectedly" : "The VM failed to start"}
+				</div>
+				<div class="text-gray-300 mb-3">
+					{fatal.phase === "runtime"
+						? "The guest session terminated while running."
+						: "The browser could not boot the guest."}
+					The exact reason is below; the DevTools console carries the full stack.
+				</div>
+				<div class="bg-black rounded p-3 overflow-auto max-h-64 mb-4 whitespace-pre-wrap break-all">
+{fatal.message}{#if fatal.detail}
+{fatal.detail}{/if}
+				</div>
+				<div class="flex gap-3">
+					<button
+						class="px-4 py-2 bg-red-500 hover:bg-red-600 rounded font-semibold"
+						on:click={handleReset}
+					>
+						Reload
+					</button>
+					<button
+						class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
+						on:click={copyFatal}
+					>
+						Copy details
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 </main>

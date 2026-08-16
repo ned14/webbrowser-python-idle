@@ -1,16 +1,18 @@
 #!/bin/sh
 # Generate the private CA and the site/control/DERP server certificate.
 #
-# The certificate's SAN covers CONTROL_HOST (default host.docker.internal),
-# 127.0.0.1, localhost, the LAN IP and the server container's static
-# compose-network IP (172.28.0.10, used as the extra_hosts fallback).
+# The certificate's SAN covers CONTROL_HOST (default 127.0.0.1 — the
+# browser-facing control host), 127.0.0.1, localhost, the LAN IP and the
+# server container's static compose-network IP (172.28.0.10, used by the
+# gateway and the integration join-test client). HOSTNAMES ARE BANNED (no
+# host.docker.internal / /etc/hosts tricks — never reintroduce).
 #
 # The CA must be installed and trusted in the browser once — for both the
 # single-machine path (https://127.0.0.1:<SITE_PORT>) and LAN use
 # (https://<LAN_IP>:<SITE_PORT>). There is no plain-HTTP access path.
 set -eu
 
-CONTROL_HOST="${CONTROL_HOST:-host.docker.internal}"
+CONTROL_HOST="${CONTROL_HOST:-127.0.0.1}"
 LAN_IP="${LAN_IP:-127.0.0.1}"
 SERVER_IP="${SERVER_IP:-172.28.0.10}"
 CERT_DIR="${CERT_DIR:-./certs}"

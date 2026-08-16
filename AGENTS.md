@@ -38,9 +38,26 @@ workflow.
   Samba creds) are **optional at compose level** (`${VAR:-}`, never
   `${VAR:?err}`) and enforced fail-closed **per mode by the entrypoint**.
   Never commit secrets to this repo.
-- Gateway reaches the control plane via `extra_hosts`
-  `host.docker.internal:<server-static-ip>` (172.28.0.10 on a fixed
-  `172.28.0.0/16` network) — not `host-gateway`/loopback-published ports.
+- **HOSTNAMES ARE BANNED — absolute rule, never reintroduce them.** No
+  `host.docker.internal`, no `/etc/hosts` entries, no custom DNS of any kind
+  for LAN users. Everything must work with `127.0.0.1` (zero-config single
+  machine) and a hardcoded LAN address such as `192.168.x.x` (LAN) alone:
+  - `CONTROL_HOST` is the BROWSER-facing control-host (default `127.0.0.1`,
+    LAN deployments set it to the LAN IP). It renders into `server_url`, the
+    baked `controlUrl`, the nginx CSP and the URL hash.
+  - The gateway container never uses `CONTROL_HOST`: it reaches the control
+    plane over the compose network at the server's static IP
+    (`GATEWAY_CONTROL_IP`, default `172.28.0.10` on the fixed
+    `172.28.0.0/16` network — cert SAN covers it), and its loopback socat
+    relay on `CONTROL_PORT` forwards the netmap's DERP host (`127.0.0.1` on
+    the single machine) to the server. No `extra_hosts` hostname mapping is
+    used (removed 2026-08-16).
+  - `tests/unit/test_scripts.py::test_control_host_defaults_consistent`
+    FAILS CI if the literal `host.docker.internal` reappears in any runtime
+    config, script, test or CI file — keep it green.
+- Gateway reaches the control plane at the server's static compose-network IP
+  (`GATEWAY_CONTROL_IP` = 172.28.0.10 on a fixed `172.28.0.0/16` network) —
+  not `host-gateway`, not loopback-published ports, and never a hostname.
 - Tailnet modes are brought up with `make up-tailnet`, not
   `make up --profile tailnet`.
 - `diskImageType="bytes"` (HttpBytesDevice), same-origin ext2 with nginx

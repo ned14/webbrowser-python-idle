@@ -1085,3 +1085,143 @@ and the boot pull's `wait_for_tailnet` cycles 12 attempts at ~15-20s each
 under the slow guest clock, so the sync spec budgets were raised to 240s
 (lock + snapshot) with a 600s spec timeout.
   dead `tailnetUp()` removed.
+
+### 16.9 Guest bind(2)/listen(2) crashed the core — fixed by implementing TCPServerSocket (2026-08-16)
+
+**Symptom:** `nc -z 100.64.0.1 8082` in the guest xterm made the console log
+end in `Uncaught TypeError: r.TCPServerSocket is not a function` (cx_esm.js
+worker) right after the connect attempt.
+
+**Root cause (traced in the vendored runtime):** the core's guest-socket
+dispatcher forwards `connect(2)` to `interface.TCPSocket` (dispatcher case 88
+→ `wT`) but forwards `bind(2)`/`listen(2)` to `interface.TCPServerSocket`
+(case 36 → `wS` → `r.TCPServerSocket("0.0.0.0", {localPort})`). The page's
+custom `networkInterface` (webvm/src/lib/network.js) implemented only
+`TCPSocket`/`UDPSocket`, so ANY guest process that explicitly binds crashed
+the worker. BusyBox `nc` unconditionally calls `bind(2)` before `connect(2)`
+(nc_bloaty.c `xbind`), so even the plain connect probe crashed; the sync
+agent's implicit bind inside `connect(2)` never hits case 36, which is why
+§16.8's data path worked while `nc -z` died.
+
+**Fix (webvm/src/lib/network.js):** implemented `TCPServerSocket(addr,
+{localPort})` mirroring the runtime's `TailscaleNetwork.TCPServerSocket`
+(tun/direct.js: bind(localPort) → listen() → accept loop over
+`accept()`/`waitIncoming()`, streaming accepted connections as
+`{opened, closed, close}` wrappers built by the shared
+`connectedTcpSocket()` helper, which now also backs `TCPSocket`). Exposed
+`window.cjTailscaleCurrentIp` for the E2E listen-twin probe
+(tests/e2e/tests/network.spec.js): bind+listen on the tailnet IP, self-connect
+through the tun, round-trip through the accepted socket — this is the "nc -z
+twin" for the listen side.
+
+**Verification:** frontend builds; unit 89 pass; E2E network spec now covers
+both directions. Re-test in the browser: rebuild the frontend
+(`cd webvm && WEBVM_MODE=browser WEBVM_IMAGE_BUILD=$(cat
+custom-disk-images/image-build.txt) npm run build`), reload the page, and
+`nc -z 100.64.0.1 8082` should connect (the guest nc twin: TCP SYN-ACK
+through the DERP relay — see §16.8 for the data-path prerequisites).
+
+### 16.9 The inbound accept path is dead + CONTROL_HOST=127.0.0.1 breaks the guest path (2026-08-16, late session)
+
+Two runtime defects pinned down with packet-level tracing (TUN-DIAG instrumentation
+in tailscale_tun.js, since removed) and a full bisect (server_url flips, gateway
+entrypoint reverts, heal variants, DB purge, image rebuilds):
+
+1. **Inbound TCP for the node's own IP is consumed by the rebuilt tailscale.wasm
+   — guest servers can bind+listen but never accept.** A SYN from a REAL peer
+   (the gateway, verified reachable via `tailscale ping` → pong via DERP) never
+   reaches the tun: the wasm client's own-IP handling swallows it
+   (`initPeerAPIListener: 2 netmap addresses match existing listeners`), and the
+   IpStack then spins an internal SYN/SYNACK retransmission loop (observed ~80
+   iterations). The page-side TCPServerSocket (network.js) binds+listens fine —
+   the §15 "TCPServerSocket is not a function" crash regression is fixed — but
+   the accept queue can never fill. Consequence: no guest LISTEN services
+   (sshd, git daemon, `python3 -m http.server`) can ever accept; the E2E
+   listen-twin probe must assert bind+listen ONLY (network.spec.js), with the
+   accept path documented as a runtime limitation. Outbound guest traffic is
+   unaffected (the sync agent's lease PUTs, HTTP round-trips and the nc-twin
+   probe all work).
+
+2. **`CONTROL_HOST=127.0.0.1` (browser-facing control host) breaks the guest
+   OUTBOUND data path.** With server_url=https://127.0.0.1:8443 the page-side
+   adapter probe works (SYN in 17ms, HTTP round-trip OK) but the guest's sync
+   agent never lands the lease (lock poll 240s+ fails; the guest-socket trace
+   shows the guest stuck on the adapter path, raw=0, and zero wsgidav
+   requests). With server_url=https://host.docker.internal:8443 the SAME
+   everything works end-to-end (lock in 15-30s, guest HTTP flows). The
+   mechanism is in the rebuilt wasm client's netmap/DERP handling (an IP
+   literal as the DERP-map host); a page-side or config workaround was not
+   found in this session. REVERTED the 127.0.0.1 default back to
+   host.docker.internal: single-machine use REQUIRES the one-line
+   `/etc/hosts` entry (`127.0.0.1 host.docker.internal`) on the browser
+   machine — that is the documented setup, and without it the browser spams
+   "failure to resolve host.docker.internal" (the user's original report) and
+   the tailnet never starts.
+
+3. **Unresolved flake (observed 01:20-04:35 UTC):** with server_url flipped to
+   127.0.0.1 and back, the guest path stayed broken across many runs even
+   after the flip-back, then started working again after a full `make build`
+   (fingerprint + ext2 + frontend rebuild) — with no identified single cause
+   (headscale DB purge, gateway/heal reverts and clean slates did not fix it).
+   Suspected interplay of the two-client heal (two wasm clients per page —
+   driver's + heal's — two tailnet nodes, the IpStack's output wired to the
+   LAST client) with the DERP host. Left as an open item: re-verify the
+   heal's necessity and the two-client setup when the wasm client is next
+   rebuilt (§16.1 source).
+
+### 16.10 host.docker.internal REMOVED — IP literals only (2026-08-16, user mandate)
+
+**The user's hard requirement (categorically imperative, never to be
+reintroduced):** NO hostnames anywhere — no `host.docker.internal`, no
+`/etc/hosts` entries, no custom DNS for LAN users. Everything must work with
+`127.0.0.1` (zero-config single machine) and a hardcoded LAN address such as
+`192.168.x.x` (LAN) alone. §16.9's "revert to host.docker.internal" verdict is
+**SUPERSEDED** — a hostname-based setup is not acceptable even if it works.
+
+**Mechanism that makes 127.0.0.1 work (the missing piece in §16.9):** the
+netmap's DERP region host is derived from headscale's `server_url`, i.e. the
+BROWSER-facing `CONTROL_HOST` — `127.0.0.1` on the single machine. Inside the
+GATEWAY container `127.0.0.1` is the gateway's OWN loopback, so its
+tailscaled could never reach the DERP relay (which is exactly what §16.9's
+"guest data path dies with 127.0.0.1" observed — the sync agent's lease PUTs
+to the gateway relay hang, while the page-side adapter probe still works,
+because the BROWSER reaches DERP at 127.0.0.1 fine). The earlier analysis
+attributed this to "the rebuilt wasm client's netmap/DERP handling with an
+IP-literal DERP host" and found "no page-side or config workaround" — the
+actual fix is a **loopback socat relay in the gateway on CONTROL_PORT
+forwarding to the server's static compose-network IP**
+(`start_relay "${CONTROL_PORT}" "${GATEWAY_CONTROL_IP}:${CONTROL_PORT}"` in
+gateway/entrypoint.sh): the gateway's DERP connection to
+`https://127.0.0.1:8443/derp` lands on its own loopback relay and is
+forwarded to the server. On LAN deployments the DERP host is the LAN IP,
+which the gateway reaches directly through the host (the relay is then
+unused but harmless).
+
+**Everything hostname-shaped was removed 2026-08-16:**
+- `CONTROL_HOST` default is `127.0.0.1` in every file (`server/entrypoint.sh`,
+  `scripts/print-url.sh`, `scripts/gen-certs.sh`, `scripts/acceptance.sh`,
+  `compose.yaml`, `.env.example`) — LAN deployments set it to a hardcoded LAN
+  IP. No `/etc/hosts` requirement anywhere; the README documents the ban.
+- The gateway uses `GATEWAY_CONTROL_IP` (default `172.28.0.10`, the server's
+  static compose-network IP on the fixed `172.28.0.0/16` network; cert SAN
+  covers it) for `--login-server` and its relays. `extra_hosts` was removed
+  from compose.yaml entirely.
+- `scripts/gen-certs.sh` SAN no longer carries `DNS:host.docker.internal`.
+- CI no longer appends `127.0.0.1 host.docker.internal` to `/etc/hosts`; the
+  E2E `--host-resolver-rules` mapping was removed (playwright.config.js and
+  the probe scripts); the join-test client joins via
+  `https://172.28.0.10:8443`.
+- **Enforcement:** `tests/unit/test_scripts.py::test_control_host_defaults_consistent`
+  asserts every CONTROL_HOST default is `127.0.0.1` AND that the literal
+  `host.docker.internal` appears in none of the runtime config/scripts/tests/
+  CI files (the banned list is in the test). This test FAILS CI if the
+  hostname is ever reintroduced — keep it green. AGENTS.md carries the rule.
+
+**Re-verification needed (open item):** the §16.9 data-path break under
+127.0.0.1 was never reproduced with the loopback DERP relay in place (the
+relay was added as part of this removal). The E2E `network.spec.js` root-visit
+test (baked config → `webvm.lock` lease → nc-twin socket probe → listen-twin)
+is the gate: it must pass on the single machine with `CONTROL_HOST=127.0.0.1`
+defaults and no /etc/hosts entry. Re-check the §16.9 "unresolved flake" item
+too — if the two-client heal is still present when the wasm client is next
+rebuilt, the flake may reappear independently of the DERP host.

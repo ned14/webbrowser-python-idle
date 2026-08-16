@@ -74,31 +74,53 @@ EOF
 make build && docker compose up -d server
 
 # 2. create the two reusable, long-lived preauth keys and record them in .env
+#    (keep HEADSCALE_BOOTSTRAP=1 for now — see step 3)
 docker compose exec server headscale users list          # note the user id (first user = 1)
 docker compose exec server headscale preauthkeys create --user 1 --reusable --expiration 100y
 docker compose exec server headscale preauthkeys create --user 1 --reusable --expiration 100y
 #   -> copy BOTH printed values into .env as HEADSCALE_PREAUTHKEY and
-#      GATEWAY_AUTHKEY, then set HEADSCALE_BOOTSTRAP=0
+#      GATEWAY_AUTHKEY
 
-# 3. bring up the tailnet stack and read the gateway's assigned tailnet IP
+# 3. bring up the tailnet stack and read the gateway's assigned tailnet IP.
+#    This recreates the server with the new .env — it MUST still be in
+#    bootstrap mode, because the entrypoint fails closed on the still-
+#    unrecorded gateway IP (bootstrap mode runs headscale normally).
 make up-tailnet
 docker compose exec server headscale nodes list     # record the gateway's IP as GATEWAY_TAILNET_IP
 
-# 4. print the full session URL (carries credentials — treat it like a password)
-make url
+# 4. write GATEWAY_TAILNET_IP and set HEADSCALE_BOOTSTRAP=0 in .env, then
+#    recreate the server so the baked page config carries them, and open
+#    https://127.0.0.1:8081 (the root redirects to /alpine.html). The preauth
+#    key + control plane (+ WebDAV sync) config is baked into the served page
+#    at container start, so networking just works — no URL needed.
+docker compose up -d server
 ```
 
+`make url` is now optional: it prints the explicit hash URL for other devices
+or for bookmarking (any hash on the URL overrides the baked config, so saved
+hash URLs keep working exactly as before).
+
 LAN/multi-device use: set `CONTROL_HOST=<LAN_IP>` and `LAN_IP=<LAN_IP>` in
-`.env` (and install `certs/ca.crt` on each device). Single machine keeps
-`CONTROL_HOST=host.docker.internal` (add `127.0.0.1 host.docker.internal` to
-`/etc/hosts` on the browser machine).
+`.env` (and install `certs/ca.crt` on each device). Single machine keeps the
+defaults — `CONTROL_HOST=127.0.0.1`, **zero configuration**.
+
+> **Hostnames are banned in this project.** No `host.docker.internal`, no
+> `/etc/hosts` entries, no custom DNS for LAN users — the browser must reach
+> the control plane over `127.0.0.1` (single machine) or a hardcoded LAN
+> address such as `192.168.x.x` (LAN) alone. The gateway container reaches
+> the server over the compose network at the server's static IP
+> (`172.28.0.10`) and relays the netmap's DERP host (`127.0.0.1` on the
+> single machine) through a loopback socat relay, so nothing anywhere needs a
+> hostname to resolve.
 
 > The control-plane URL is **path-less** (`https://${CONTROL_HOST}:${CONTROL_PORT}`):
 > verified against headscale v0.29.3, the Noise register path carries the
 > `server_url` path verbatim and headscale's noise router serves it at the root
 > (a `/headscale` base path 404s registration). nginx proxies all of
-> `CONTROL_PORT` to headscale; the embedded-DERP relay is
-> `https://${CONTROL_HOST}:${CONTROL_PORT}/derp`.
+> `CONTROL_PORT` to headscale; the embedded-DERP relay URL is
+> `https://${CONTROL_HOST}:${CONTROL_PORT}/derp`. The gateway reaches the
+> control plane at the server's static compose-network IP
+> (`GATEWAY_CONTROL_IP`, default `172.28.0.10`) regardless of `CONTROL_HOST`.
 
 ## LAN-only by design
 
@@ -150,6 +172,16 @@ Chromium), and `make acceptance` for the manual/LAN checklist.
   [cheerpx.io/licensing](https://cheerpx.io/licensing).
 - **No secrets in this repo.** Keys/credentials come from an optional `.env`
   (see `.env.example`); the entrypoints enforce them fail-closed per mode.
+- **Baked page config (accepted tradeoff, same trust boundary as the ext2).**
+  In tailnet modes the server renders the preauth key, control-plane URL and
+  (webdav) sync credentials into the same-origin `/webvm-config.js` at
+  container start, so visiting the site root needs no hash URL. Anyone who can
+  reach the site (published on `LAN_IP` only) can read those values — they are
+  exactly the credentials `make url` used to print; a LAN device with the
+  private CA trusted could join the tailnet with them. The file is served with
+  `Cross-Origin-Resource-Policy: same-origin` so remote webpages cannot read
+  it via a script tag. Key rotation = edit `.env` + recreate the server
+  container (`docker compose up -d server`).
 - **Served-image credentials (accepted tradeoff).** In `samba`/`webdav` builds
   the baked `/root/.syncrc`/`/home/user/.syncrc` fallback carries the real
   backend credentials, and the ext2 is served to any browser that can reach

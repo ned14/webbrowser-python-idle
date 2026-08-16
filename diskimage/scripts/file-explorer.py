@@ -9,6 +9,14 @@ import zipfile
 import tkinter as tk
 from tkinter import font, ttk, simpledialog, filedialog, messagebox
 
+# Tk file viewer (diskimage/scripts/file-viewer.py): "Open" launches it for
+# every non-Python file — images (Pillow), text and Markdown (mistune).
+# The image/text extension contract lives in file_types.py (shared with the
+# viewer) so routing and rendering cannot drift apart.
+from file_types import ALL_TEXT_EXTS, IMAGE_EXTS
+
+VIEWER = "/usr/local/bin/file-viewer.py"
+
 # =========================
 # App Setup
 # =========================
@@ -745,12 +753,16 @@ class SingleTab(ttk.Frame):
     def open_selected(self):
         items = self.get_selected_items()
         py_files = []
+        viewer_files = []
         for path in items:
             if os.path.isdir(path):
                 self.load_folder(path)
                 return
             if path.endswith(".py"):
                 py_files.append(path)
+                continue
+            if self._viewer_eligible(path):
+                viewer_files.append(path)
                 continue
             try:
                 if self._open_externally(path):
@@ -759,8 +771,97 @@ class SingleTab(ttk.Frame):
                     messagebox.showerror("Error", f"No opener available for {path}")
             except Exception as e:
                 messagebox.showerror("Error", str(e))
+        if viewer_files:
+            self._open_in_viewer(viewer_files)
         if py_files:
             self._open_in_idle(py_files)
+
+    def _viewer_eligible(self, path):
+        """True when the Tk viewer can display the file: a known image or
+        text extension, or sniffable text (extensionless files)."""
+        ext = os.path.splitext(path)[1].lower()
+        if ext in IMAGE_EXTS or ext in ALL_TEXT_EXTS:
+            return True
+        return self._is_text_file(path)
+
+    def _open_in_viewer(self, paths):
+        """Open non-Python files in the Tk viewer, replacing this window for
+        the duration.
+
+        Same swap model as IDLE (_open_in_idle): the explorer withdraws while
+        the viewer is up and only returns once the viewer's window is gone
+        from the i3 tree (the viewer exits with its window, so the window
+        check doubles as the process check and is robust to a lingering
+        process)."""
+        try:
+            proc = subprocess.Popen([VIEWER] + list(paths),
+                                    start_new_session=True)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        set_status(f"Opened {len(paths)} file(s) in viewer")
+        root.withdraw()
+        threading.Thread(target=self._wait_for_viewer, args=(proc,),
+                         daemon=True).start()
+
+    def _wait_for_viewer(self, proc):
+        # Never leave the explorer stuck: whatever happens (including watcher
+        # errors), always return to the file manager.
+        try:
+            self._watch_viewer(proc)
+        except Exception:
+            pass
+        root.after(0, self._viewer_finished)
+
+    def _watch_viewer(self, proc):
+        # Phase 1: wait for the viewer to map its window (or exit on its own).
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if self._proc_exited(proc):
+                return
+            if self._viewer_window_open():
+                break
+            time.sleep(0.5)
+        # Phase 2: watch for the user closing the viewer window. The 0.5 s
+        # cadence of phase 1 is only needed for window-mapping; here a slow
+        # poll avoids ~7200 i3-msg spawns/hour (subprocess + IPC + full-tree
+        # JSON parse each) competing with the viewer's rendering — a couple of
+        # seconds of delay before the explorer reappears is imperceptible.
+        while True:
+            if self._proc_exited(proc):
+                break
+            if not self._viewer_window_open():
+                break
+            time.sleep(3.0)
+        # Viewer gone: make sure no stray process outlives its window and
+        # blocks the return to the file manager.
+        self._kill_idle_tree(proc, [])
+
+    @staticmethod
+    def _viewer_window_open():
+        """True while the viewer's window is present in the i3 tree. The
+        viewer sets class 'FileViewer' and a '<name> — Viewer' title. On i3
+        failure, assume still open so a transient error never kills it
+        prematurely."""
+        try:
+            out = subprocess.check_output(["i3-msg", "-t", "get_tree"],
+                                          stderr=subprocess.DEVNULL)
+            tree = json.loads(out)
+        except Exception:
+            return True
+        stack = [tree]
+        while stack:
+            node = stack.pop()
+            if node.get("window") is not None:
+                wp = node.get("window_properties") or {}
+                if wp.get("class") == "FileViewer":
+                    return True
+                name = node.get("name") or ""
+                if name.endswith("— Viewer") or name.endswith("- Viewer"):
+                    return True
+            stack.extend(node.get("nodes") or ())
+            stack.extend(node.get("floating_nodes") or ())
+        return False
 
     def open_with_idle(self):
         items = [p for p in self.get_selected_items() if p.endswith(".py")]
@@ -931,6 +1032,12 @@ class SingleTab(ttk.Frame):
     def _idle_finished(self):
         # IDLE may have created/edited/saved files while the explorer was
         # hidden; reload the current folder before reappearing.
+        self.load_folder(self.current_path)
+        root.deiconify()
+
+    def _viewer_finished(self):
+        # The viewer is view-only, but the folder may have changed (e.g. a
+        # sync pull); reload before reappearing, same as after IDLE.
         self.load_folder(self.current_path)
         root.deiconify()
 

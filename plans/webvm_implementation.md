@@ -38,7 +38,36 @@ See `plans/implementation_options.md` for the option comparison.
 > the guest **sync agent walks subdirectories** (recursive listing + MKCOL of
 > parent collections); and the CSP is the full `default-src 'self'` set
 > (`script-src 'unsafe-inline' 'unsafe-eval' blob:`, `worker-src blob:`), not
-> just `connect-src`.
+> just `connect-src`. Round 8 (2026-08-16) records the **baked page config**
+> deviation: in tailnet modes the server entrypoint renders the network/sync
+> secrets into the same-origin **`/webvm-config.js`** at container start, and
+> the page seeds `sessionStorage` from it when the URL carries **no hash** —
+> visiting `https://127.0.0.1:8081` (root, no `make url` needed) auto-wires the
+> tailnet; **any explicit hash is a fully explicit session** (the baked config
+> is ignored, so saved `make url` URLs work unchanged). `make url` remains as
+> the explicit-hash escape hatch. Details at §5, Step 4 and §12/21(28).
+> Round 9 (2026-08-16) records the **fatal-error overlay**: any VM load
+> failure or stop now shows the exact reason on screen (`role="alert"`
+> overlay with message + stack, Reload and Copy buttons; boot errors
+> propagate to one `onMount` catch, a rejecting `cx.run()` is caught as
+> phase "runtime" instead of an unhandled rejection, and the session-lock
+> path can no longer stall the page — details §12/21(29)).
+> Round 10 (2026-08-16, late) recorded the **control-host verdict**: a
+> browser-facing `CONTROL_HOST=127.0.0.1` was implemented and REVERTED
+> because it appeared to break the guest data path. **Round 11 (2026-08-16,
+> user mandate) SUPERSEDES that verdict:** hostnames are banned — no
+> `host.docker.internal`, no `/etc/hosts` entries, no custom DNS for LAN
+> users; everything must work with `127.0.0.1` (zero-config single machine)
+> and a hardcoded LAN address (e.g. `192.168.x.x`) alone. The likely §16.9
+> mechanism is now understood: the netmap's DERP host (`127.0.0.1` with
+> server_url=127.0.0.1) was unreachable from the GATEWAY container (its own
+> loopback), and the fix is a gateway loopback socat relay on CONTROL_PORT →
+> the server's static compose-network IP (`GATEWAY_CONTROL_IP`, 172.28.0.10).
+> `host.docker.internal` was removed from every runtime config/script/test/CI
+> file; `tests/unit/test_scripts.py::test_control_host_defaults_consistent`
+> enforces the ban in CI. Full evidence: `plans/networking-bug.md` §16.9 +
+> §16.10, §12/21(30)-(31). The inbound accept path finding stands: the E2E
+> listen twin asserts bind+listen only (§16.9 item 1, unchanged).
 > all decisions are in the body (§3, §4, §5, §12) and full rationale is in git
 > history. Current standpoints in one paragraph: **HTTPS is the only access
 > mode** — `https://127.0.0.1:<SITE_PORT>` single-machine (private CA trusted
@@ -232,17 +261,23 @@ that this plan's self-hosted nginx makes unnecessary.
     (§12/10 — **not** the raw ext2 bytes) — the suffix changes whenever the
     image content changes, and stays put for content-identical rebuilds
     (§4/Step 4).
-13. **Control-plane host (decided):** all control-plane/DERP URLs are built
-    from a single **`CONTROL_HOST`** value — `https://${CONTROL_HOST}:${CONTROL_PORT}`
-    — rendered into `server_url`, the URL hash `controlUrl`, and the gateway's
-    `--login-server`. Default is **`host.docker.internal`**; the browser
-    resolves it through a one-line `/etc/hosts` entry
-    (`127.0.0.1 host.docker.internal`), and the `gateway` container resolves it
-    to the **server container's static compose-network IP** via `extra_hosts`
-    (works on Linux and Docker Desktop — §5.2). LAN use sets
-    `CONTROL_HOST=<LAN_IP>` (§5). This guarantees the DERP relay URL derived by
-    headscale from `server_url` is reachable from **both** the browser and the
-    gateway container.
+13. **Control-plane host (decided; REVISED Round 10 + Round 11, 2026-08-16):**
+    all control-plane/DERP URLs are built from a single **`CONTROL_HOST`**
+    value — `https://${CONTROL_HOST}:${CONTROL_PORT}`
+    — rendered into `server_url`, the URL hash `controlUrl`, and the baked
+    page config. Default is **`127.0.0.1`** (zero-config single machine);
+    LAN use sets `CONTROL_HOST=<LAN_IP>` (hardcoded LAN address, §5).
+    **HOSTNAMES ARE BANNED (Round 11, user mandate):** no
+    `host.docker.internal`, no `/etc/hosts` entries, no custom DNS for LAN
+    users — the browser must reach the control plane over 127.0.0.1 / a LAN
+    IP alone, and `tests/unit/test_scripts.py` enforces the ban in CI. The
+    Round 10 attempt to default 127.0.0.1 was reverted because it appeared
+    to break the guest data path; Round 11 supersedes that: the gateway
+    reaches the control plane at the server's static compose-network IP
+    (`GATEWAY_CONTROL_IP` = 172.28.0.10, cert SAN covered) and runs a
+    loopback socat relay on CONTROL_PORT so the netmap's DERP host
+    (`127.0.0.1` single machine / the LAN IP) is reachable from inside the
+    gateway container (plans/networking-bug.md §16.10).
 
 ## 4. Persistence (configurable backend: browser | samba | webdav | none)
 
@@ -421,10 +456,16 @@ endpoint.
 **self-hosted Headscale** control server in the container, which also runs the
 **embedded DERP relay**. All browser→LAN traffic stays on-LAN (WebSocket to the
 container). The guest joins automatically via the URL hash
-(`#authKey=…&controlUrl=…`).
+(`#authKey=…&controlUrl=…`) **— or, since Round 8 (2026-08-16), with NO URL at
+all**: in tailnet modes the server entrypoint renders the same credentials into
+the same-origin `/webvm-config.js` (`window.__webvmConfig`), and the page seeds
+`sessionStorage` from it when the URL carries no hash, so visiting the site
+root (`https://127.0.0.1:8081` → 302 `/alpine.html`) just works. Any explicit
+hash makes the session fully explicit — the baked config is ignored, so saved
+`make url` URLs behave exactly as before (see Step 4 and §12/21(28)).
 
 **TLS (mandatory, not "production-only"):**
-- The **site itself is served over HTTPS** on `SITE_PORT` (private CA). CheerpX
+- **The site itself is served over HTTPS** on `SITE_PORT` (private CA). CheerpX
   needs SharedArrayBuffer, which requires a secure context; plain HTTP on a LAN
   IP is not one, so the VM would not boot otherwise. **HTTPS is the only access
   mode** (revised 2026-08-09): single-machine and LAN both use it.
@@ -441,13 +482,17 @@ container). The guest joins automatically via the URL hash
   installed on each device. Both are validated in §10.1; the E2E suite
   exercises the HTTPS path.
 - **All control/DERP URLs derive from `CONTROL_HOST`**
-  (`https://${CONTROL_HOST}:${CONTROL_PORT}`): default **`host.docker.internal`**
-  for single-machine — the browser resolves it through a one-line `/etc/hosts`
-  entry (`127.0.0.1 host.docker.internal` on the machine running the browser),
-  and the `gateway` container resolves it to the **server container's static
-  compose-network IP** via `extra_hosts` (§5.2) so no host-published port ever
-  needs to be reachable from inside Docker; LAN/multi-device use sets
-  `CONTROL_HOST=<LAN_IP>` (no `/etc/hosts` needed). See §12/13 and Step 6.
+  (`https://${CONTROL_HOST}:${CONTROL_PORT}`): default **`127.0.0.1`** for
+  the zero-config single machine — **no `/etc/hosts` entry, no hostnames of
+  any kind** (hostnames are banned: `host.docker.internal` and /etc/hosts
+  tricks must never reappear; `tests/unit/test_scripts.py` enforces it in
+  CI). The `gateway` container reaches the control plane at the **server
+  container's static compose-network IP** (`GATEWAY_CONTROL_IP` =
+  `172.28.0.10`, cert SAN covered) and forwards the netmap's DERP host
+  (`127.0.0.1` single machine / the LAN IP) through a loopback socat relay
+  on CONTROL_PORT (§5.2, networking-bug.md §16.10); LAN/multi-device use
+  sets `CONTROL_HOST=<LAN_IP>` (hardcoded LAN address). See §12/13 and
+  Step 6.
 - **CORS (verify-at-implementation):** the browser Tailscale client receives
   the DERP map **inside the control-protocol netmap over the WSS control
   channel** (headscale v0.29.x serves no `/derpmap` HTTP endpoint and never
@@ -484,8 +529,8 @@ container). The guest joins automatically via the URL hash
    at the root-level `/derp`** (with `/derp/probe` and `/bootstrap-dns`
    alongside), and the DERP-map relay URL headscale hands clients is derived
    from `server_url` as `https://${CONTROL_HOST}:${CONTROL_PORT}/derp`
-   (confirmed at runtime: the DERP map lists `HostName: host.docker.internal`,
-   `DERPPort: 8443`). nginx therefore proxies the **entire** 8443 listener to
+   (confirmed at runtime: with server_url `https://127.0.0.1:8443` the DERP
+   map lists `HostName: 127.0.0.1`, `DERPPort: 8443`). nginx therefore proxies the **entire** 8443 listener to
    headscale with a single catch-all `location /` carrying the WebSocket
    upgrade headers (`proxy_http_version 1.1`, `Upgrade`/`Connection:
    $connection_upgrade`, `proxy_buffering off`, generous timeouts): headscale's
@@ -496,34 +541,36 @@ container). The guest joins automatically via the URL hash
    `tailscaled` in **userspace-networking mode** and the **socat relays in the
    same container** (a small `gateway/Dockerfile` built from the official
    `tailscale/tailscale` pinned tag with `socat` added — socat must share the
-   gateway's network namespace with tailscaled, so it cannot be a separate
-   service) joined to the container's Headscale as a plain member
-    (**no `--advertise-routes`**, no exit node). Everything lives in Docker;
-    nothing is installed on the host. The gateway joins with
-    `--login-server https://${CONTROL_HOST}:${CONTROL_PORT}`
-    (path-less — matches `server_url`; §12/21(c))
-    and `--authkey $GATEWAY_AUTHKEY` (reusable — see §12/12 — so a recreated
-    container can rejoin) and persists its tailscaled state on a named volume.
-   **Reachability (fixed — works on Linux and Docker Desktop):** because
-   published ports bind only the host's loopback (`127.0.0.1`/`127.0.0.2`), a
-   container reaching the host via `host-gateway` (the bridge IP, e.g.
-   `172.17.0.1`) **cannot** reach them. Instead the `server` container gets a
-   **static IP on a fixed-subnet compose network** (e.g. `172.28.0.10` on
-   `172.28.0.0/16`) and the gateway maps `host.docker.internal` to it via
-   `extra_hosts: ["host.docker.internal:172.28.0.10"]` — so `--login-server`
-   and the DERP-map URL (`https://host.docker.internal:8443/…`) resolve to the
-   server container over the compose network, and the loopback-published host
-    ports stay host-only. **Verify at implementation** that the `extra_hosts`
-    entry wins over Docker Desktop's engine-provided `host.docker.internal`
-    alias (glibc uses the first `/etc/hosts` match; the engine's alias is
-    served via its embedded DNS, which `/etc/hosts` overrides — but confirm
-    it); **fallback:** add the server container's static compose-network IP
-    (e.g. `172.28.0.10`) to the cert SAN and point the gateway at
-    `https://172.28.0.10:8443` directly. The gateway also **trusts
-    the private CA** for control/DERP TLS: mount `./certs:/certs:ro` and set
-    `SSL_CERT_FILE=/certs/ca.crt` (Go honors this). socat binds ports below
-    1024 (`445`, `2222`), so the gateway runs as root (the default user of the
-    tailscale image).
+    gateway's network namespace with tailscaled, so it cannot be a separate
+    service) joined to the container's Headscale as a plain member
+     (**no `--advertise-routes`**, no exit node). Everything lives in Docker;
+      nothing is installed on the host. The gateway joins with
+      `--login-server https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT}`
+      (`GATEWAY_CONTROL_IP` = the server's static compose-network IP,
+      default `172.28.0.10` — path-less, matches `server_url`; §12/21(c))
+      and `--authkey $GATEWAY_AUTHKEY` (reusable — see §12/12 — so a recreated
+      container can rejoin) and persists its tailscaled state on a named volume.
+   **Reachability (fixed — works on Linux and Docker Desktop, NO hostnames):**
+   because published ports bind only the host's loopback
+   (`127.0.0.1`/`127.0.0.2`), a container reaching the host via `host-gateway`
+   (the bridge IP, e.g. `172.17.0.1`) **cannot** reach them. Instead the
+   `server` container gets a **static IP on a fixed-subnet compose network**
+   (`172.28.0.10` on `172.28.0.0/16`, cert SAN `IP:${SERVER_IP}`) and the
+   gateway points `--login-server` at `https://172.28.0.10:8443` directly —
+   **no `extra_hosts` hostname mapping** (removed 2026-08-16). The netmap's
+   DERP-map host (derived from the browser-facing `server_url` — `127.0.0.1`
+   on the single machine, the LAN IP on a LAN) is reached by the gateway
+   through a **loopback socat relay on CONTROL_PORT forwarding to
+   `GATEWAY_CONTROL_IP:CONTROL_PORT`**: on the single machine
+   `https://127.0.0.1:8443/derp` inside the gateway container is its own
+   loopback, and the relay makes it reach the server (without it the guest
+   data path dies exactly as §16.9 observed); on a LAN the DERP host is the
+   LAN IP, reached directly through the host (the relay is unused but
+   harmless). The gateway also **trusts the private CA** for control/DERP
+   TLS: mount `./certs:/certs:ro` and set
+   `SSL_CERT_FILE=/certs/ca.crt` (Go honors this). socat binds ports below
+   1024 (`445`, `2222`), so the gateway runs as root (the default user of the
+   tailscale image).
 3. **Reachability (resolved — no subnet routing, verified inbound path):** the
    browser Tailscale client hard-codes `RouteAll: false`
    (`cmd/tsconnect/wasm/wasm_js.go`), so it never accepts advertised LAN subnet
@@ -700,8 +747,9 @@ webvm-custom/
 │                           # (pytest); ALL options inline with defaults
 │                           # (${VAR:-default}); ports published on
 │                           # ${LAN_IP:-127.0.0.1} (only; EXTRA_BIND_IP dropped)
-│                           # UDP ${STUN_PORT:-3478}; gateway extra_hosts
-│                           # host.docker.internal:<server-ip> + state volume;
+│                           # UDP ${STUN_PORT:-3478}; gateway joins the control
+│                           # plane at GATEWAY_CONTROL_IP (server's static IP,
+│                           # no extra_hosts hostnames) + state volume;
 │                           # pinned image tags; optional x-* block
 ├─ .env.example             # OPTIONAL overrides/secrets only (CONTROL_HOST,
 │                           # LAN_IP, ports, WEBDAV_ROOT, DATA_DIR,
@@ -1002,11 +1050,31 @@ README's local-serving instructions.) Frontend edits (in
   BroadcastChannel, heartbeat/expiry as in §4) before mounting the fixed
   overlay; on contention, boot with an ephemeral (random) cacheId and show a
   notice.
-- **URL-hash handling (all secrets out of the hash):** on page load read
-  `authKey`, `controlUrl`, and (webdav mode) `syncUrl`/`syncUser`/`syncPass`
-  **from the URL hash only** (no auto-derived default — §4 Mode C), move them
-  to `sessionStorage`, then strip the hash via `history.replaceState` so **no
-  secrets (including the preauth key) persist in browser history**. **Ordering
+- **URL-hash handling (all secrets out of the hash; REVISED Round 8,
+  2026-08-16 — baked page config):** on page load read `authKey`, `controlUrl`,
+  and (webdav mode) `syncUrl`/`syncUser`/`syncPass` from the URL hash, move
+  them to `sessionStorage`, then strip the hash via `history.replaceState` so
+  **no secrets (including the preauth key) persist in browser history**.
+  **REVISED:** the page no longer depends on the hash alone — in tailnet modes
+  the server entrypoint renders the same values into the same-origin
+  **`/webvm-config.js`** (`window.__webvmConfig = {authKey, controlUrl,
+  syncUrl, syncUser, syncPass}`, JSON-escaped via the dedicated
+  `server/render-webvm-config.py` — never raw
+  envsubst, credentials may contain quotes/backslashes/`$`; `Cache-Control:
+  no-store` + `Cross-Origin-Resource-Policy: same-origin` so key rotation
+  after a container recreate takes effect and cross-origin webpages cannot
+  read the credentials back), and the
+  inline script seeds `sessionStorage` from it **when the URL carries no
+  hash** — visiting the site root then auto-wires the tailnet (this is the
+  Round 8 change; `make url`/`print-url.sh` remain as the explicit-hash
+  path).   **Any explicit hash disables the baked config entirely** (the session is
+  fully explicit — saved `make url` URLs behave identically to before) and
+  marks the tab explicit for its lifetime, so a later hash-less
+  navigation/reload in the same tab does not re-arm the baked config.
+  In bootstrap mode — and always in `browser`/`none` — the entrypoint renders
+  `{}`, so a disconnected session stays disconnected. The webdav fail-closed
+  set gained `GATEWAY_TAILNET_IP` (the baked `syncUrl` needs it; skipped
+  during bootstrap, when the gateway has not joined yet). **Ordering
   requirement:** `network.js` (stock webvm reads the hash at module-import
   time, before any component code runs) is adapted to read the values from
   `sessionStorage`, and the hash→sessionStorage move must run in a small inline
@@ -1018,12 +1086,12 @@ README's local-serving instructions.) Frontend edits (in
   file at `/opt/syncrc`** (`writeFile` paths are relative to the device root;
   mounting at `/opt/syncrc` would yield `/opt/syncrc/syncrc`) — **spike
   first** against the pinned CheerpX version (§4 Mode C); if unavailable, the
-  agent uses the baked `/root/.syncrc` fallback. **UX caveat:** after the
-  strip, the only copy of the network params lives in that tab's
-  `sessionStorage`; reopening the stripped URL in a new tab silently boots a
-  *disconnected* session, so the full hash URL must be saved by the user (the
-  server entrypoint prints it — the full hash URL carries the credentials, so
-  treat it like a password in terminal scrollback).
+  agent uses the baked `/root/.syncrc` fallback. **UX caveat (revised):** after
+  the strip, the only copy of the hash's params lives in that tab's
+  `sessionStorage` — but a hash-less visit re-seeds from `/webvm-config.js`,
+  so a new tab at the site root is **connected**, not silently disconnected
+  (pre-Round-8 behavior); the explicit hash URL is still printed by `make url`
+  for the cases that need it.
 - **No public-request frontend edits (required for the no-egress tests):**
   strip from `src/app.html`: the `https://plausible.leaningtech.com/js/script.js`
   tag, the `fonts.googleapis.com`/`fonts.gstatic.com` preconnects, **and the
@@ -1101,8 +1169,9 @@ or build-time dependency beyond the pinned npm packages.
     mistaken for a broken stack.
   - `networks:` a **fixed-subnet user-defined network** (e.g. `172.28.0.0/16`)
     with a **static `ipv4_address` for `server`** (e.g. `172.28.0.10`) so the
-    `gateway` maps `host.docker.internal` to it (§5.2) — no host interface
-    involved.
+    `gateway` reaches the control plane at that IP directly
+    (`GATEWAY_CONTROL_IP`; REVISED Round 11 — no `extra_hosts` hostname
+    mapping, §5.2) — no host interface involved.
   - `volumes:` `./certs:/certs`, a **named volume for headscale's state
     (`/var/lib/headscale`)** — its SQLite DB holds the preauth keys and the
     gateway's node record (and therefore its allocated tailnet IP), which is
@@ -1295,22 +1364,21 @@ so a separate socat container would break the design. The service is behind
 (`make up-tailnet`) or explicitly for Phase 2 validation —
 `browser`/`none` builds do not run it:
 - `tailscaled --tun=userspace-networking` joined to Headscale:
-  `--login-server https://${CONTROL_HOST}:${CONTROL_PORT} --authkey $GATEWAY_AUTHKEY`
+  `--login-server https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT} --authkey $GATEWAY_AUTHKEY`
   (a **separate node key** from the browser `HEADSCALE_PREAUTHKEY`; **both keys
   are reusable** so a recreated gateway can rejoin; **no `--advertise-routes`**,
   no exit node). The service mounts a **named volume for tailscaled state**
   (`/var/lib/tailscale`) so the node key survives container recreation. The
-  gateway reaches the control plane/DERP via
-  `extra_hosts: ["host.docker.internal:<server-static-ip>"]` (e.g. `172.28.0.10`)
-  — this works on Linux and Docker Desktop alike and does **not** depend on
-  the host-published loopback ports (§5.2). **Verify at implementation** that
-  the `extra_hosts` entry wins over Docker Desktop's engine-provided
-  `host.docker.internal` alias (glibc uses the first `/etc/hosts` match; the
-  engine's alias is served via its embedded DNS, which `/etc/hosts` overrides —
-  but confirm it); **fallback:** add the server container's static compose-
-  network IP (e.g. `172.28.0.10`) to the cert SAN and point the gateway's
-  `--login-server`/DERP at `https://172.28.0.10:8443` directly, removing the
-  alias dependency — and **trusts the private CA** via
+  gateway reaches the control plane/DERP at the server's static compose-
+  network IP `GATEWAY_CONTROL_IP` (default `172.28.0.10`, cert SAN
+  `IP:${SERVER_IP}`; **REVISED Round 11 — no `extra_hosts` hostname mapping,
+  hostnames are banned**) — this works on Linux and Docker Desktop alike and
+  does **not** depend on the host-published loopback ports (§5.2). The
+  netmap's DERP host (derived from the BROWSER-facing `server_url`: `127.0.0.1`
+  single machine / LAN IP) is forwarded from the gateway's own loopback via a
+  **socat relay on CONTROL_PORT → `GATEWAY_CONTROL_IP:CONTROL_PORT`** — without
+  it the gateway can never reach the DERP relay on the single machine (§16.10).
+  The gateway **trusts the private CA** via
   `SSL_CERT_FILE=/certs/ca.crt` with `./certs:/certs:ro` (§5.2).
   **No `cap_add: NET_ADMIN` is required in userspace mode** (there is no TUN
   device); grant it only if the fallback TUN path is used.
@@ -1427,15 +1495,22 @@ compose level; the entrypoint enforces them fail-closed per mode: `browser`/
 tailnet modes need `HEADSCALE_PREAUTHKEY`/`GATEWAY_AUTHKEY` (reusable,
 long-lived keys created once with `headscale preauthkeys create` and kept in
 `.env`). **Full end-to-end validation (tailnet + sync) runs with a `samba`/
-`webdav` build and the `tailnet` profile up** (`make up-tailnet`); open
+`webdav` build and the `tailnet` profile up** (`make up-tailnet`); open the
+**site root** — `https://${CONTROL_HOST}:<SITE_PORT>` (302 → `/alpine.html`) —
+which, since Round 8, carries the baked `/webvm-config.js` (authKey/controlUrl/
+syncUrl rendered from `.env` at container start) and auto-wires the tailnet
+with no hash; the explicit session URL
 `https://${CONTROL_HOST}:<SITE_PORT>/alpine.html#authKey=…&controlUrl=https://${CONTROL_HOST}:<CONTROL_PORT>&syncUrl=http://<gateway-tailnet-IP>:<WEBDAV_PORT>/webdav/…`
-— with `CONTROL_HOST=host.docker.internal` for single-machine (needs the
-`/etc/hosts` entry `127.0.0.1 host.docker.internal` on the browser machine) or
-`CONTROL_HOST=<LAN_IP>` on a LAN; `browser`/`none` sessions use
-`https://127.0.0.1:<SITE_PORT>/alpine.html`. The full hash URL (printed by
-`make url`) carries the preauth and WebDAV credentials — treat it like a
-password in terminal scrollback/logs. Use `docker compose logs -f` and
-`make down`.
+still works unchanged (any hash overrides the baked config) — with
+`CONTROL_HOST=127.0.0.1` for the zero-config single machine (**no /etc/hosts
+entry, no hostnames — banned, §12/13**; the gateway's loopback DERP relay
+makes the 127.0.0.1 DERP host reachable, §16.10) or
+`CONTROL_HOST=<LAN_IP>` (hardcoded LAN address) on a LAN; `browser`/
+`none` sessions use
+`https://127.0.0.1:<SITE_PORT>/alpine.html` (baked config is `{}` there). The
+explicit hash URL (printed by `make url`) carries the preauth and WebDAV
+credentials — treat it like a password in terminal scrollback/logs. Use
+`docker compose logs -f` and `make down`.
 
 ## 8. CI testing (GitHub Actions)
 
@@ -1475,21 +1550,22 @@ those; defaults come from build args). `.github/workflows/ci.yml`:
 3. **server** — `docker compose config -q` (validates the compose file and its
    inline defaults; secrets are `${VAR:-}` so this passes with none set);
    **generate a throwaway private CA + server cert into `certs/` first** (SAN:
-   `host.docker.internal`, `127.0.0.1`, `localhost` — required before `docker
+   `127.0.0.1`, `localhost`, `IP:${LAN_IP}`, `IP:${SERVER_IP}` — no hostnames;
+   required before `docker
    compose up`, since nginx serves HTTPS from `/certs`); **download the
    `frontend` build artifact and the guest-image ext2 artifact and place them
    where the `server/Dockerfile` consumes them** (declared build contexts for
    `build/` and `custom-disk-images/` — the served `alpine.html` and the ext2
    must be inside the server image);    **export throwaway
    secret values** (`WEBDAV_USER`/`WEBDAV_PASS`, `HEADSCALE_PREAUTHKEY`,
-   `GATEWAY_AUTHKEY`) for the webdav-mode stack; set `CONTROL_HOST=host.docker.internal`
+   `GATEWAY_AUTHKEY`) for the webdav-mode stack; set `CONTROL_HOST=127.0.0.1`
    and `LAN_IP=127.0.0.1` via a temporary `.env`
    override (or exported shell vars) since CI is not on a LAN — the defaults
    already make this loopback-safe (§5); the gateway (and the §9.3 test client)
-   reach the control plane via the **static server IP** (`extra_hosts:
-   host.docker.internal:172.28.0.10`, §5.2) and trust the CA via
-   `SSL_CERT_FILE=/certs/ca.crt`; add `127.0.0.1 host.docker.internal` to the
-   runner's `/etc/hosts` (for the browser-side paths); `docker compose build`;
+   reach the control plane at the **server's static compose-network IP**
+   (`GATEWAY_CONTROL_IP` = `172.28.0.10`, cert SAN `IP:${SERVER_IP}` — no
+   `extra_hosts` hostname mapping, REVISED Round 11) and trust the CA via
+   `SSL_CERT_FILE=/certs/ca.crt`; `docker compose build`;
    **bootstrap the preauth keys in the fresh headscale DB before the real
    `up`** — start the server once with `HEADSCALE_BOOTSTRAP=1` (the
    implementation's first-run override), run
@@ -1527,12 +1603,12 @@ those; defaults come from build args). `.github/workflows/ci.yml`:
   TLS and control-plane spike is covered by the Headscale-join integration test
   and the E2E control-plane check; subnet-route acceptance is source-resolved
   (`RouteAll=false`), and only the socat-relay path is validated (manual in §10).
-- **Tailnet tests need a host both ends can resolve:** the browser (runner
-  `/etc/hosts`) resolves `CONTROL_HOST=host.docker.internal` to `127.0.0.1`,
-  and the `gateway`/client containers map it to the **server container's
-  static compose-network IP** via `extra_hosts` (§5.2); `server_url` renders
-  the same value, so headscale's DERP-map relay URL is reachable from both
-  sides.
+- **Tailnet tests need no hostname resolution (REVISED Round 11):** the
+  browser reaches `CONTROL_HOST=127.0.0.1` directly (no `/etc/hosts` entry),
+  and the `gateway`/client containers reach the **server container's static
+  compose-network IP** (`GATEWAY_CONTROL_IP` = `172.28.0.10`) directly; the
+  gateway's loopback relay forwards the netmap's DERP host (`127.0.0.1`),
+  so `server_url`'s DERP-map relay URL is reachable from both sides.
 - Optionally upload the ext2 image as a workflow artifact (`actions/upload-artifact`)
   for manual download; do **not** publish it to a package registry.
 
@@ -1614,9 +1690,10 @@ runner):
 - **Headscale join test** (validates the control plane + private-CA TLS without
   a browser): run a `tailscaled` client container that trusts the test CA
   (`SSL_CERT_FILE=/certs/ca.crt`, `./certs` mounted) and
-  `--login-server https://${CONTROL_HOST}:${CONTROL_PORT}`
-  (`CONTROL_HOST=host.docker.internal` in CI, with `extra_hosts:
-  host.docker.internal:<server-static-ip>` so the container reaches the control
+  `--login-server https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT}`
+  (`GATEWAY_CONTROL_IP` = the server's static compose-network IP
+  `172.28.0.10`, cert SAN covered — **no hostnames, no `extra_hosts`**,
+  REVISED Round 11) so the container reaches the control
   plane over the compose network — **not** the loopback-published host port)
   and assert it registers (`headscale nodes list`) and that tailnet
   connectivity to a second node works (via the embedded DERP, whose relay URL
@@ -1654,6 +1731,21 @@ running server (`@playwright/test`, `npx playwright install --with-deps chromium
 - **sync (webdav mode)**: within ~2 min the lease file and a `~/` snapshot
   appear on the WebDAV backend; reload the page → pull runs (snapshot timestamps
   advance / content round-trips).
+- **network (webdav mode, Round 8)**: the user's exact acceptance sequence —
+  visit the site **root** (302 → `/alpine.html`, baked `/webvm-config.js`
+  auto-wires the tailnet, no hash), let the file manager load, then verify the
+  guest data path reaches the gateway relay: wait for the sync agent's
+  `webvm.lock` on the backend (proves in-guest connectivity — a broken data
+  path hangs exactly like `nc -z`), then drive the same `cjTailscale` socket
+  adapter the core hands guest `connect(2)` to (the `nc -z
+  <GATEWAY_TAILNET_IP> <WEBDAV_PORT>` twin) and assert a full TCP connect +
+  HTTP round-trip. Needs `E2E_GATEWAY_IP` (the gateway tailnet IP) — this
+  also gives the baked-config path its first boot-through E2E coverage.
+- **error overlay (Round 9)**: a forced boot failure (`webvm-test-bootfail`
+  sessionStorage hook in `initCheerpX`) must show the exact reason in a
+  visible full-screen overlay (role=alert), and the overlay's Reload must
+  work when the boot failed before the block cache existed (plain reload
+  fallback).
 - **persistence**: `browser` mode — the overlay's persistent browser store is
   non-empty after boot and after a reload (assert `indexedDB.databases()` if
   the pinned build uses `IDBDevice`, or the OPFS store if it uses
@@ -1755,7 +1847,7 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
 | i386 guest build in CI is slow (native compat mode, no QEMU needed) | buildx layer cache; matrix limited to the four backends |
 | Cross-origin isolation misconfig | Validate headers first (§10.1); E2E boot asserts isolation |
 | Duplicate host port binds when `LAN_IP` is loopback (CI/dev) | Default is loopback-safe: `LAN_IP=127.0.0.1` only (the planned `EXTRA_BIND_IP=127.0.0.2` second binding was dropped — not bindable on macOS Docker Desktop; §12/21) — no collision; CI uses the same default |
-| Gateway container cannot reach the control plane/DERP over the host's loopback | **Fixed:** the `server` container gets a static IP on a fixed-subnet compose network and the gateway maps `host.docker.internal` to it via `extra_hosts` (works on Linux and Docker Desktop, independent of the loopback-published ports) + trusts the private CA via `SSL_CERT_FILE` (§5.2/Step 7) |
+| Gateway container cannot reach the control plane/DERP over the host's loopback | **Fixed (REVISED Round 11):** the `server` container gets a static IP on a fixed-subnet compose network and the gateway points `--login-server` at that IP (`GATEWAY_CONTROL_IP` = `172.28.0.10`, cert SAN covered) + a loopback socat relay on CONTROL_PORT forwards the netmap's DERP host (127.0.0.1 single machine) to the server — no `extra_hosts` hostnames (works on Linux and Docker Desktop, independent of the loopback-published ports) + trusts the private CA via `SSL_CERT_FILE` (§5.2/Step 7) |
 | STUN discovery is gateway-only (the browser client has no UDP socket) | The gateway already reaches STUN at `172.28.0.10:3478` over the compose network without any host publish; the UDP host publish is a harmless extra; relay-only is the steady state (§6 Step 6, §12/21(h)) |
 | Non-reusable gateway auth key consumed on first join → recreated gateway can't rejoin | Make `GATEWAY_AUTHKEY` reusable and mount a named volume for the gateway's tailscaled state (§6/Step 7/§12/12) |
 | Default headscale config points clients at Tailscale's public DERP map | `derp.urls: []` + the embedded DERP region enabled per the pinned version's schema (verify the key names — e.g. `derp.server.*`, STUN — against the pinned headscale); `disable_check_updates: true` |
@@ -1855,12 +1947,18 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     the 85 MiB `python3-tests` dependency; IDLE is launched on demand from the
     file manager (Step 2) — rootfs tests and acceptance use `idle3.10` and the
     `idle3.10-launcher`.
-19. **Control-plane hostname:** `CONTROL_HOST` (default `host.docker.internal`;
-    `<LAN_IP>` for LAN use) is the single value rendered into headscale
-    `server_url`, the URL-hash `controlUrl`, the gateway's `--login-server`,
-    the cert SAN, and the E2E whitelist. The browser resolves it via a one-line
-    `/etc/hosts` entry; the `gateway` container resolves it to the **server
-    container's static compose-network IP** via `extra_hosts` (§5.2) — so the
+19. **Control-plane hostname (REVISED Round 10 + Round 11):** `CONTROL_HOST`
+    (default `127.0.0.1`; `<LAN_IP>` — hardcoded LAN address — for LAN use)
+    is the single BROWSER-facing value rendered into headscale
+    `server_url`, the baked `controlUrl`/URL-hash `controlUrl`, the nginx
+    CSP, and the cert SAN. **HOSTNAMES ARE BANNED** (no `host.docker.internal`,
+    no `/etc/hosts` entries — Round 11, user mandate; enforced in CI by
+    `tests/unit/test_scripts.py::test_control_host_defaults_consistent`).
+    The `gateway` container reaches the control plane at the **server
+    container's static compose-network IP** (`GATEWAY_CONTROL_IP` =
+    `172.28.0.10`, cert SAN `IP:${SERVER_IP}`) and forwards the netmap's DERP
+    host (`127.0.0.1` single machine / LAN IP) through a loopback socat relay
+    on CONTROL_PORT (§5.2, networking-bug.md §16.10) — so the
     control plane and DERP relay are reachable from both the browser and the
     `gateway` container on Linux and Docker Desktop alike (§3/13, §5, Step 6,
     Step 7).
@@ -1894,9 +1992,10 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     router serves `/machine/register` at the root — a `/headscale` base path
     404s node registration. nginx therefore proxies ALL of `:CONTROL_PORT` to
     headscale (catch-all `location /` with WebSocket handling), and the
-    controlUrl/login-server carry no path; the embedded-DERP relay URL is
-    `https://${CONTROL_HOST}:${CONTROL_PORT}/derp` (confirmed: the DERP map
-    entry lists `HostName: host.docker.internal`, `DERPPort: 8443`); (d) the
+     controlUrl/login-server carry no path; the embedded-DERP relay URL is
+     `https://${CONTROL_HOST}:${CONTROL_PORT}/derp` (confirmed: with the
+     `127.0.0.1` default the DERP map
+     entry lists `HostName: 127.0.0.1`, `DERPPort: 8443`); (d) the
     "no CORS needed" premise — `/derp/probe` is a **CORS-mode** fetch answered
     with `Access-Control-Allow-Origin: *` (**verified at runtime**), which
     should satisfy COEP; the 8443 listener also sets
@@ -1915,9 +2014,13 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `udhcpc` if not — Step 2/Step 8); (l) headscale has no fixed-IP mechanism
     in v0.29.x — record the actual `GATEWAY_TAILNET_IP` from the gateway's
     first join and re-check the pinned version for a fixed-IP feature;
-    (m) `extra_hosts` `host.docker.internal:<server-ip>` precedence over Docker
-    Desktop's engine-provided alias (fallback: server static IP in the cert
-    SAN + gateway pointed at `https://172.28.0.10:8443` directly);
+    (m) gateway control-plane reachability (**REVISED Round 11 — the
+    `extra_hosts` hostname mapping was removed**): the gateway uses the
+    server's static compose-network IP (`GATEWAY_CONTROL_IP` =
+    `172.28.0.10`, cert SAN `IP:${SERVER_IP}`) directly, and a loopback
+    socat relay on CONTROL_PORT forwards the netmap's DERP host (127.0.0.1
+    single machine) to the server — re-verify the gateway reaches DERP with
+    `CONTROL_HOST=127.0.0.1` after any runtime rebuild (§16.10);
     (n) `/derp` nginx proxy passes the WebSocket upgrade headers (426
     regression test); (o) `build.sh` preserves uid/gid through the
     untar/`mkfs.ext2 -d` pipeline (debugfs ownership assertions); and (p) the
@@ -1940,10 +2043,27 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     downloaded at pin time into `webvm/cheerpx/` (committed; regenerable via
     `scripts/fetch-cheerpx-runtime.sh`) and served same-origin from
     `/cheerpx/`; the frontend imports it through `src/lib/cheerpx.js`
-    (vite alias), and the CSP allows `script-src 'self' 'unsafe-inline'
-    'unsafe-eval' blob:` (CheerpX needs `unsafe-eval` for its x86→WASM JIT and
-    `blob:` workers) with `connect-src` still strictly `'self'` + the control
-    host. Verified: the booted desktop makes zero external requests.
+     (vite alias), and the CSP allows `script-src 'self' 'unsafe-inline'
+     'unsafe-eval' blob:` (CheerpX needs `unsafe-eval` for its x86→WASM JIT and
+     `blob:` workers) with `connect-src` still strictly `'self'` + the control
+     host. Verified: the booted desktop makes zero external requests.
+     **Tk file viewer (2026-08-16, implemented + verified in-guest — see
+     plans/future-feature-ideas.md):** `py3-pillow` **9.3.0-r0** and
+     `py3-mistune` **2.0.4-r0** from the v3.17 community repo for x86 (i386).
+     Verified: `PIL.ImageTk` + the compiled `_imagingtk` extension work under
+     the patched `libtcl8.6.so` (exercised by the in-guest Xvfb image test);
+     **this Tk 8.6 build's `wm` command has no `class` subcommand** (WM_CLASS
+     is not settable — the explorer's watcher detects the viewer by its
+     `<name> — Viewer` i3 window title); `ImageOps.exif_transpose()` returns a
+     **copy that loses `is_animated`/`n_frames`** (capture animation info from
+     the opener before transposing, and skip transposing animated GIFs);
+     mistune 2.0.4's streaming renderer API cannot emit directly (children are
+     rendered to strings before the parent method runs — the viewer walks the
+     `AstRenderer` AST instead); `after()` from the viewer's load thread
+     requires a running `mainloop()` (tkinter raises "main thread is not in
+     main loop" under bare `update()` pumping); Pillow `draft()`+`thumbnail()`
+     keep multi-megapixel JPEGs displayable on the emulated i386. Rootfs smoke
+     passes on `browser` and `none` backends (`==> rootfs smoke PASS`).
 
 22. **X desktop boot (implementation finding, 2026-08-09):** three things
     contradict the Step 2 assumptions; all are corrected in
@@ -2119,6 +2239,150 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     (headscale 0.28.0 pin — keeps accepting the rebuilt v1.102 client too),
     `tests/e2e/tests/sync.spec.js` (ungated), `tests/e2e/playwright.config.js`
     (host-resolver rule), `tests/e2e/repro-tailnet.mjs` + probe scripts.
+    **Follow-up (2026-08-16, networking-bug.md §16.9):** guest `bind(2)`/
+    `listen(2)` crashed the core with `TCPServerSocket is not a function`
+    (any explicit bind — busybox `nc -z` always binds) because the page's
+    `networkInterface` lacked the method; implemented it on
+    `webvm/src/lib/network.js` (shared `connectedTcpSocket()` helper, tun
+    accept loop) + E2E listen-twin probe in `tests/e2e/tests/network.spec.js`.
+
+28. **Baked page config — visit-the-root networking (2026-08-16).** In
+    tailnet modes the server entrypoint renders `authKey`/`controlUrl` (+
+    `syncUrl`/`syncUser`/`syncPass` in webdav) into the same-origin
+    `/webvm-config.js` at container start (JSON-escaped via the dedicated
+    `server/render-webvm-config.py` — never raw envsubst, credentials may
+    contain quotes/backslashes/`$`; `tests/unit/test_scripts.py` cross-checks
+    its output against `scripts/print-url.sh` so the two renderings cannot
+    drift apart), nginx serves it with `Cache-Control: no-store` **and
+    `Cross-Origin-Resource-Policy: same-origin`** (without CORP any webpage
+    could `<script src>`-read the credentials cross-origin — PNA does not
+    cover private→private LAN loads and Safari does not enforce PNA; the
+    location's own add_headers suppress the server-level ones), and the
+    `app.html` inline script seeds `sessionStorage` from it **only when the
+    URL carries no hash**; any explicit hash disables the baked config, so
+    saved `make url` URLs and the E2E hash URLs behave exactly as before. The
+    explicit state is **sticky per tab** (`webvm-explicit-session` marker in
+    sessionStorage, set whenever a hash was present): a later hash-less
+    navigation or reload in the same tab never re-arms the baked config —
+    important for the E2E persistence reload and for never overwriting a tab's
+    explicit sessionStorage params. Bootstrap mode and
+    `browser`/`none` render `{}` (disconnected as before). Webdav mode now
+    fail-closes on `GATEWAY_TAILNET_IP` too (the baked `syncUrl` needs it;
+    skipped during bootstrap — and `HEADSCALE_BOOTSTRAP=1` must therefore be
+    KEPT until the IP is recorded: `docker compose up` recreates the server
+    whenever `.env` changes, and with BOOTSTRAP=0 + no IP it would crash-loop
+    before the gateway ever joins). The webdav CI phase records
+    `GATEWAY_TAILNET_IP` **and** flips `HEADSCALE_BOOTSTRAP=0` together, then
+    restarts the server **after** the gateway joins, and its boot-spec browser
+    case pins a dummy hash (`#e2e`) to stay a disconnected session.
+    `server/integration.sh` asserts the config file (200, no-store, content
+    per mode). Verified: same-origin script is exempt from COEP
+    `require-corp` (no CORP needed for the page's own load — the CORP
+    same-origin is the cross-origin-readout guard); the GitHub Pages service
+    worker only intercepts navigations, so the missing `/webvm-config.js`
+    there is a silent 404 no-op; the CSP `script-src 'self'` admits the
+    same-origin script. Updated:
+    `server/entrypoint.sh`, `server/render-webvm-config.py`,
+    `server/nginx.conf.template`, `server/Dockerfile`,
+    `webvm/src/app.html`, `scripts/print-url.sh` (HEADSCALE_ENABLED=1
+    browser/none case), `tests/unit/test_scripts.py`, `tests/server/
+    integration.sh`,     `tests/e2e` (network.spec.js + shared
+    `tests/e2e/lib/desktop.js`), `.github/workflows/ci.yml`, `Makefile`,
+    `README.md`, `.env.example`.
+
+29. **Fatal-error overlay — never a silent load/stop (2026-08-16).** The VM
+    boot path previously printed failures only into the hidden console
+    xterm (behind the display canvas) and a rejecting `cx.run()` was an
+    UNHANDLED promise rejection — reloads could "fail to load without any
+    diagnostic". Now: `WebVM.svelte` shows a full-screen overlay
+    (`role="alert"`, z-index above everything) with the exact error message
+    + stack and a working Reload button (falls back to a plain
+    `location.reload()` when the block cache never existed), and "Copy
+    details". Failure points wired: any `initTerminal` error (imports,
+    terminal setup, disk device, `CheerpX.Linux.create` — all propagate to
+    an `onMount` catch with phase "boot") and a rejecting `cx.run()` (phase
+    "runtime" when a run already completed, "boot" otherwise). The session
+    lock in `alpine/+page.svelte` can no longer stall the page on
+    "Acquiring session lock…" forever: a lock failure logs, boots an
+    EPHEMERAL session (never writes the shared overlay) and shows the exact
+    reason in the ephemeral banner. Test-only hook: `webvm-test-bootfail`
+    sessionStorage flag forces a boot failure in `initCheerpX` so
+    `tests/e2e/tests/error-overlay.spec.js` can assert the overlay content
+    and the Reload recovery (7/7 boot-related specs pass locally; network
+    spec still green). Removed the now-unused `errorMessage`/
+    `unexpectedErrorMessage` from `messages.js` usage. Updated:
+    `webvm/src/lib/WebVM.svelte`, `webvm/src/routes/alpine/+page.svelte`,
+    `tests/e2e/tests/error-overlay.spec.js`, plans §9.4.
+
+30. **Control-host verdict — 127.0.0.1 REVERTED, /etc/hosts required
+    (2026-08-16, late).** A browser-facing `CONTROL_HOST=127.0.0.1` default
+    (baked config + gateway loopback relays, Round 10 early draft) was
+    implemented, verified against a full bisect (server_url flips, gateway
+    entrypoint reverts, heal variants, headscale-DB purge, image rebuilds)
+    and REVERTED: with `server_url=https://127.0.0.1:8443` the page-side
+    adapter probe works but the GUEST data path never comes up (no lease,
+    zero wsgidav requests, guest stuck on the adapter path); with
+    `https://host.docker.internal:8443` everything works end-to-end (lease
+    in 15-30s). The mechanism lives in the rebuilt tailscale.wasm's
+    netmap/DERP handling of an IP-literal DERP host — no page-side or
+    config workaround found. Single-machine use therefore REQUIRES the
+    one-line `/etc/hosts` entry on the browser machine
+    (`127.0.0.1 host.docker.internal`) — without it the browser spams
+    "failure to resolve host.docker.internal" and the tailnet never starts
+    (the user's original report). Also pinned: the **inbound accept path is
+    dead** in the wasm client (own-IP TCP consumed internally by the
+    PeerAPI/self-loop; the IpStack spins a SYN/SYNACK loop) — guest servers
+    can bind+listen but never accept; the E2E listen twin asserts bind+
+    listen only (the §15 crash regression). The gateway keeps its
+    host.docker.internal login (extra_hosts) — the loopback-relay design
+    was removed. Unresolved flake (01:20-04:35 UTC): after the 127.0.0.1
+    flip the guest path stayed broken across many runs even after the
+    flip-back, then recovered after a full `make build` — cause not
+    identified (see plans/networking-bug.md §16.9, open item). Updated:
+    `compose.yaml`, `.env.example`, `README.md`, `scripts/gen-certs.sh`,
+    `.github/workflows/ci.yml`, `gateway/entrypoint.sh` (reverted),
+    `tests/e2e/tests/network.spec.js` (listen probe scoped),
+    `plans/networking-bug.md` §16.9.
+    **SUPERSEDED by §12/21(31):** the /etc/hosts requirement and the
+    hostname-based gateway login are BANNED (user mandate) — see (31).
+
+31. **Hostnames banned — host.docker.internal removed (2026-08-16, user
+    mandate).** The user requires, categorically, that NO hostnames ever
+    appear: no `host.docker.internal`, no `/etc/hosts` entries, no custom
+    DNS for LAN users — everything must work with `127.0.0.1` (zero-config
+    single machine) and a hardcoded LAN address (e.g. `192.168.x.x`) alone.
+    §12/21(30) is superseded in its conclusion: the guest-data-path break it
+    observed under `server_url=127.0.0.1` is attributed to the gateway's
+    DERP reachability, not to the wasm client's netmap handling — the
+    netmap's DERP host (`127.0.0.1` with server_url=127.0.0.1) is the
+    GATEWAY's own loopback, so the gateway must run a loopback socat relay
+    on CONTROL_PORT forwarding to the server's static compose-network IP
+    (`GATEWAY_CONTROL_IP`, `172.28.0.10`, cert SAN `IP:${SERVER_IP}`); with
+    that relay the DERP host is reachable from both ends (single machine;
+    on a LAN the DERP host is the LAN IP, reached through the host). The
+    gateway joins via `--login-server https://${GATEWAY_CONTROL_IP}:8443`
+    and `extra_hosts` was removed from compose.yaml. `CONTROL_HOST` defaults
+    to `127.0.0.1` everywhere (entrypoint, print-url, gen-certs, acceptance,
+    compose, `.env.example`); the cert SAN no longer carries
+    `DNS:host.docker.internal`; CI no longer edits the runner's `/etc/hosts`
+    and the E2E host-resolver-rules were removed; the join-test client uses
+    `https://172.28.0.10:8443`. **Enforcement:** `tests/unit/test_scripts.py
+    ::test_control_host_defaults_consistent` asserts the 127.0.0.1 defaults
+    AND that the literal `host.docker.internal` appears in none of the
+    runtime config/scripts/tests/CI files (the banned-file list lives in
+    the test) — CI fails if it is ever reintroduced. AGENTS.md carries the
+    rule. **Re-verification (open):** the §16.9 break was never reproduced
+    with the gateway's CONTROL_PORT loopback relay in place; the E2E
+    `network.spec.js` root-visit test is the gate (`CONTROL_HOST=127.0.0.1`
+    defaults, no /etc/hosts). The inbound accept-path finding of (30) is
+    unchanged (runtime limitation, not a hostname issue). Updated:
+    `gateway/entrypoint.sh`, `compose.yaml`, `server/entrypoint.sh`,
+    `scripts/gen-certs.sh`, `scripts/acceptance.sh`, `scripts/print-url.sh`,
+    `.env.example`, `.github/workflows/ci.yml`, `tests/unit/test_scripts.py`,
+    `tests/unit/test_templates.py`, `tests/server/integration.sh`,
+    `tests/server/join-test-client.sh`, `tests/e2e/playwright.config.js`,
+    `tests/e2e/tests/boot.spec.js`, `tests/e2e/*.mjs` probes, `README.md`,
+    `AGENTS.md`, `plans/networking-bug.md` §16.10.
 
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path

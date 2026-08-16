@@ -256,10 +256,89 @@ if (browser && controlUrl)
 	startTailnet();
 }
 
+// Build the { opened, closed, close } socket shape for a CONNECTED tun
+// tcpSocket (outbound after waitOutgoing, or one returned by the accept
+// loop). The `closed` promise MUST resolve when the socket goes away: the
+// core awaits it during guest process teardown, and a never-resolving
+// promise wedges the core's socket handling (the guest process that used
+// the socket never finishes exiting, blocking later guest processes). It
+// resolves on EVERY failure path too — a failed guest connect is the normal
+// state when the data path is down.
+function connectedTcpSocket(sock, remoteAddress, remotePort, localPort)
+{
+	let resolveClosed;
+	const closed = new Promise((res) => { resolveClosed = res; });
+	const opened = new Promise((resolve, reject) => {
+		const readable = new ReadableStream({
+			type: 'bytes',
+			autoAllocateChunkSize: 1500,
+			async pull(controller) {
+				for (;;) {
+					const view = controller.byobRequest ? controller.byobRequest.view : new Uint8Array(1500);
+					const n = sock.recv(view, 0, view.length);
+					if (n > 0) {
+						if (controller.byobRequest) controller.byobRequest.respond(n);
+						else controller.enqueue(view.slice(0, n));
+						return;
+					}
+					if (n === -11) { await sock.waitIncoming(); continue; } // EAGAIN
+					if (controller.byobRequest) controller.byobRequest.respond(0);
+					controller.close();
+					try { resolveClosed(); } catch (e) {}
+					return;
+				}
+			},
+			cancel() { try { sock.close(); } catch (e) {} resolveClosed(); },
+			close: () => { try { sock.close(); } catch (e) {} resolveClosed(); },
+		});
+		const writable = new WritableStream({
+			async write(chunk) {
+				// send(array, offset, len) — the IpStack signature
+				// (the runtime's own TCPWrapper write loop).
+				const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+				let off = 0;
+				while (off < data.length) {
+					const n = sock.send(data, off, data.length - off);
+					if (n > 0) { off += n; continue; }
+					if (n === -11) {
+						// EAGAIN — tx buffer full. MUST yield to
+						// the event loop: the tun drains the
+						// buffer asynchronously, so a synchronous
+						// retry loop never makes progress (the
+						// socket's send buffer stays full forever
+						// and the write never completes).
+						await new Promise((r) => setTimeout(r, 5));
+						continue;
+					}
+					throw new Error('send failed rc=' + n);
+				}
+			},
+			close() { try { sock.shutdownTx(); } catch (e) {} },
+			abort() { try { sock.close(); } catch (e) {} },
+		});
+		resolve({
+			readable: readable,
+			writable: writable,
+			remoteAddress: remoteAddress,
+			localAddress: '0.0.0.0',
+			remotePort: remotePort,
+			localPort: localPort,
+		});
+	});
+	return {
+		opened: opened,
+		closed: closed,
+		close: () => { try { sock.close(); } catch (e) {} resolveClosed(); return Promise.resolve(); },
+	};
+}
+
 // The networkInterface also carries the socket adapter the CheerpX core's
 // guest-socket dispatcher calls (legacy-path contract: a47.TCPSocket etc.):
 // the guest's connect(2) syscalls are handed to these, so they MUST be
-// backed by the tun exports for any guest traffic to flow.
+// backed by the tun exports for any guest traffic to flow. Outbound
+// connects go to TCPSocket; guest bind(2)/listen(2) (busybox nc binds
+// before connecting; servers bind+listen) go to TCPServerSocket — both are
+// required or the core's dispatcher crashes on the missing method.
 export const networkInterface = {
 	authKey: authKey,
 	controlUrl: controlUrl,
@@ -275,83 +354,85 @@ export const networkInterface = {
 	TCPSocket: (remoteIP, remotePort) => {
 		if (!tunExports) return null;
 		try {
-			// The `closed` promise MUST resolve when the socket goes away:
-			// the core awaits it during guest process teardown, and a
-			// never-resolving promise wedges the core's socket handling
-			// (the guest process that used the socket never finishes
-			// exiting, blocking later guest processes). It resolves on
-			// EVERY failure path too — a failed guest connect is the normal
-			// state when the data path is down.
+			const sock = new tunExports.tcpSocket();
+			const ip = tunExports.parseIP(remoteIP);
+			const wrapper = connectedTcpSocket(sock, remoteIP, remotePort, 0);
+			const opened = new Promise((resolve, reject) => {
+				if (sock.bind(0) !== 0) { wrapper.close(); reject(new Error('bind failed')); return; }
+				const rc = sock.connect(ip, remotePort);
+				if (rc !== 0) { wrapper.close(); reject(new Error('connect failed rc=' + rc)); return; }
+				sock.waitOutgoing().then(() => {
+					resolve(wrapper.opened);
+				}, (e) => { wrapper.close(); reject(e); });
+			});
+			// The core awaits the SAME opened promise the wrapper resolved
+			// with (streams + addresses); closed/close stay on the wrapper.
+			return {
+				opened: opened,
+				closed: wrapper.closed,
+				close: wrapper.close,
+			};
+		}
+		catch (e)
+		{
+			console.warn('tailnet TCPSocket failed:', e);
+			return null;
+		}
+	},
+	// Guest bind(2)/listen(2) on a TCP socket: bind the tun socket, listen,
+	// and stream accepted connections out of a ReadableStream as
+	// { opened, closed, close } wrappers (mirrors direct.js's
+	// TailscaleNetwork.TCPServerSocket + TCPWrapper.listen/accept:
+	// bind(localPort) -> listen() -> accept()/waitIncoming() loop).
+	TCPServerSocket: (addr, opts) => {
+		if (!tunExports) return null;
+		try {
+			const localPort = (opts && opts.localPort) | 0;
 			let resolveClosed;
 			const closed = new Promise((res) => { resolveClosed = res; });
 			const sock = new tunExports.tcpSocket();
-			const ip = tunExports.parseIP(remoteIP);
 			const opened = new Promise((resolve, reject) => {
 				const fail = (err) => {
 					try { sock.close(); } catch (e) {}
 					resolveClosed();
 					reject(err);
 				};
-				if (sock.bind(0) !== 0) { fail(new Error('bind failed')); return; }
-				const rc = sock.connect(ip, remotePort);
-				if (rc !== 0) { fail(new Error('connect failed rc=' + rc)); return; }
-				sock.waitOutgoing().then(() => {
-					const readable = new ReadableStream({
-						type: 'bytes',
-						autoAllocateChunkSize: 1500,
-						async pull(controller) {
-							for (;;) {
-								const view = controller.byobRequest ? controller.byobRequest.view : new Uint8Array(1500);
-								const n = sock.recv(view, 0, view.length);
-								if (n > 0) {
-									if (controller.byobRequest) controller.byobRequest.respond(n);
-									else controller.enqueue(view.slice(0, n));
-									return;
-								}
-								if (n === -11) { await sock.waitIncoming(); continue; } // EAGAIN
-								if (controller.byobRequest) controller.byobRequest.respond(0);
-								controller.close();
-								try { resolveClosed(); } catch (e) {}
-								return;
-							}
-						},
-						cancel() { try { sock.close(); } catch (e) {} resolveClosed(); },
-						close: () => { try { sock.close(); } catch (e) {} resolveClosed(); },
-					});
-					const writable = new WritableStream({
-						async write(chunk) {
-							// send(array, offset, len) — the IpStack signature
-							// (the runtime's own TCPWrapper write loop).
-							const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-							let off = 0;
-							while (off < data.length) {
-								const n = sock.send(data, off, data.length - off);
-								if (n > 0) { off += n; continue; }
-								if (n === -11) {
-									// EAGAIN — tx buffer full. MUST yield to
-									// the event loop: the tun drains the
-									// buffer asynchronously, so a synchronous
-									// retry loop never makes progress (the
-									// socket's send buffer stays full forever
-									// and the write never completes).
-									await new Promise((r) => setTimeout(r, 5));
-									continue;
-								}
-								throw new Error('send failed rc=' + n);
-							}
-						},
-						close() { try { sock.shutdownTx(); } catch (e) {} },
-						abort() { try { sock.close(); } catch (e) {} },
-					});
-					resolve({
-						readable: readable,
-						writable: writable,
-						remoteAddress: remoteIP,
-						localAddress: '0.0.0.0',
-						remotePort: remotePort,
-						localPort: 0,
-					});
-				}, (e) => { try { sock.close(); } catch (x) {} resolveClosed(); reject(e); });
+				if (sock.bind(localPort) !== 0) { fail(new Error('tcp bind failed')); return; }
+				sock.listen();
+				const readable = new ReadableStream({
+					async pull(controller) {
+						for (;;) {
+						let acc;
+						try { acc = sock.accept(); }
+						catch (e) {
+							controller.error(e);
+							try { sock.close(); } catch (x) {}
+							resolveClosed();
+							return;
+						}
+						if (acc) {
+							const remoteAddress = tunExports.dumpIP(acc.addr);
+							// Accepted sockets are already connected:
+							// hand them out as ready-made wrappers.
+							controller.enqueue(connectedTcpSocket(acc.socket, remoteAddress, acc.port, localPort));
+							return;
+						}
+						try { await sock.waitIncoming(); } // EAGAIN — pending connect
+						catch (e) {
+							// Tun torn down while a guest holds a bound
+							// socket: error the stream AND resolve `closed`
+							// (the invariant — see connectedTcpSocket).
+							controller.error(e);
+							try { sock.close(); } catch (x) {}
+							resolveClosed();
+							return;
+						}
+						}
+					},
+					cancel() { try { sock.close(); } catch (e) {} resolveClosed(); },
+					close: () => { try { sock.close(); } catch (e) {} resolveClosed(); },
+				});
+				resolve({ readable: readable, localAddress: addr, localPort: localPort });
 			});
 			return {
 				opened: opened,
@@ -361,7 +442,7 @@ export const networkInterface = {
 		}
 		catch (e)
 		{
-			console.warn('tailnet TCPSocket failed:', e);
+			console.warn('tailnet TCPServerSocket failed:', e);
 			return null;
 		}
 	},
@@ -397,7 +478,19 @@ export const networkInterface = {
 								});
 								return;
 							}
-							if (n === -11) { await sock.waitIncoming(); continue; } // EAGAIN
+				if (n === -11) {
+					try { await sock.waitIncoming(); continue; } // EAGAIN
+					catch (e) {
+						// Tun torn down underneath us: error the stream AND
+						// resolve `closed` — a stream error does not invoke
+						// the source's cancel(), so without this the promise
+						// never settles and the core wedges on teardown.
+						try { sock.close(); } catch (x) {}
+						controller.error(e);
+						resolveClosed();
+						return;
+					}
+				}
 							controller.close();
 							return;
 						}

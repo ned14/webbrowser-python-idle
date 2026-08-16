@@ -8,8 +8,13 @@ set -eu
 : "${GATEWAY_AUTHKEY:?GATEWAY_AUTHKEY is required — create it with 'headscale preauthkeys create --user <id> --reusable --expiration 100y' (v0.29.x takes the numeric user id, first user = 1) and record it in .env}"
 
 STORAGE_BACKEND="${STORAGE_BACKEND:-browser}"
-CONTROL_HOST="${CONTROL_HOST:-host.docker.internal}"
 CONTROL_PORT="${CONTROL_PORT:-8443}"
+CONTROL_WSS_PORT="${CONTROL_WSS_PORT:-443}"
+# Server's static compose-network IP (webvm-net, fixed 172.28.0.0/16 — see
+# compose.yaml). The ONLY address this container uses for the control plane:
+# NO hostnames anywhere (host.docker.internal and /etc/hosts tricks are
+# banned — browser-facing config must work with 127.0.0.1 / a LAN IP alone).
+GATEWAY_CONTROL_IP="${GATEWAY_CONTROL_IP:-172.28.0.10}"
 WEBDAV_PORT="${WEBDAV_PORT:-8082}"
 GIT_HTTP_PORT="${GIT_HTTP_PORT:-8083}"
 
@@ -30,12 +35,17 @@ if [ ! -S /var/run/tailscale/tailscaled.sock ]; then
 	exit 1
 fi
 
-# Join the control plane (server_url is PATH-LESS in v0.29.x — see the headscale
-# config template). GATEWAY_AUTHKEY is reusable + long-lived so a recreated
-# container can rejoin; the tailscaled state volume keeps the node key (and
-# therefore the allocated tailnet IP) stable.
+# Join the control plane over the compose network: GATEWAY_CONTROL_IP is the
+# server's static compose-network IP (172.28.0.10), which the cert SAN covers
+# (IP:${SERVER_IP} in gen-certs.sh). It is the CONTAINER-side address and is
+# INDEPENDENT of the browser-facing CONTROL_HOST (127.0.0.1 single machine /
+# LAN IP), so no /etc/hosts entry or hostname is ever needed anywhere.
+# server_url is PATH-LESS in v0.29.x — see the headscale config template.
+# GATEWAY_AUTHKEY is reusable + long-lived so a recreated container can
+# rejoin; the tailscaled state volume keeps the node key (and therefore the
+# allocated tailnet IP) stable.
 tailscale up \
-	--login-server="https://${CONTROL_HOST}:${CONTROL_PORT}" \
+	--login-server="https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT}" \
 	--authkey="$GATEWAY_AUTHKEY" \
 	--hostname=gateway \
 	--accept-routes=false \
@@ -60,7 +70,7 @@ case "$STORAGE_BACKEND" in
 		;;
 	webdav)
 		# The WebDAV endpoint lives in the server container (compose network)
-		start_relay "${WEBDAV_PORT}" "server:${WEBDAV_PORT}"
+		start_relay "${WEBDAV_PORT}" "${GATEWAY_CONTROL_IP}:${WEBDAV_PORT}"
 		;;
 esac
 
@@ -69,12 +79,23 @@ esac
 # (wss://<host>/ts2021). The host publishes 443 on THIS container (tailnet
 # profile only — browser/none modes never bind the privileged port), and
 # socat forwards it to the server's control listener over the compose
-# network (host.docker.internal -> 172.28.0.10). Unlike the tailscaled
-# relays it must listen on ALL interfaces (Docker's port publish forwards to
-# the container's eth0, not its loopback).
-socat "TCP-LISTEN:443,fork,reuseaddr" "TCP:host.docker.internal:443" &
+# network. Unlike the tailscaled relays it must listen on ALL interfaces
+# (Docker's port publish forwards to the container's eth0, not its loopback).
+socat "TCP-LISTEN:443,fork,reuseaddr" "TCP:${GATEWAY_CONTROL_IP}:${CONTROL_WSS_PORT}" &
 RELAY_PIDS="${RELAY_PIDS} $!"
-echo "relay: :443 -> host.docker.internal:443 (control plane WSS)"
+echo "relay: :443 -> ${GATEWAY_CONTROL_IP}:${CONTROL_WSS_PORT} (control plane WSS)"
+
+# DERP-map loopback relay (CONTROL_PORT): the netmap's DERP region host is
+# derived from headscale's server_url, which is the BROWSER-facing
+# CONTROL_HOST — 127.0.0.1 on the zero-config single machine. Inside this
+# container 127.0.0.1 is the gateway's OWN loopback, so the DERP relay would
+# be unreachable (the guest data path dies: the sync agent's lease never
+# lands). Bind a loopback relay on CONTROL_PORT forwarding to the server's
+# static compose-network IP, so the gateway's tailscaled reaches
+# https://127.0.0.1:${CONTROL_PORT}/derp through it. On LAN deployments the
+# DERP host is the LAN IP and is reached directly through the host; this
+# relay is then unused but harmless.
+start_relay "${CONTROL_PORT}" "${GATEWAY_CONTROL_IP}:${CONTROL_PORT}"
 
 # Git relays (host-side step: set the *_LAN_IP vars in .env and recreate the
 # gateway; the guest then adds remotes like ssh://git@<GATEWAY_TAILNET_IP>:2222/)

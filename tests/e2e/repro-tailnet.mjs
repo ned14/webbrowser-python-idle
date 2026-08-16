@@ -12,7 +12,7 @@
 //   PREAUTH_KEY  — headscale preauth key (required)
 //   GATEWAY_IP   — gateway tailnet IP (default 100.64.0.1)
 //   WEBDAV_BASE  — default http://127.0.0.1:8082/webdav/
-//   CONTROL_HOST — default host.docker.internal
+//   CONTROL_HOST — default 127.0.0.1 (hostnames are banned)
 //   DEBUG_REQS   — "1" to log every browser request (not just control plane)
 //   LIMIT_S      — how long to watch (default 180)
 
@@ -21,7 +21,7 @@ import { basicAuthHeaders } from './lib/webdav-auth.js';
 
 const KEY = process.env.PREAUTH_KEY || '';
 const GATEWAY_IP = process.env.GATEWAY_IP || '100.64.0.1';
-const CONTROL_HOST = process.env.CONTROL_HOST || 'host.docker.internal';
+const CONTROL_HOST = process.env.CONTROL_HOST || '127.0.0.1';
 const WEBDAV_BASE = process.env.WEBDAV_BASE || 'http://127.0.0.1:8082/webdav/';
 const AUTH = { username: process.env.WEBDAV_USER || 'webdav', password: process.env.WEBDAV_PASS || 'webdavpass' };
 // Playwright's APIRequestContext `auth` option does not send Basic auth on
@@ -51,7 +51,6 @@ if (PUBLIC_MODE) {
 }
 
 const browser = await chromium.launch({
-	args: ['--host-resolver-rules=MAP ' + CONTROL_HOST + ' 127.0.0.1'],
 	...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
 });
 const context = await browser.newContext({ ignoreHTTPSErrors: true });

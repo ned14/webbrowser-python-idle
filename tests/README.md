@@ -28,8 +28,11 @@ tests/
    `make url` / the README bootstrap section)
 6. E2E (browser mode): `cd tests/e2e && npm ci && npx playwright install chromium`
    then `E2E_SITE_URL=https://127.0.0.1:8081/alpine.html npx playwright test`
-7. E2E (webdav mode): pass the full session hash URL:
-   `E2E_WEBDAV_URL='<full hash URL from make url>' E2E_WEBDAV_BASE=http://127.0.0.1:8082/webdav/ E2E_WEBDAV_USER=… E2E_WEBDAV_PASS=… npx playwright test`
+7. E2E (webdav mode): pass the full session hash URL plus the gateway's
+   tailnet IP (the `network` spec boots the site ROOT — baked
+   `/webvm-config.js` — and verifies the guest data path reaches the gateway
+   relay, the `nc -z` sequence):
+   `E2E_WEBDAV_URL='<full hash URL from make url>' E2E_GATEWAY_IP=<gateway-tailnet-ip> E2E_WEBDAV_BASE=http://127.0.0.1:8082/webdav/ E2E_WEBDAV_USER=… E2E_WEBDAV_PASS=… npx playwright test`
 
 ## LAN acceptance
 

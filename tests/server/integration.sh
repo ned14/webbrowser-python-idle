@@ -9,7 +9,12 @@ set -eu
 SITE_PORT="${SITE_PORT:-8081}"
 CONTROL_PORT="${CONTROL_PORT:-8443}"
 WEBDAV_PORT="${WEBDAV_PORT:-8082}"
-CONTROL_HOST="${CONTROL_HOST:-host.docker.internal}"
+# Browser-facing control host: 127.0.0.1 single machine / LAN IP. Hostnames
+# are banned (host.docker.internal etc. — never reintroduce).
+CONTROL_HOST="${CONTROL_HOST:-127.0.0.1}"
+# The server's static compose-network IP: the CONTAINER-side address for the
+# join-test client (which runs on webvm-net, not on the host loopback).
+GATEWAY_CONTROL_IP="${GATEWAY_CONTROL_IP:-172.28.0.10}"
 LAN_IP="${LAN_IP:-127.0.0.1}"
 WEBDAV_USER="${WEBDAV_USER:-}"
 WEBDAV_PASS="${WEBDAV_PASS:-}"
@@ -17,15 +22,9 @@ GATEWAY_AUTHKEY="${GATEWAY_AUTHKEY:-}"
 
 SITE_URL="https://${LAN_IP}:${SITE_PORT}"
 
-# Control-plane URLs must be reachable from this host. CONTROL_HOST may not
-# resolve everywhere (CI adds it to /etc/hosts; local macOS users might not) —
-# fall back to LAN_IP, which the cert SAN covers.
-if getent hosts "$CONTROL_HOST" >/dev/null 2>&1 || nslookup "$CONTROL_HOST" >/dev/null 2>&1; then
-	CONTROL_URL="https://${CONTROL_HOST}:${CONTROL_PORT}"
-else
-	echo "   (CONTROL_HOST $CONTROL_HOST does not resolve here — testing the control plane via ${LAN_IP}:${CONTROL_PORT})"
-	CONTROL_URL="https://${LAN_IP}:${CONTROL_PORT}"
-fi
+# The control plane is reachable from this host at CONTROL_HOST:CONTROL_PORT
+# (published on LAN_IP only — 127.0.0.1 single machine, LAN IP on a LAN).
+CONTROL_URL="https://${CONTROL_HOST}:${CONTROL_PORT}"
 
 fail() {
 	echo "FAIL: $*" >&2
@@ -45,6 +44,22 @@ grep -qi "connect-src 'self' https://$CONTROL_HOST:$CONTROL_PORT wss://$CONTROL_
 echo "==> site redirects"
 curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/" | grep -q "302" || fail "/ should 302 -> /alpine.html"
 curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/alpine" | grep -q "301" || fail "/alpine should 301 -> /alpine.html"
+
+echo "==> baked page config (webvm-config.js)"
+curl -sk -D /tmp/hdr-cfg.txt -o /tmp/webvm-config.js "$SITE_URL/webvm-config.js"
+grep -qi "^HTTP/.* 200" /tmp/hdr-cfg.txt || fail "/webvm-config.js not 200"
+grep -qi "cache-control: no-store" /tmp/hdr-cfg.txt || fail "/webvm-config.js must be no-store"
+CFG=$(cat /tmp/webvm-config.js)
+echo "$CFG" | grep -q "window.__webvmConfig" || fail "/webvm-config.js not rendered"
+if [ "${STORAGE_BACKEND:-browser}" = "webdav" ] || [ "${HEADSCALE_ENABLED:-0}" = "1" ]; then
+	echo "$CFG" | grep -q '"authKey"' || fail "baked config missing authKey"
+	echo "$CFG" | grep -q '"controlUrl"' || fail "baked config missing controlUrl"
+	if [ "${STORAGE_BACKEND:-browser}" = "webdav" ]; then
+		echo "$CFG" | grep -q '"syncUrl"' || fail "baked config missing syncUrl"
+	fi
+else
+	echo "$CFG" | grep -q 'window.__webvmConfig = {}' || fail "browser/none mode must serve an empty baked config"
+fi
 
 echo "==> ext2 byte ranges"
 curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/custom-disk-images/webvm-custom-disk.ext2" | grep -q "200" || fail "ext2 not 200"
@@ -79,10 +94,10 @@ PROBE_ACAO=$(curl -sk -D - -o /dev/null -H "Origin: https://example.test" "$CONT
 
 echo "==> headscale join test (tailscaled client, private CA)"
 # Shared helper: joins a throwaway tailscaled node to the control plane. The
-# container resolves host.docker.internal via extra_hosts to the server's
-# static compose-network IP, so the login URL must be the CONTAINER-side one
-# (never the host-side fallback).
-AUTHKEY="$GATEWAY_AUTHKEY" CONTROL_URL="https://host.docker.internal:${CONTROL_PORT}" \
+# client container runs on the compose network, so the login URL is the
+# CONTAINER-side one: the server's static compose-network IP
+# (GATEWAY_CONTROL_IP, cert SAN covers IP:172.28.0.10) — never a hostname.
+AUTHKEY="$GATEWAY_AUTHKEY" CONTROL_URL="https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT}" \
 	tests/server/join-test-client.sh >/dev/null || fail "join test client did not register"
 docker compose exec -T server headscale nodes list | grep -q "ci-client" || fail "ci-client node did not register with headscale"
 

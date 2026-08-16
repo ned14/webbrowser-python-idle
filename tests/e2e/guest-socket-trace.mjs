@@ -9,7 +9,7 @@ import { chromium } from 'playwright';
 
 const KEY = process.env.PREAUTH_KEY || '';
 const GATEWAY_IP = process.env.GATEWAY_IP || '100.64.0.1';
-const CONTROL_HOST = process.env.CONTROL_HOST || 'host.docker.internal';
+const CONTROL_HOST = process.env.CONTROL_HOST || '127.0.0.1';
 const PORT = Number(process.env.WEBDAV_PORT || 8082);
 const WATCH_S = Number(process.env.WATCH_S || 130);
 
@@ -21,7 +21,6 @@ const SESSION_URL =
 	'&syncUrl=http://' + GATEWAY_IP + ':' + PORT + '/webdav/' +
 	'&syncUser=webdav&syncPass=webdavpass';
 
-const browser = await chromium.launch({ args: ['--host-resolver-rules=MAP ' + CONTROL_HOST + ' 127.0.0.1'] });
 const context = await browser.newContext({ ignoreHTTPSErrors: true });
 const page = await context.newPage();
 

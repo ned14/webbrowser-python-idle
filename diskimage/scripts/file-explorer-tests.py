@@ -20,10 +20,11 @@ Adding a new test:
 
 The harness stubs dialogs/menus so nothing modal blocks: menus are captured via
 pane._post_menu, real opens are counted via the `_open_externally` /
-`_open_in_idle` stubs (the originals are kept as _ORIG_EXTERNAL/_ORIG_IDLE and
-used by the open-path tests), messagebox is captured (never blocks), folder-size
-threads are disabled (call the original via _ORIG_FOLDER_SIZE to test them),
-and simpledialog/filedialog can be stubbed per test.
+`_open_in_idle` / `_open_in_viewer` stubs (the originals are kept as
+_ORIG_EXTERNAL/_ORIG_IDLE/_ORIG_VIEWER and used by the open-path tests),
+messagebox is captured (never blocks), folder-size threads are disabled (call
+the original via _ORIG_FOLDER_SIZE to test them), and simpledialog/filedialog
+can be stubbed per test.
 """
 
 import os
@@ -111,13 +112,15 @@ def _load(path, done):
 
 # ---- global test state ------------------------------------------------------
 lb = pane.file_list
-OPENS = {"calls": []}        # _open_externally() calls (non-.py files)
+OPENS = {"calls": []}        # _open_externally() calls (unknown binary types)
 IDLE_OPENS = {"calls": []}   # _open_in_idle() calls (.py files -> IDLE)
+VIEWER_OPENS = {"calls": []} # _open_in_viewer() calls (text/image -> viewer)
 _LAST_MENU = [None]
 _TBASE = [1000]
 
 _ORIG_EXTERNAL = pane._open_externally
 _ORIG_IDLE = pane._open_in_idle
+_ORIG_VIEWER = pane._open_in_viewer
 
 def _fake_external(path):
     OPENS["calls"].append(path)
@@ -125,8 +128,12 @@ def _fake_external(path):
 def _fake_idle(paths):
     IDLE_OPENS["calls"].append(list(paths))
 
+def _fake_viewer(paths):
+    VIEWER_OPENS["calls"].append(list(paths))
+
 pane._open_externally = _fake_external
 pane._open_in_idle = _fake_idle
+pane._open_in_viewer = _fake_viewer
 
 def _grab_menu(menu, x, y):
     _LAST_MENU[0] = menu
@@ -310,15 +317,15 @@ def test_tap_empty_clears(done):
 
 @test
 def test_double_click_opens(done):
-    before_ext = len(OPENS["calls"])
     before_idle = len(IDLE_OPENS["calls"])
+    before_viewer = len(VIEWER_OPENS["calls"])
     _steps([
         (0, lambda: _dblclick(0)),   # row 0 = app.py -> IDLE
         (250, lambda: check("double-click .py opens in IDLE",
                             len(IDLE_OPENS["calls"]) == before_idle + 1, IDLE_OPENS["calls"])),
-        (0, lambda: _dblclick(2)),   # row 2 = visible.txt -> external open
-        (250, lambda: check("double-click .txt opens externally",
-                            len(OPENS["calls"]) == before_ext + 1, OPENS["calls"])),
+        (0, lambda: _dblclick(2)),   # row 2 = visible.txt -> viewer
+        (250, lambda: check("double-click .txt opens in the viewer",
+                            len(VIEWER_OPENS["calls"]) == before_viewer + 1, VIEWER_OPENS["calls"])),
     ], done)
 
 @test
@@ -769,6 +776,107 @@ def test_open_selected_dir(done):
         (250, lambda: check("double-click dir navigates",
                             pane.current_path == os.path.join(SRC, "subdir"), pane.current_path)),
     ], done))
+
+@test
+def test_open_selected_routes_to_viewer(done):
+    # "Open" on text/image files must launch the Tk viewer (batched into one
+    # process); .py files still go to IDLE.
+    _make_fixtures()
+    img = os.path.join(SRC, "photo.png")
+    with open(img, "w"):
+        pass  # routing is extension-based; no real image needed
+    before = len(VIEWER_OPENS["calls"])
+    before_idle = len(IDLE_OPENS["calls"])
+    def select_rows(names):
+        rows = [i for i in lb.get_children()
+                if os.path.basename(pane.item_path[i]) in names]
+        lb.selection_set(*rows)
+    _load(SRC, lambda: _steps([
+        (0, lambda: select_rows(("visible.txt", "photo.png"))),
+        (0, lambda: pane.open_selected()),
+        (50, lambda: check("text+image batch to the viewer",
+                           len(VIEWER_OPENS["calls"]) == before + 1 and
+                           VIEWER_OPENS["calls"][-1] == [
+                               os.path.join(SRC, "photo.png"),
+                               os.path.join(SRC, "visible.txt")],
+                           repr(VIEWER_OPENS["calls"][before:]))),
+        (0, lambda: select_rows(("app.py", "visible.txt"))),
+        (0, lambda: pane.open_selected()),
+        (50, lambda: check("text to viewer, py to IDLE",
+                           VIEWER_OPENS["calls"][-1] ==
+                           [os.path.join(SRC, "visible.txt")] and
+                           IDLE_OPENS["calls"][-1] ==
+                           [os.path.join(SRC, "app.py")],
+                           repr((VIEWER_OPENS["calls"][before:],
+                                 IDLE_OPENS["calls"][before_idle:])))),
+    ], done))
+
+@test
+def test_open_in_viewer_replaces_screen(done):
+    # The viewer swap mirrors the IDLE swap: the explorer withdraws while the
+    # viewer runs and reappears once it exits.
+    _make_fixtures()
+    calls = []
+    class FakePopen:
+        def __init__(self, args, **kw):
+            if args and args[0] != "i3-msg":  # ignore the watcher's i3 probes
+                calls.append(list(args))
+            self._end = time.time() + 0.6
+        def poll(self):
+            return None if time.time() < self._end else 0
+    orig_popen = subprocess.Popen
+    subprocess.Popen = FakePopen
+    txt = os.path.join(SRC, "visible.txt")
+    _ORIG_VIEWER([txt])
+    _steps([
+        (100, lambda: check("viewer launched for text",
+                            calls == [["/usr/local/bin/file-viewer.py", txt]],
+                            repr(calls))),
+        (100, lambda: check("explorer withdrawn while viewer runs",
+                            str(root.state()) == "withdrawn", root.state())),
+        (900, lambda: check("explorer reappears once viewer exits",
+                            str(root.state()) == "normal", root.state())),
+        (100, lambda: check("folder reloaded after viewer",
+                            pane.current_path == SRC and pane.displayed_paths,
+                            pane.current_path)),
+    ], lambda: (
+        subprocess.__setattr__("Popen", orig_popen),
+        done(),
+    ))
+
+@test
+def test_viewer_window_close_returns_when_process_lingers(done):
+    # A lingering viewer process must not keep the explorer hidden: the
+    # watcher returns when the viewer WINDOW disappears from the i3 tree.
+    _make_fixtures()
+    calls = []
+    class FakePopen:
+        def __init__(self, args, **kw):
+            if args and args[0] != "i3-msg":  # ignore the watcher's i3 probes
+                calls.append(list(args))
+            self.pid = 424243  # process never exits on its own
+        def poll(self):
+            return None
+    orig_popen = subprocess.Popen
+    orig_open = pane._viewer_window_open
+    holder = {"open": True}
+    def fake_open():
+        return holder["open"]
+    subprocess.Popen = FakePopen
+    pane._viewer_window_open = fake_open
+    txt = os.path.join(SRC, "visible.txt")
+    _ORIG_VIEWER([txt])
+    _steps([
+        (200, lambda: check("explorer withdrawn while viewer runs",
+                            str(root.state()) == "withdrawn", root.state())),
+        (0, lambda: holder.__setitem__("open", False)),  # viewer window closes
+        (3500, lambda: check("explorer reappears once viewer's window is gone",
+                             str(root.state()) == "normal", root.state())),
+    ], lambda: (
+        subprocess.__setattr__("Popen", orig_popen),
+        pane.__setattr__("_viewer_window_open", orig_open),
+        done(),
+    ))
 
 @test
 def test_rename_item(done):

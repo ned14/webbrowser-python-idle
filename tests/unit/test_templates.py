@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SERVER = ROOT / "server"
 
 TEST_ENV = {
-    "CONTROL_HOST": "host.docker.internal",
+    "CONTROL_HOST": "127.0.0.1",
     "CONTROL_PORT": "8443",
     "SITE_PORT": "8081",
     "STUN_PORT": "3478",
@@ -66,7 +66,7 @@ class TestNginx:
         # The CSP connect-src must allow only 'self' + the control host/port
         # (blocks logtail and any other third-party fetch).
         csp = [l for l in nginx.splitlines() if "Content-Security-Policy" in l][0]
-        assert "connect-src 'self' https://host.docker.internal:8443 wss://host.docker.internal:8443" in csp
+        assert "connect-src 'self' https://127.0.0.1:8443 wss://127.0.0.1:8443" in csp
         # script-src covers the self-hosted CheerpX runtime (never the CDN)
         assert "script-src 'self'" in csp
 
@@ -120,7 +120,7 @@ class TestHeadscale:
         # Verified against v0.29.3: the noise register path carries the
         # server_url PATH verbatim and headscale's noise router serves it at
         # the root, so server_url MUST be path-less.
-        assert 'server_url: "https://host.docker.internal:8443"' in headscale
+        assert 'server_url: "https://127.0.0.1:8443"' in headscale
 
     def test_no_public_derp(self, headscale):
         assert "urls: []" in headscale

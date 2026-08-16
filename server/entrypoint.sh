@@ -8,7 +8,14 @@ set -u
 STORAGE_BACKEND="${STORAGE_BACKEND:-browser}"
 HEADSCALE_ENABLED="${HEADSCALE_ENABLED:-0}"
 HEADSCALE_BOOTSTRAP="${HEADSCALE_BOOTSTRAP:-0}"
-CONTROL_HOST="${CONTROL_HOST:-host.docker.internal}"
+# CONTROL_HOST is the BROWSER-facing control-plane host (baked page config,
+# nginx CSP allowlist, headscale server_url -> DERP map). Default 127.0.0.1 =
+# zero-config single machine; LAN deployments set it (with LAN_IP) to the
+# hardcoded LAN address (e.g. 192.168.1.10). HOSTNAMES ARE BANNED — the
+# browser must reach the control plane over 127.0.0.1 / a LAN IP alone,
+# never via host.docker.internal or /etc/hosts tricks (the gateway reaches
+# the server over the compose network at GATEWAY_CONTROL_IP instead).
+CONTROL_HOST="${CONTROL_HOST:-127.0.0.1}"
 LAN_IP="${LAN_IP:-127.0.0.1}"
 SITE_PORT="${SITE_PORT:-8081}"
 CONTROL_PORT="${CONTROL_PORT:-8443}"
@@ -45,6 +52,16 @@ if [ "$STORAGE_BACKEND" = "webdav" ]; then
 		echo "FATAL: STORAGE_BACKEND=webdav requires WEBDAV_USER and WEBDAV_PASS." >&2
 		exit 1
 	fi
+	# The baked page config carries the WebDAV sync URL, which needs the
+	# gateway's recorded tailnet IP (make url enforced this; the baked config
+	# must too). Skipped during bootstrap: the gateway has not joined yet.
+	if [ "$HEADSCALE_BOOTSTRAP" != "1" ] && [ -z "${GATEWAY_TAILNET_IP:-}" ]; then
+		echo "FATAL: STORAGE_BACKEND=webdav requires GATEWAY_TAILNET_IP (the baked page config needs it)." >&2
+		echo "       Read it from the RUNNING gateway: docker compose exec gateway tailscale ip -4" >&2
+		echo "       (or temporarily set HEADSCALE_BOOTSTRAP=1 and read 'headscale nodes list')," >&2
+		echo "       record it in .env (see .env.example), then recreate this container." >&2
+		exit 1
+	fi
 fi
 
 # --- Render configuration templates -----------------------------------------
@@ -61,6 +78,23 @@ if [ "$STORAGE_BACKEND" = "webdav" ]; then
 	htpasswd -bc /etc/webvm/webdav.htpasswd "$WEBDAV_USER" "$WEBDAV_PASS"
 	envsubst '$WEBDAV_PORT $WEBDAV_ROOT $WEBDAV_USER $WEBDAV_PASS' \
 		< /etc/webvm/wsgidav.yaml.template > /etc/webvm/wsgidav.yaml
+fi
+
+# --- Render the baked page config (/webvm-config.js) ------------------------
+# The page reads its networking/sync secrets from the same-origin
+# /webvm-config.js when the URL hash carries none, so visiting the site root
+# just works — no hash URL needed (`make url` stays for other devices and
+# explicit hash overrides). Values are JSON-escaped via render-webvm-config.py
+# (never raw envsubst — credentials may contain quotes/backslashes/$). Never
+# render keys before they exist: bootstrap mode (and browser/none builds)
+# serve an empty config, so the page boots disconnected exactly as before.
+if [ "$need_headscale" = "1" ] && [ "$HEADSCALE_BOOTSTRAP" != "1" ]; then
+	python3 /etc/webvm/render-webvm-config.py \
+		"$CONTROL_HOST" "$CONTROL_PORT" "${HEADSCALE_PREAUTHKEY:-}" "$STORAGE_BACKEND" \
+		"${GATEWAY_TAILNET_IP:-}" "$WEBDAV_PORT" "${WEBDAV_USER:-}" "${WEBDAV_PASS:-}" \
+		> /etc/webvm/webvm-config.js
+else
+	echo 'window.__webvmConfig = {};' > /etc/webvm/webvm-config.js
 fi
 
 # --- Start headscale (only when needed) -------------------------------------

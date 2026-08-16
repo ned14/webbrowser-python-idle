@@ -8,7 +8,12 @@
 set -eu
 
 STORAGE_BACKEND="${STORAGE_BACKEND:-browser}"
-CONTROL_HOST="${CONTROL_HOST:-host.docker.internal}"
+# Browser-facing control-plane host — must match server/entrypoint.sh (and
+# compose.yaml/.env.example): default 127.0.0.1 for the zero-config single
+# machine, hardcoded LAN IP on a LAN. HOSTNAMES ARE BANNED (host.docker.internal
+# and /etc/hosts tricks are never to be reintroduced — the browser must reach
+# the control plane over 127.0.0.1 / a LAN IP alone).
+CONTROL_HOST="${CONTROL_HOST:-127.0.0.1}"
 LAN_IP="${LAN_IP:-127.0.0.1}"
 SITE_PORT="${SITE_PORT:-8081}"
 CONTROL_PORT="${CONTROL_PORT:-8443}"
@@ -17,7 +22,16 @@ GATEWAY_TAILNET_IP="${GATEWAY_TAILNET_IP:-}"
 
 	case "$STORAGE_BACKEND" in
 		browser|none)
-			echo "https://${LAN_IP}:${SITE_PORT}/alpine.html"
+			# HEADSCALE_ENABLED=1 forces the control plane on for browser/none
+			# builds — the baked page config then auto-wires the tailnet, so
+			# the explicit hash URL must carry the same params (see
+			# tests/unit/test_scripts.py cross-check).
+			if [ "${HEADSCALE_ENABLED:-0}" = "1" ]; then
+				: "${HEADSCALE_PREAUTHKEY:?HEADSCALE_PREAUTHKEY is not set (see .env.example)}"
+				echo "https://${CONTROL_HOST}:${SITE_PORT}/alpine.html#authKey=${HEADSCALE_PREAUTHKEY}&controlUrl=https://${CONTROL_HOST}:${CONTROL_PORT}"
+			else
+				echo "https://${LAN_IP}:${SITE_PORT}/alpine.html"
+			fi
 			;;
 		samba)
 			: "${HEADSCALE_PREAUTHKEY:?HEADSCALE_PREAUTHKEY is not set (see .env.example)}"

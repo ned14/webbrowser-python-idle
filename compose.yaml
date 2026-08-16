@@ -9,7 +9,16 @@ x-server-env: &server-env
   STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}
   HEADSCALE_ENABLED: ${HEADSCALE_ENABLED:-0}
   HEADSCALE_BOOTSTRAP: ${HEADSCALE_BOOTSTRAP:-0}
-  CONTROL_HOST: ${CONTROL_HOST:-host.docker.internal}
+  # CONTROL_HOST: the browser-facing control-plane/DERP host (controlUrl in
+  # the baked page config, headscale server_url, nginx CSP). Default
+  # 127.0.0.1 = zero-config single machine; LAN deployments set it (with
+  # LAN_IP) to the hardcoded LAN address, e.g. 192.168.1.10. HOSTNAMES ARE
+  # BANNED (host.docker.internal, /etc/hosts tricks — never reintroduce): the
+  # browser must reach the control plane over 127.0.0.1 / a LAN IP alone.
+  # The gateway reaches the server over the compose network via its static
+  # IP (GATEWAY_CONTROL_IP) and a loopback DERP relay — independent of this
+  # value.
+  CONTROL_HOST: ${CONTROL_HOST:-127.0.0.1}
   LAN_IP: ${LAN_IP:-127.0.0.1}
   SITE_PORT: ${SITE_PORT:-8081}
   CONTROL_PORT: ${CONTROL_PORT:-8443}
@@ -87,8 +96,15 @@ services:
     environment:
       STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}
       GATEWAY_AUTHKEY: ${GATEWAY_AUTHKEY:-}
-      CONTROL_HOST: ${CONTROL_HOST:-host.docker.internal}
+      # The gateway does NOT use CONTROL_HOST (browser-facing): its tailscaled
+      # and relays talk to the control plane over the compose network at the
+      # server's static IP (GATEWAY_CONTROL_IP — cert SAN covers it), and a
+      # loopback relay makes the netmap's DERP host (127.0.0.1:CONTROL_PORT on
+      # the single machine) reachable from inside this container. No hostnames
+      # anywhere.
+      GATEWAY_CONTROL_IP: ${GATEWAY_CONTROL_IP:-172.28.0.10}
       CONTROL_PORT: ${CONTROL_PORT:-8443}
+      CONTROL_WSS_PORT: ${CONTROL_WSS_PORT:-443}
       WEBDAV_PORT: ${WEBDAV_PORT:-8082}
       SAMBA_LAN_IP: ${SAMBA_LAN_IP:-}
       GIT_SSH_LAN_IP: ${GIT_SSH_LAN_IP:-}
@@ -99,10 +115,6 @@ services:
     volumes:
       - ./certs:/certs:ro
       - gateway-state:/var/lib/tailscale
-    extra_hosts:
-      # Reach the control plane/DERP over the compose network (server's static
-      # IP), never via loopback-published host ports.
-      - "host.docker.internal:172.28.0.10"
     depends_on:
       - server
     networks:
