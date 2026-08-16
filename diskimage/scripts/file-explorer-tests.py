@@ -825,7 +825,12 @@ def test_open_in_viewer_replaces_screen(done):
         def poll(self):
             return None if time.time() < self._end else 0
     orig_popen = subprocess.Popen
+    orig_open = pane._viewer_window_open
     subprocess.Popen = FakePopen
+    # No real viewer window is mapped under the test Xvfb (FakePopen swallows
+    # the launcher), so pin the window probe to "open": the watcher must
+    # notice the viewer PROCESS exiting and bring the explorer back.
+    pane._viewer_window_open = lambda: True
     txt = os.path.join(SRC, "visible.txt")
     _ORIG_VIEWER([txt])
     _steps([
@@ -834,13 +839,16 @@ def test_open_in_viewer_replaces_screen(done):
                             repr(calls))),
         (100, lambda: check("explorer withdrawn while viewer runs",
                             str(root.state()) == "withdrawn", root.state())),
-        (900, lambda: check("explorer reappears once viewer exits",
-                            str(root.state()) == "normal", root.state())),
+        # The watcher polls for the viewer's exit at 3 s cadence, so the
+        # reappear needs that budget plus margin (as in the lingering test).
+        (3500, lambda: check("explorer reappears once viewer exits",
+                             str(root.state()) == "normal", root.state())),
         (100, lambda: check("folder reloaded after viewer",
                             pane.current_path == SRC and pane.displayed_paths,
                             pane.current_path)),
     ], lambda: (
         subprocess.__setattr__("Popen", orig_popen),
+        pane.__setattr__("_viewer_window_open", orig_open),
         done(),
     ))
 
@@ -1068,7 +1076,12 @@ def test_open_with_idle_replaces_screen(done):
         def poll(self):
             return None if time.time() < self._end else 0
     orig_popen = subprocess.Popen
+    orig_open = pane._idle_window_open
     subprocess.Popen = FakePopen
+    # No real IDLE window is mapped under the test Xvfb (FakePopen swallows
+    # the launcher), so pin the window probe to "open": the watcher must
+    # notice the IDLE PROCESS exiting and bring the explorer back.
+    pane._idle_window_open = lambda basenames: True
     try:
         py = os.path.join(SRC, "app.py")
         _ORIG_IDLE([py])
@@ -1077,14 +1090,17 @@ def test_open_with_idle_replaces_screen(done):
                                 calls == [["/usr/local/bin/idle3.10-launcher", py]], repr(calls))),
             (100, lambda: check("explorer withdrawn while IDLE runs",
                                 str(root.state()) == "withdrawn", root.state())),
-            (900, lambda: check("explorer reappears once IDLE exits",
-                                str(root.state()) == "normal", root.state())),
+            # The watcher polls for IDLE's exit at 0.5 s cadence: the 0.6 s
+            # fake process lifetime plus one poll, with a margin.
+            (1500, lambda: check("explorer reappears once IDLE exits",
+                                 str(root.state()) == "normal", root.state())),
             (100, lambda: check("folder reloaded after IDLE",
                                 pane.current_path == SRC and pane.displayed_paths,
                                 pane.current_path)),
         ], done)
     finally:
         subprocess.Popen = orig_popen
+        pane._idle_window_open = orig_open
 
 @test
 def test_idle_window_close_returns_when_process_lingers(done):
