@@ -25,6 +25,7 @@ import os
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 
 APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "file-viewer.py")
 
@@ -220,6 +221,62 @@ def test_zoom_buttons(done):
         check("zoom in changes zoom", root._zoom == 2.0, root._zoom)
         root._zoom_fit()
         check("fit restores zoom", root._zoom == 1.0, root._zoom)
+        done()
+    _wait_until(root, lambda: root._photo is not None, step1)
+
+@test
+def test_drag_pans_zoomed_image(done):
+    # Zooming past the viewport must let the user pan with a mouse drag: a
+    # B1 drag moves the view over the scrollregion and the cursor switches to
+    # a pan cursor while dragging (restored on release).
+    if not HAVE_PILLOW:
+        print("SKIP drag pan (no Pillow)", flush=True)
+        done()
+        return
+    _open([BIG])
+    def step1():
+        root._zoom = 8.0
+        root._render_image()
+        x0, y0, x1, y1 = (int(v) for v in
+                          root._canvas.cget("scrollregion").split())
+        vw = max(root._canvas.winfo_width(), 1)
+        vh = max(root._canvas.winfo_height(), 1)
+        check("zoomed image overflows the canvas",
+              (x1 - x0) > vw and (y1 - y0) > vh,
+              (x1 - x0, vw, y1 - y0, vh))
+        vx0 = root._canvas.xview()[0]
+        vy0 = root._canvas.yview()[0]
+        root._pan_begin(SimpleNamespace(x=200, y=150))
+        root._pan_move(SimpleNamespace(x=150, y=100))  # drag 50 px up-left
+        check("drag pans the view",
+              root._canvas.xview()[0] > vx0 and root._canvas.yview()[0] > vy0,
+              (vx0, root._canvas.xview()[0], vy0, root._canvas.yview()[0]))
+        root._pan_end(SimpleNamespace(x=150, y=100))
+        check("pan cursor restored after drag",
+              str(root._canvas.cget("cursor")) == "hand2",
+              root._canvas.cget("cursor"))
+        done()
+    _wait_until(root, lambda: root._photo is not None, step1)
+
+@test
+def test_arrow_keys_pan_zoomed_image(done):
+    # Arrow keys must pan a zoomed image with standard scroll semantics:
+    # Right/Down move the view toward that edge (the fraction increases).
+    if not HAVE_PILLOW:
+        print("SKIP arrow-key pan (no Pillow)", flush=True)
+        done()
+        return
+    _open([BIG])
+    def step1():
+        root._zoom = 8.0
+        root._render_image()
+        vx0 = root._canvas.xview()[0]
+        vy0 = root._canvas.yview()[0]
+        root._pan_key(SimpleNamespace(keysym="Right"))
+        root._pan_key(SimpleNamespace(keysym="Down"))
+        check("arrow keys pan the view",
+              root._canvas.xview()[0] > vx0 and root._canvas.yview()[0] > vy0,
+              (vx0, root._canvas.xview()[0], vy0, root._canvas.yview()[0]))
         done()
     _wait_until(root, lambda: root._photo is not None, step1)
 

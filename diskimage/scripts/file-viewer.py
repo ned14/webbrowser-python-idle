@@ -61,6 +61,10 @@ MIN_ZOOM = 0.05
 # the memory-limited WASM guest. Beyond this the canvas pans instead.
 MAX_RENDER_PIXELS = 16 * 1024 * 1024
 
+# Arrow-key pan step for a zoomed image, in canvas pixels (Tk auto-repeats
+# held keys, so holding an arrow scrolls continuously).
+PAN_STEP_PX = 60
+
 DRAFT_MAX = (2048, 2048)  # fast-decode ceiling for JPEG/TIFF before display
 
 # Hard cap on DECODED pixels: draft() limits only JPEG/TIFF, so PNG/BMP/WebP
@@ -213,6 +217,7 @@ class FileViewer(tk.Tk):
         self._anim_after = None
         self._photo = None        # must stay referenced (Tk GC pitfall)
         self._photo_item = None
+        self._pan = None           # active B1 drag state (image panning)
         self._canvas = None
         self._text = None
         self._imagetk_ok = HAVE_PILLOW
@@ -349,6 +354,7 @@ class FileViewer(tk.Tk):
         self._canvas = None
         self._text = None
         self._photo_item = None
+        self._pan = None
 
     # ------------------------------------------------------------------
     # Images
@@ -406,8 +412,19 @@ class FileViewer(tk.Tk):
         wrap.columnconfigure(0, weight=1)
         self._canvas.bind("<Button-4>", lambda e: self._zoom_by(1.25))
         self._canvas.bind("<Button-5>", lambda e: self._zoom_by(0.8))
+        # Drag to pan: once the image is zoomed past the viewport, hold the
+        # left button and drag to move around it (the wheel is taken by zoom).
+        self._canvas.bind("<ButtonPress-1>", self._pan_begin)
+        self._canvas.bind("<B1-Motion>", self._pan_move)
+        self._canvas.bind("<ButtonRelease-1>", self._pan_end)
+        self._canvas.bind("<Leave>", self._pan_end)
         self._canvas.bind("<Configure>",
                           lambda e: self.after_idle(self._re_fit))
+        # Arrow keys pan the zoomed image too. The canvas never takes
+        # keyboard focus, so bind at the toplevel and guard on image mode
+        # (the text view already scrolls with arrows natively).
+        for _ks in ("<Left>", "<Right>", "<Up>", "<Down>"):
+            self.bind(_ks, self._pan_key)
 
     def _re_fit(self):
         # Screen resizes (99-screen-resize.sh) and window changes re-fit the
@@ -500,6 +517,74 @@ class FileViewer(tk.Tk):
         if self._mode == "image" and self._pil is not None:
             self._zoom = 1.0
             self._render_image()
+
+    def _pan_begin(self, e):
+        # Record the drag origin and the view fraction AT PRESS: each motion
+        # computes the total pixel delta from the origin, so a drag never
+        # drifts regardless of how many B1-Motion events fire.
+        self._pan = (e.x, e.y, self._canvas.xview()[0], self._canvas.yview()[0])
+        self._canvas.configure(cursor="fleur")
+
+    def _pan_move(self, e):
+        pan = self._pan
+        if pan is None:
+            return
+        sx, sy, fx, fy = pan
+        vw = max(self._canvas.winfo_width(), 1)
+        vh = max(self._canvas.winfo_height(), 1)
+        try:
+            x0, y0, x1, y1 = (int(v) for v in
+                              self._canvas.cget("scrollregion").split())
+        except (ValueError, tk.TclError):
+            return
+        # The pan range is the scrollregion minus the visible viewport; a
+        # drag toward an edge moves the view toward that edge (dragging right
+        # reveals content that was to the left).
+        rx = (x1 - x0) - vw
+        ry = (y1 - y0) - vh
+        if rx > 0:
+            nf = min(1.0, max(0.0, fx - (e.x - sx) / float(rx)))
+            self._canvas.xview_moveto(nf)
+        if ry > 0:
+            nf = min(1.0, max(0.0, fy - (e.y - sy) / float(ry)))
+            self._canvas.yview_moveto(nf)
+
+    def _pan_end(self, e):
+        self._pan = None
+        self._canvas.configure(cursor="hand2")
+
+    def _pan_key(self, e):
+        # Standard scroll semantics: "Down" reveals content further down (the
+        # view fraction increases), the opposite of grab-panning, where the
+        # content follows the pointer.
+        if self._mode != "image" or self._canvas is None:
+            return
+        try:
+            x0, y0, x1, y1 = (int(v) for v in
+                              self._canvas.cget("scrollregion").split())
+        except (ValueError, tk.TclError):
+            return
+        vw = max(self._canvas.winfo_width(), 1)
+        vh = max(self._canvas.winfo_height(), 1)
+        dx = dy = 0
+        if e.keysym == "Left":
+            dx = -PAN_STEP_PX
+        elif e.keysym == "Right":
+            dx = PAN_STEP_PX
+        elif e.keysym == "Up":
+            dy = -PAN_STEP_PX
+        elif e.keysym == "Down":
+            dy = PAN_STEP_PX
+        else:
+            return
+        rx = (x1 - x0) - vw
+        ry = (y1 - y0) - vh
+        if dx and rx > 0:
+            nf = min(1.0, max(0.0, self._canvas.xview()[0] + dx / float(rx)))
+            self._canvas.xview_moveto(nf)
+        if dy and ry > 0:
+            nf = min(1.0, max(0.0, self._canvas.yview()[0] + dy / float(ry)))
+            self._canvas.yview_moveto(nf)
 
     def _gif_tick(self):
         if self._anim_it is None or self._mode != "image":
