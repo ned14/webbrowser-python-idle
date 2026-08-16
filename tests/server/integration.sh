@@ -34,6 +34,21 @@ fail() {
 echo "==> compose file validates"
 docker compose config -q || fail "docker compose config -q"
 
+echo "==> wait for the site to serve"
+# `docker compose up` returns as soon as the server container is started, but
+# the entrypoint brings nginx up only after headscale's socket/users/key
+# checks — the site can take several seconds to answer. Never race it: poll
+# until /alpine.html actually returns 200 (90 s covers even a cold CI start).
+SITE_OK=0
+for _i in $(seq 1 90); do
+	if [ "$(curl -sk -o /dev/null -w '%{http_code}' "$SITE_URL/alpine.html" 2>/dev/null)" = "200" ]; then
+		SITE_OK=1
+		break
+	fi
+	sleep 1
+done
+[ "$SITE_OK" = "1" ] || fail "/alpine.html never became reachable"
+
 echo "==> site headers (HTTPS)"
 curl -sk -D - -o /dev/null "$SITE_URL/alpine.html" | tee /tmp/hdr.txt | grep -qi "^HTTP/.* 200" || fail "/alpine.html not 200"
 grep -qi "cross-origin-opener-policy: same-origin" /tmp/hdr.txt || fail "COOP header missing"
