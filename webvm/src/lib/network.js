@@ -219,6 +219,30 @@ async function startTailnet()
 		window.cjTailscaleDumpIp = tunExports.dumpIP;
 		window.cjEnableTailscale = true;
 		await tunExports.up();
+		// CRITICAL (verified 2026-08-16, plans/networking-bug.md §16.8): with
+		// ONLY the driver's autoConf+up, the guest's data path stays broken —
+		// the guest's connect(2) never completes app-side even though the
+		// netstack finishes the TCP handshake (nc -z 100.64.0.1 8082 hangs;
+		// the sync agent retries forever). Re-running the CORE's own net-init
+		// (cheerpOSNetInit — the stock flow the core arms itself with) right
+		// after the driver is up heals it: the second autoConf+up on the tun
+		// module re-establishes the working guest data path, and the sync
+		// lease/snapshot then land on the backend within ~2 min (2/2 runs
+		// with the call, 0/5 without). The core's own invocation (if it ever
+		// runs) is idempotent with this one.
+		if (typeof window.cheerpOSNetInit === 'function')
+		{
+			window.cheerpOSNetInit(
+				'/cheerpx/tun/tailscale_tun_auto.js',
+				loginUrlCb,
+				authKey,
+				controlUrl,
+				null, // dnsIp
+				{}, // ipMap
+				netmapUpdateCb,
+				() => {}
+			);
+		}
 	}
 	catch(e)
 	{

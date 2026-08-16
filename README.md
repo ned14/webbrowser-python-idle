@@ -6,12 +6,10 @@ A personal Linux desktop that runs entirely in the browser via
 [WebVM/CheerpX](https://webvm.io): a minimal **i386 Alpine** guest with
 **stdlib-only Python and IDLE** (`idle3.10`), an Xorg/i3 desktop, **LAN-only
 networking**, and **configurable persistent storage** — browser IndexedDB by
-default, or Samba / container WebDAV through a guest sync agent.
-
-The authoritative design is
-[`plans/webvm_implementation.md`](plans/webvm_implementation.md) (implementation
-started; phasing per §7). The repo is a planning-turned-implementation repo —
-the plan is fully specified and the code now lives alongside it.
+default, or Samba / container WebDAV through a guest sync agent. **IDEAL**
+for learning Python in environments with only a locked down web browser e.g.
+Google Chromebooks. Packaged as a docker compose for easy installation on your
+home server.
 
 ## Try it live
 
@@ -22,6 +20,11 @@ browser at
 guest image (~230 MB; later visits reuse the browser cache) and needs a
 standards-compliant browser with SharedArrayBuffer — GitHub Pages cannot set the
 COOP/COEP headers WebVM requires, so the site injects them via a service worker.
+
+Note that due to latency between the guest image hosted by github and your web
+browser performance does suffer -- when running on LAN, the VM loads fully into
+your web browser in _seconds_, even on a relatively limited CPU such as a
+Chromebook or a phone.
 
 ## Quick start (browser mode — no tailnet)
 
@@ -52,6 +55,10 @@ via the browser IndexedDB overlay. Use `make url` to print the session URL.
 | `webdav` | a wsgidav container on a Docker volume (PROPFIND/PUT/GET) | headscale + gateway |
 
 Set it in `.env` (copy `.env.example`), or edit `compose.yaml`'s inline default.
+`make build` and `./build.sh` read `STORAGE_BACKEND` from `.env` (a command-line
+argument or exported variable overrides it), so the built guest image always
+matches the deployment; `make up` / `make up-tailnet` refuse to start when the
+built image's backend disagrees with `.env` — rebuild with `make build`.
 
 ## Tailnet modes (`samba` / `webdav`)
 

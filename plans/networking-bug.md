@@ -1018,6 +1018,17 @@ loop (lease → **initial snapshot** → per-file uploads → heartbeat), with
 - The guest's eth0 NIC is still never created by the core; the guest network
   works through the core's syscall-level socket dispatcher, so nothing in
   the guest needs eth0 anymore. The §15.2.6 eth0 guard stays (harmless).
+- `/proc/net/dev` is ABSENT in the guest (upstream CheerpX core gap,
+  documented 2026-08-16): the core's `/proc` emulation (the `{type:"proc"}`
+  mount in WebVM.svelte) provides only `/proc/mounts` plus a bare
+  `CheerpJDataFolder` (cheerpOS.js), the guest's real `mount -t proc` fails
+  with "Function not implemented", and with no NIC device there is nothing
+  to report anyway. Do not treat its absence as a networking-health check —
+  verify via the sync lock/lease on the backend or `headscale nodes list`
+  instead. If it is ever needed (e.g. Python curriculum code reads it), a
+  static `lo` table can be synthesized with documented APIs only (a
+  DataDevice mounted at `/proc/net`, like the `/opt/syncrc` injection);
+  rejected for now — nothing in the guest needs it.
 
 ### 16.7 Review-driven hardening (same session)
 
@@ -1049,4 +1060,28 @@ unit 81, integration PASS):
   exceed the 300s global cap).
 - **Test hygiene:** shared `tests/e2e/lib/webdav-auth.js` for the Basic-auth
   header (the silent-401 bug was an auth-handling drift); no-op replace and
+
+### 16.8 Guest data path still dead — fixed by re-running the core's net-init (2026-08-16)
+
+§16's claim that the guest data path worked was INCOMPLETE: with the app-side
+driver's autoConf+up ALONE, the guest's `connect(2)` never completes app-side
+even though the browser-side netstack finishes the TCP handshake and the
+wrapper's `opened` resolves (verified by tracing `networkInterface.TCPSocket`
+calls from the guest: 45/45 opened resolved, handshakes complete, ZERO HTTP
+bytes ever flow; `nc -z 100.64.0.1 8082` hangs; the sync agent retries forever
+and no lease ever lands). The §16.5 sync-E2E pass could not be reproduced.
+
+**Fix (`webvm/src/lib/network.js`, `startTailnet`): after the driver's
+`autoConf`+`up()`, call the CORE's own net-init `window.cheerpOSNetInit(...)`
+(same tun path + the driver's callbacks). The second `autoConf`+`up()` on the
+tun module re-establishes the working guest data path. Verified: the sync
+lease + first snapshot land on the backend within ~2 min with the call (2/2
+manual runs + the sync spec's lock assertion passes), 0/5 runs without it.
+The core's own invocation, if it ever runs, is idempotent with this one.
+
+Remaining flakiness (pre-existing CheerpX guest quirks, not the data path):
+the boot can occasionally wedge at "Starting local ..." (the §15 crash class),
+and the boot pull's `wait_for_tailnet` cycles 12 attempts at ~15-20s each
+under the slow guest clock, so the sync spec budgets were raised to 240s
+(lock + snapshot) with a 600s spec timeout.
   dead `tailnetUp()` removed.

@@ -34,23 +34,29 @@ test('webdav mode: sync agent appears on the backend and pull runs on reload', a
 	page,
 	request,
 }) => {
-	// Two full VM boots + the 150s/60s/60s assertion budgets exceed the
-	// 300s global timeout — give this spec its own budget like
-	// desktop.spec.js does.
-	test.setTimeout(420_000);
+	// Two full VM boots + the assertion budgets exceed the 300s global
+	// timeout — give this spec its own budget like desktop.spec.js does.
+	test.setTimeout(600_000);
 	await page.goto(SESSION_URL, { waitUntil: 'domcontentloaded' });
 
-	// Within ~2 min the lease file and the first home snapshot must appear.
+	// The lease file must appear. The guest's boot pull (wait_for_tailnet)
+	// cycles up to 12 ping attempts at ~15-20s each under the slow CheerpX
+	// guest clock (verified 2026-08-16), and the first attempts run before
+	// the browser-side tailnet driver has finished, so the worst case is
+	// ~4 min — budget generously.
 	await expect
 		.poll(
 			async () => (await request.get(WEBDAV_BASE + 'webvm.lock', { headers: authHeaders })).ok(),
-			{ timeout: 150_000, intervals: [5000] }
+			{ timeout: 240_000, intervals: [5000] }
 		)
 		.toBe(true);
+	// First-sync snapshot: the in-guest tar+gzip of the home runs in the wasm
+	// python on a COLD browser (no IDB cache), which has taken up to ~2 min
+	// after the lease — same generous budget as the lock.
 	await expect
 		.poll(
 			async () => (await request.get(WEBDAV_BASE + 'snapshot.tar.gz', { headers: authHeaders })).ok(),
-			{ timeout: 60_000, intervals: [5000] }
+			{ timeout: 240_000, intervals: [5000] }
 		)
 		.toBe(true);
 

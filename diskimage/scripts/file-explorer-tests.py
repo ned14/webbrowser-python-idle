@@ -479,6 +479,7 @@ def test_menus(done):
         (100, lambda: pane._popup_more()),
         (50, lambda: check("more menu only keeps non-toolbar actions",
                            "Go to path…" in _menu_labels(_LAST_MENU[0])
+                           and "Open Terminal (xterm)" in _menu_labels(_LAST_MENU[0])
                            and "Sort by" in _menu_labels(_LAST_MENU[0])
                            and "Select all" in _menu_labels(_LAST_MENU[0])
                            and "Open with IDLE" in _menu_labels(_LAST_MENU[0])

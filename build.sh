@@ -12,11 +12,45 @@
 #          webvm/custom-disk-images/image-build.txt (the fingerprint)
 set -eu
 
+# --- 0. Load deployment values from .env ------------------------------------
+# docker compose reads .env directly; the build MUST resolve the same way, or
+# the guest image can silently disagree with the deployment — e.g. a
+# browser-mode image in a webdav deployment, where desktop.start never starts
+# the sync agent and the guest never touches the network (fixed 2026-08-15).
+# Precedence: command line > environment > .env > default (browser).
+BACKEND_SOURCE="default (browser)"
+if [ -n "${1:-}" ]; then
+	BACKEND_SOURCE="command line"
+elif [ -n "${STORAGE_BACKEND:-}" ]; then
+	BACKEND_SOURCE="environment"
+elif [ -f .env ] && grep -q '^[[:space:]]*STORAGE_BACKEND=' .env; then
+	BACKEND_SOURCE=".env"
+fi
+if [ -f .env ]; then
+	# Export .env values that are NOT already in the environment (an explicit
+	# env var or make-passed value wins). Keys are validated so a stray line
+	# cannot become an arbitrary shell assignment.
+	while IFS='=' read -r key rest || [ -n "$key" ]; do
+		case "$key" in
+			''|'#'*) continue ;;
+		esac
+		key=$(printf '%s' "$key" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+		case "$key" in
+			[A-Za-z_][A-Za-z0-9_]*) ;;
+			*) continue ;;
+		esac
+		if ! env | grep -q "^${key}="; then
+			export "$key=$rest"
+		fi
+	done <.env
+fi
+
 STORAGE_BACKEND="${1:-${STORAGE_BACKEND:-browser}}"
 case "$STORAGE_BACKEND" in
 	browser|samba|webdav|none) ;;
 	*) echo "Unknown STORAGE_BACKEND: $STORAGE_BACKEND (browser|samba|webdav|none)" >&2; exit 1 ;;
 esac
+echo "==> Backend: $STORAGE_BACKEND (from $BACKEND_SOURCE)"
 
 IMAGE_TAG="webvm-guest"
 HELPER_TAG="webvm-ext2-helper"
@@ -152,8 +186,14 @@ FINGERPRINT=$(printf '%s' "$FINGERPRINT_INPUT" | shasum -a 256 | cut -c1-12)
 
 echo "$FINGERPRINT" > "$FINGERPRINT_FILE"
 
+# Record the backend the image was built for, alongside the fingerprint: the
+# deploy targets (make up/up-tailnet) compare it against the .env mode and
+# refuse to start a mismatched stack (2026-08-15 fix).
+echo "$STORAGE_BACKEND" > "$OUT_DIR/image-backend.txt"
+
 echo ""
 echo "==> Done"
+echo "   backend:     $STORAGE_BACKEND"
 echo "   ext2:        $OUT_IMAGE ($(du -h "$OUT_IMAGE" | cut -f1))"
 echo "   fingerprint: $FINGERPRINT  (cacheId = blocks_alpine_$FINGERPRINT)"
 echo ""

@@ -525,6 +525,7 @@ class SingleTab(ttk.Frame):
         if menu is None:
             return
         menu.add_command(label="Go to path…", command=self.go_to_path)
+        menu.add_command(label="Open Terminal (xterm)", command=self.open_terminal)
         menu.add_command(label="Select all", command=self.select_all)
         sort_menu = tk.Menu(menu, tearoff=0)
         for method in ("Name", "Type", "Date"):
@@ -683,6 +684,19 @@ class SingleTab(ttk.Frame):
             self.load_folder(path)
         else:
             messagebox.showerror("Error", "Path does not exist!")
+
+    def open_terminal(self):
+        """Launch an xterm shell in the current folder (like i3 $mod+Return,
+        but starting in the folder the explorer is showing)."""
+        xterm = shutil.which("xterm")
+        if not xterm:
+            set_status("xterm is not available")
+            return
+        try:
+            subprocess.Popen([xterm], cwd=self.current_path)
+            set_status("Terminal opened")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     def get_selected_items(self):
         return [self.item_path[iid] for iid in self.file_list.selection()

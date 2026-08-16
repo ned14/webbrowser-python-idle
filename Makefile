@@ -1,22 +1,50 @@
 SHELL := /bin/sh
 
-STORAGE_BACKEND ?= browser
+# The storage backend for BUILD steps. docker compose reads .env directly; the
+# build must resolve the same way, or the guest image, frontend and containers
+# silently disagree with the deployment — e.g. a browser-mode guest image in a
+# webdav deployment, where the sync agent never runs (fixed 2026-08-15).
+# Precedence: command line > environment > .env > browser.
+_ENV_BACKEND := $(shell [ -f .env ] && sed -n 's/^[[:space:]]*STORAGE_BACKEND[[:space:]]*=[[:space:]]*//p' .env | tail -1)
+STORAGE_BACKEND ?= $(if $(_ENV_BACKEND),$(_ENV_BACKEND),browser)
 
-.PHONY: certs build frontend up up-tailnet down logs test test-unit acceptance url clean
+# The mode docker compose will actually deploy (it reads .env, never make
+# variables) — used by the up/up-tailnet consistency guard below.
+DEPLOY_BACKEND := $(if $(_ENV_BACKEND),$(_ENV_BACKEND),browser)
+
+.PHONY: certs build check-image-backend up up-tailnet down logs test test-unit acceptance url clean
 
 ## Generate the private CA + server cert (once; browser trust is a manual step)
 certs:
 	./scripts/gen-certs.sh
 
 ## Build the guest ext2 image, the frontend (with the image fingerprint), then
-## the container images
+## the container images. STORAGE_BACKEND resolves from .env (command line /
+## environment override it) so the image mode always matches the deployment.
 build:
+	@echo "==> Building for backend '$(STORAGE_BACKEND)' (deployment mode: $(DEPLOY_BACKEND))"
 	./build.sh $(STORAGE_BACKEND)
 	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/custom-disk-images/image-build.txt 2>/dev/null || echo dev) npm run build
 	docker compose build
 
+## Fail unless the built guest image matches the deployment mode (.env). A
+## mismatch silently disables the mode's guest-side features (e.g. the sync
+## agent in webdav) — the 2026-08-15 build-consistency fix.
+check-image-backend:
+	@if [ ! -f webvm/custom-disk-images/image-backend.txt ]; then \
+		echo "ERROR: no built guest image marker (webvm/custom-disk-images/image-backend.txt)." >&2; \
+		echo "       This artifact predates the backend-consistency check; run 'make build' first." >&2; \
+		exit 1; \
+	fi
+	@built=$$(cat webvm/custom-disk-images/image-backend.txt); \
+	if [ "$$built" != "$(DEPLOY_BACKEND)" ]; then \
+		echo "ERROR: the built guest image is for backend '$$built' but the deployment (.env) is '$(DEPLOY_BACKEND)'." >&2; \
+		echo "       Run 'make build' to rebuild the guest image, frontend and containers for '$(DEPLOY_BACKEND)'." >&2; \
+		exit 1; \
+	fi
+
 ## Start the stack (browser/none: nginx only; samba/webdav: also needs make up-tailnet)
-up: certs
+up: certs check-image-backend
 	@if [ ! -f webvm/custom-disk-images/image-build.txt ]; then \
 		echo "ERROR: no guest image build found. Run 'make build' first (builds the ext2, the frontend and the container images)." >&2; \
 		exit 1; \
@@ -24,7 +52,7 @@ up: certs
 	docker compose up -d
 
 ## Start the stack including the gateway (tailnet modes)
-up-tailnet: certs
+up-tailnet: certs check-image-backend
 	@if [ ! -f webvm/custom-disk-images/image-build.txt ]; then \
 		echo "ERROR: no guest image build found. Run 'make build' first (builds the ext2, the frontend and the container images)." >&2; \
 		exit 1; \
