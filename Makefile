@@ -12,7 +12,12 @@ STORAGE_BACKEND ?= $(if $(_ENV_BACKEND),$(_ENV_BACKEND),browser)
 # variables) — used by the up/up-tailnet consistency guard below.
 DEPLOY_BACKEND := $(if $(_ENV_BACKEND),$(_ENV_BACKEND),browser)
 
-.PHONY: certs build check-image-backend up up-tailnet down logs test test-unit acceptance url clean
+# The server-side WebDAV sync root (compose mount ${DATA_DIR:-./data} ->
+# ${WEBDAV_ROOT:-/data/webdav}). Resolved from .env for reset-webdav.
+_ENV_DATA_DIR := $(shell [ -f .env ] && sed -n 's/^[[:space:]]*DATA_DIR[[:space:]]*=[[:space:]]*//p' .env | tail -1)
+DATA_DIR ?= $(if $(_ENV_DATA_DIR),$(_ENV_DATA_DIR),./data)
+
+.PHONY: certs build check-image-backend up up-tailnet down logs test test-unit acceptance url clean reset-webdav
 
 ## Generate the private CA + server cert (once; browser trust is a manual step)
 certs:
@@ -92,3 +97,19 @@ acceptance:
 ## Tear everything down (including volumes)
 clean:
 	docker compose --profile tailnet down -v --remove-orphans
+
+## Reset the WebDAV sync storage on the server: stop the stack, wipe the
+## webdav root (${DATA_DIR:-./data}, mounted at the container's
+## ${WEBDAV_ROOT:-/data/webdav}), and restart the full stack (tailnet profile
+## — webdav always needs the gateway). The guest re-seeds the storage on its
+## next boot pull. Headscale data (gateway node + keys) is untouched, so
+## GATEWAY_TAILNET_IP stays valid.
+reset-webdav: down
+	@if [ "$(DEPLOY_BACKEND)" != "webdav" ]; then \
+		echo "ERROR: deployment backend is '$(DEPLOY_BACKEND)', not webdav — nothing to reset." >&2; \
+		exit 1; \
+	fi
+	@mkdir -p "$(DATA_DIR)"
+	@rm -rf "$(DATA_DIR)"/* "$(DATA_DIR)"/.[!.]* "$(DATA_DIR)"/..?* 2>/dev/null || true
+	@echo "==> WebDAV storage reset at $(DATA_DIR)"
+	docker compose --profile tailnet up -d
