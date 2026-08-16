@@ -1,19 +1,27 @@
-# Headscale configuration (pinned v0.29.3 schema; rendered by entrypoint.sh via
-# envsubst with an explicit variable list).
+# Headscale configuration (pinned binary is headscale/headscale:0.28.0 — the
+# Dockerfile explains why the pin is 0.28.0 and NOT the newest 0.29.x.
+# Rendered by entrypoint.sh via envsubst with an explicit variable list).
 #
 # LAN-only control plane:
 #   - server_url derives every client-facing URL (control + embedded DERP)
-#   - NOTE: server_url is PATH-LESS. Verified against v0.29.3: the tailscale
-#     client posts /machine/register over the Noise channel using the
-#     server_url PATH verbatim, and headscale's noise-internal router serves
-#     /machine/register at the ROOT — so a `/headscale` base path 404s the
-#     registration. nginx therefore proxies ALL of :CONTROL_PORT to headscale.
+#   - NOTE: server_url is PATH-LESS. Verified: the tailscale client posts
+#     /machine/register over the Noise channel using the server_url PATH
+#     verbatim, and headscale's noise-internal router serves /machine/register
+#     at the ROOT — so a `/headscale` base path 404s the registration. nginx
+#     therefore proxies ALL of :CONTROL_PORT to headscale.
 #   - embedded DERP enabled (region 999), public DERP disabled (urls: [])
 #   - MagicDNS off (the guest uses IP addresses only)
 #   - no exit node, disable check-updates (the server stays off the network)
 #   - TLS terminated by nginx (this listener is plain HTTP on 127.0.0.1)
 #   - logtail.enabled: false (netmap carries Debug.DisableLogTail -> clients
-#     self-disable browser-side Tailscale logging)
+#     self-disable browser-side Tailscale logging; the page CSP also blocks
+#     the logtail endpoint as belt-and-braces)
+#
+# Keys verified against the 0.28.0 binary's config schema: the ephemeral-node
+# reaping key is TOP-LEVEL `ephemeral_node_inactivity_timeout` in 0.28.0 (the
+# nested `node.ephemeral.inactivity_timeout` is the 0.29.x spelling and would
+# be silently ignored by the pinned binary — 0.28.0 has no `node:` config
+# section at all).
 
 server_url: "https://${CONTROL_HOST}:${CONTROL_PORT}"
 listen_addr: "127.0.0.1:8080"
@@ -61,11 +69,13 @@ derp:
 # The server itself never checks for updates
 disable_check_updates: true
 
-node:
-  # No default node expiry (keys are long-lived, personal LAN)
-  expiry: 0
-  ephemeral:
-    inactivity_timeout: "30m"
+# Time before an inactive ephemeral node is deleted (TOP-LEVEL key in the
+# pinned 0.28.0 — the nested `node.ephemeral.inactivity_timeout` is 0.29.x and
+# is ignored by the binary). Browser VMs join with an ephemeral preauth key
+# (HEADSCALE_PREAUTHKEY is created with --ephemeral), so closed tabs stop
+# accumulating stale nodes after this window; the GATEWAY node is persistent
+# (tailnet-IP stability) and is never reaped.
+ephemeral_node_inactivity_timeout: "30m"
 
 database:
   type: sqlite

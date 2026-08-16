@@ -75,16 +75,20 @@ function startHeartbeat(token) {
 	// Only renew the lock if it is still OURS. A reclaimed lock (another
 	// tab took over after our expiry) must not be overwritten — an ousted
 	// tab's heartbeat would otherwise resurrect a stale holder and let two
-	// tabs write the shared overlay. On a mismatch we stop WITHOUT deleting
-	// the record: the new holder legitimately owns it, and removing it would
-	// reopen the two-holder window.
+	// tabs write the shared overlay. On a mismatch we stop heartbeating
+	// AND reload: an ousted-but-resumed tab would otherwise keep mounting
+	// the shared overlay with the shared cacheId while the new holder
+	// writes it too — two persistent writers, exactly the corruption the
+	// guard exists to prevent. After the reload the contender path runs
+	// again and this tab boots an (ephemeral) session if the other tab is
+	// still alive.
 	const state = readState();
 	if (!state || state.token !== token) {
 		clearInterval(heartbeatTimer);
 		heartbeatTimer = null;
 		holderToken = null;
-		if (state && state.token === token) removeState();
 		try { channel.close(); } catch (e) {}
+		window.location.reload();
 		return;
 	}
 	writeState({ token, lastSeen: Date.now() });

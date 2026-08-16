@@ -18,7 +18,9 @@ const webvmDiskImage = process.env.WEBVM_DISK_IMAGE || '';
 export default defineConfig({
 	resolve: {
 		alias: {
-			'/config_terminal': 'config_public_terminal.js',
+			// (The stock '/config_terminal' terminal page is dead: the root `/`
+			// route is redirected by nginx to /alpine.html, so the alias and
+			// its config were removed.)
 			'/config_public_alpine': webvmDiskImage
 				? 'config_public_alpine_github.js'
 				: 'config_public_alpine.js',

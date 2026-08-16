@@ -52,6 +52,7 @@ RUN apk add --no-cache \
 	xinit \
 	xf86-input-libinput \
 	xrandr \
+	setxkbmap \
 	i3wm \
 	font-dejavu \
 	python3 \

@@ -182,15 +182,16 @@ jobs:
       - name: Bootstrap preauth keys (first run of headscale)
         run: |
           docker compose up -d server
-          # Create a long-lived reusable key, retrying until the control plane
+          # Create long-lived reusable keys, retrying until the control plane
           # is actually READY: `preauthkeys create` can fail with 'user not
           # found' while headscale is still starting (the socket appears
           # before the RPC/DB layer is ready), and the error goes to stderr —
           # an empty key would silently crash-loop both the server and the
           # gateway. Only a real `hskey-auth-*` key counts as success.
           make_key() {
+            local extra="$1"
             for i in $(seq 1 30); do
-              KEY=$(docker compose exec -T server headscale preauthkeys create --user 1 --reusable --expiration 100y 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | tail -1)
+              KEY=$(docker compose exec -T server headscale preauthkeys create --user 1 --reusable --expiration 100y $extra 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' | tail -1)
               case "$KEY" in
                 hskey-auth-*) echo "$KEY"; return 0 ;;
               esac
@@ -199,9 +200,13 @@ jobs:
             echo "FAIL: headscale never became ready to create preauth keys" >&2
             exit 1
           }
-          # v0.29.x: --user takes the NUMERIC user id (headscale users list);
-          # the entrypoint creates the 'headscale' namespace first (id 1).
-          KEY1=$(make_key)
+          # The pinned headscale (0.28.x): --user takes the NUMERIC user id
+          # (headscale users list); the entrypoint creates the 'headscale'
+          # namespace first (id 1). The BROWSER key is --ephemeral (closed
+          # tabs stop accumulating stale nodes — headscale reaps disconnected
+          # ephemeral nodes), the GATEWAY key is persistent so the gateway's
+          # node record (and its allocated tailnet IP) stays stable.
+          KEY1=$(make_key --ephemeral)
           KEY2=$(make_key)
           # Keep HEADSCALE_BOOTSTRAP=1 here: `--profile tailnet up -d` below
           # RECREATES the server (the .env change alters its computed env),
@@ -279,4 +284,5 @@ jobs:
       - name: yamllint
         run: |
           docker run --rm -v "$PWD":/work -w /work cytopia/yamllint:latest \
-            -c /work/.yamllint /work/compose.yaml /work/.github/workflows/ci.yml
+            -c /work/.yamllint /work/compose.yaml /work/.github/workflows/ci.yml \
+            /work/.github/workflows/pages.yml

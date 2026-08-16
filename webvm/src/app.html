@@ -10,12 +10,12 @@
 		<meta property="og:title" content="WebVM - Linux virtualization in WebAssembly" />
 		<meta property="og:type" content="website" />
 		<meta property="og:site_name" content="WebVM"/>
-		<meta property="og:image" content="/assets/social_2024.png" />
+		<meta property="og:image" content="assets/social_2024.png" />
 		<meta name="twitter:card" content="summary_large_image" />
 		<meta name="twitter:site" content="@leaningtech" />
 		<meta name="twitter:title" content="WebVM - Linux virtualization in WebAssembly" />
 		<meta name="twitter:description" content="Linux virtual machine, running in the browser via HTML5/WebAssembly. Networking and graphics supported.">
-		<meta name="twitter:image" content="/assets/social_2024.png" />
+		<meta name="twitter:image" content="assets/social_2024.png" />
 
 		<!-- Apple iOS web clip compatibility tags -->
 		<meta name="application-name" content="WebVM" />
@@ -52,8 +52,19 @@
 				var baked = (!params && !sessionStorage.getItem("webvm-explicit-session"))
 					? (window.__webvmConfig || {})
 					: {};
+				// A NEW hash is a complete replacement: stale values from an earlier
+				// explicit session in this tab (e.g. a previous #controlUrl)
+				// must never merge with a hash that omits them — a credential
+				// sent to the wrong control plane would break the tailnet and
+				// leak a preauth key. So when a hash is present, clear all
+				// five keys first, then set exactly what it provides. A
+				// HASH-LESS load (reload of a stripped explicit-session URL,
+				// sticky marker set) must NOT clear anything: the tab's
+				// explicit sessionStorage params are its session and survive
+				// reloads by design.
 				["authKey", "controlUrl", "syncUrl", "syncUser", "syncPass"].forEach(function (k) {
-					var v = (params && params.get(k)) || baked[k];
+					var v = params ? params.get(k) : baked[k];
+					if (params) sessionStorage.removeItem(k);
 					if (v) sessionStorage.setItem(k, v);
 				});
 				if (params) {

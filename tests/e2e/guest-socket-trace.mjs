@@ -21,6 +21,7 @@ const SESSION_URL =
 	'&syncUrl=http://' + GATEWAY_IP + ':' + PORT + '/webdav/' +
 	'&syncUser=webdav&syncPass=webdavpass';
 
+const browser = await chromium.launch({});
 const context = await browser.newContext({ ignoreHTTPSErrors: true });
 const page = await context.newPage();
 

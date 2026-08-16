@@ -35,14 +35,16 @@ if [ "$need_headscale" = "1" ] && [ "$HEADSCALE_BOOTSTRAP" != "1" ]; then
 	if [ -z "${HEADSCALE_PREAUTHKEY:-}" ]; then
 		echo "FATAL: STORAGE_BACKEND=$STORAGE_BACKEND requires HEADSCALE_PREAUTHKEY." >&2
 		echo "       Bootstrap:  HEADSCALE_BOOTSTRAP=1 docker compose up -d server" >&2
-		echo "       then:        docker compose exec server headscale preauthkeys create --user <id> --reusable --expiration 100y" >&2
-		echo "       (the user id comes from 'headscale users list'; the first user is 1)" >&2
+		echo "       then:        docker compose exec server headscale preauthkeys create --user <id> --reusable --ephemeral --expiration 100y" >&2
+		echo "       (the BROWSER key is --ephemeral so closed tabs stop accumulating nodes;" >&2
+		echo "        the user id comes from 'headscale users list'; the first user is 1)" >&2
 		echo "       and record the printed value in .env (see .env.example)." >&2
 		exit 1
 	fi
 	if [ -z "${GATEWAY_AUTHKEY:-}" ]; then
 		echo "FATAL: STORAGE_BACKEND=$STORAGE_BACKEND requires GATEWAY_AUTHKEY." >&2
-		echo "       Create it as above and record it in .env (see .env.example)." >&2
+		echo "       Create it as above but WITHOUT --ephemeral (the gateway node must" >&2
+		echo "       persist so its tailnet IP stays stable) and record it in .env." >&2
 		exit 1
 	fi
 fi
@@ -123,8 +125,9 @@ if [ "$need_headscale" = "1" ]; then
 	done
 
 	# Verify the .env preauth keys exist in headscale's DB (fail-closed).
-	# NB v0.29.x: `preauthkeys list` takes no --user flag and MASKS keys with
-	# ***, so match the configured key against the listed unmasked prefix.
+	# NB the pinned headscale (0.28.x): `preauthkeys list` takes no --user
+	# flag and MASKS keys with ***, so match the configured key against the
+	# listed unmasked prefix.
 	if [ "$HEADSCALE_BOOTSTRAP" != "1" ]; then
 		hs_user_id=$(headscale users list 2>/dev/null \
 			| sed -E 's/\x1b\[[0-9;]*m//g' \
@@ -146,7 +149,11 @@ if [ "$need_headscale" = "1" ]; then
 			done
 			if [ -z "$matched" ]; then
 				echo "FATAL: $key_name is not present in the headscale DB." >&2
-				echo "       Bootstrap:  docker compose exec server headscale preauthkeys create --user $hs_user_id --reusable --expiration 100y" >&2
+				if [ "$key_name" = "HEADSCALE_PREAUTHKEY" ]; then
+					echo "       Bootstrap:  docker compose exec server headscale preauthkeys create --user $hs_user_id --reusable --ephemeral --expiration 100y" >&2
+				else
+					echo "       Bootstrap:  docker compose exec server headscale preauthkeys create --user $hs_user_id --reusable --expiration 100y" >&2
+				fi
 				echo "       then record the printed value in .env as $key_name and restart." >&2
 				kill "$HS_PID" 2>/dev/null
 				exit 1

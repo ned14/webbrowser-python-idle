@@ -107,4 +107,4 @@ console.log('recv=' + JSON.stringify((result.recv || '').slice(0, 200)));
 // Also check whether the guest's own attempts landed on WebDAV (count hits
 // is done server-side; here just report).
 await browser.close();
-process.exit(result.syn === 'COMPLETED' ? 0 : 1);
+process.exit(String(result.syn).startsWith('COMPLETED') ? 0 : 1);

@@ -76,6 +76,12 @@ WINDOWLESS_SINCE=0
 while :; do
 	sleep "$POLL_SECONDS"
 	NOW=$(date +%s 2>/dev/null || echo 0)
+	# Clock glitch (date failed -> NOW=0): never let a stale WINDOWLESS_SINCE
+	# count deliver an immediate force-kill once the clock recovers — restart
+	# the windowless window instead.
+	if [ "$NOW" = "0" ]; then
+		WINDOWLESS_SINCE=0
+	fi
 	if [ "$(count_windows 2>/dev/null)" = "0" ]; then
 		if explorer_running; then
 		# Windowless but alive: either still mapping its window, or

@@ -11,6 +11,15 @@ import { waitForDesktop } from '../lib/desktop.js';
 
 const CONTROL_HOST = process.env.E2E_CONTROL_HOST || '127.0.0.1';
 const CONTROL_PORT = process.env.E2E_CONTROL_PORT || '8443';
+// The wasm Tailscale client DROPS the controlUrl port when building its
+// control-plane URLs (wss://<host>/ts2021, /derp, /derp/probe), so the
+// control plane is also addressed on the scheme-default port 443
+// (CONTROL_WSS_PORT, relayed by the gateway in tailnet modes). The no-egress
+// allowlist must admit BOTH port families.
+const CONTROL_WSS_PORT = process.env.E2E_CONTROL_WSS_PORT || '443';
+const isControlPlane = (candidate) =>
+	candidate.hostname === CONTROL_HOST &&
+	(candidate.port === CONTROL_PORT || candidate.port === CONTROL_WSS_PORT || candidate.port === '');
 const SITE_URL =
 	process.env.E2E_SITE_URL ||
 	`https://127.0.0.1:${process.env.E2E_SITE_PORT || 8081}/alpine.html`;
@@ -49,14 +58,16 @@ test('makes zero external requests (HTTP and WebSockets)', async ({ page }) => {
 	const pageOrigin = new URL(SITE_URL).origin;
 	await page.route('**/*', (route) => {
 		const url = new URL(route.request().url());
-		if (url.origin !== pageOrigin && !(url.hostname === CONTROL_HOST && url.port === CONTROL_PORT)) {
+		if (url.origin !== pageOrigin && !isControlPlane(url)) {
 			external.push(url.href);
 		}
 		route.continue();
 	});
 	page.on('websocket', (ws) => {
 		const url = new URL(ws.url());
-		if (url.hostname !== CONTROL_HOST && url.port !== CONTROL_PORT) {
+		// `||` (NOT `&&`): a WebSocket to a different host on a control port —
+		// or any other cross-origin socket — must be flagged, not let through.
+		if (!isControlPlane(url)) {
 			external.push('ws://' + ws.url());
 		}
 	});

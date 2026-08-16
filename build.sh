@@ -68,9 +68,13 @@ trap cleanup EXIT
 
 # Effective build args (same defaults as diskimage/Dockerfile), reused by the
 # fingerprint so CI and local builds agree on content-identical images.
+# The WebDAV sync creds fall back to the deployment's WEBDAV_USER/WEBDAV_PASS
+# (the server's wsgidav credentials — the baked /root/.syncrc must match them,
+# or the no-injection fallback is guaranteed wrong); SYNC_* overrides exist
+# for share-specific values.
 SYNC_URL_EFF="${SYNC_URL:-http://100.64.0.1:8082/webdav/}"
-SYNC_USER_EFF="${SYNC_USER:-webdav}"
-SYNC_PASS_EFF="${SYNC_PASS:-changeme}"
+SYNC_USER_EFF="${SYNC_USER:-${WEBDAV_USER:-webdav}}"
+SYNC_PASS_EFF="${SYNC_PASS:-${WEBDAV_PASS:-changeme}}"
 SAMBA_HOST_EFF="${SAMBA_HOST:-${GATEWAY_TAILNET_IP:-100.64.0.1}}"
 SAMBA_SHARE_EFF="${SAMBA_SHARE:-share}"
 SAMBA_USER_EFF="${SAMBA_USER:-user}"
@@ -171,13 +175,20 @@ fi
 # against it. The same plaintext passwords are already baked into the served
 # ext2's /root/.syncrc, so this is defense-in-depth, not a new primary leak;
 # still, never deploy samba/webdav with the default passwords.
-# __pycache__ bytecode is excluded (non-deterministic across Python versions).
+# __pycache__ bytecode is excluded (non-deterministic across Python versions),
+# as are .DS_Store files (macOS working trees would otherwise skew the digest
+# vs Linux/CI for the same commit). `trace/` is NOT fingerprinted as a whole
+# directory: only trace/libtcl8.6.so.patched is COPY'd into the image, so the
+# dir's stale pcmanfm-era probe sources are catted explicitly instead (the
+# patched lib changes the image; touching the probes must not churn the
+# cacheId of a byte-identical ext2).
 FINGERPRINT_INPUT=$( \
 	cat diskimage/Dockerfile; \
-	find diskimage/rootfs diskimage/config diskimage/scripts diskimage/sync diskimage/trace \
+	find diskimage/rootfs diskimage/config diskimage/scripts diskimage/sync \
 		diskimage/python-examples \
 		-type f -not -path '*/.git/*' -not -name '*.pyc' -not -path '*/__pycache__/*' \
-		-not -path '*/rootfs/home/user/.ssh/*' -print0 2>/dev/null | sort -z | xargs -0 cat; \
+		-not -name '.DS_Store' -not -path '*/rootfs/home/user/.ssh/*' -print0 2>/dev/null | sort -z | xargs -0 cat; \
+	cat diskimage/trace/libtcl8.6.so.patched 2>/dev/null; \
 	echo "$STORAGE_BACKEND"; \
 	echo "SYNC_URL=$SYNC_URL_EFF SYNC_USER=$SYNC_USER_EFF SYNC_PASS=$SYNC_PASS_EFF"; \
 	echo "SAMBA_HOST=$SAMBA_HOST_EFF SAMBA_SHARE=$SAMBA_SHARE_EFF SAMBA_USER=$SAMBA_USER_EFF SAMBA_PASS=$SAMBA_PASS_EFF" \

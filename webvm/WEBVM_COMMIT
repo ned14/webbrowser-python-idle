@@ -6,8 +6,9 @@ Message:    "Update CheerpX version to 1.3.7"
 
 Pinned dependencies (package.json / package-lock.json):
 - @leaningtech/cheerpx: 1.3.7 (exact)
-- labs: https://github.com/leaningtech/labs.git (rewritten from the upstream
-  git@github.com:leaningtech/labs.git so npm ci works in CI)
+- labs: no longer a dependency of this tree — the Claude/AI sidebar tab (the
+  only consumer of leaningtech/labs) was removed, so package.json/lock contain
+  no labs entry (the upstream git@github.com:... entry is gone with it).
 
 See plans/webvm_implementation.md §3/9, §12/8 for the pinning policy and the
 §12/21 implementation-time verification checklist.

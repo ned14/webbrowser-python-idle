@@ -154,7 +154,10 @@ if (process.env.RUNTIME_VERSION) {
 // these traces show exactly where.)
 if (process.env.TUN_TRACE === '1') {
 	const fs = await import('node:fs');
-	const base = '/Users/ned/boostish/webvm-custom/webvm/cheerpx/tun/';
+	const { fileURLToPath } = await import('node:url');
+	// Derive the tun directory from THIS script's location instead of a
+	// hardcoded macOS path (portable across machines/CI).
+	const base = fileURLToPath(new URL('../webvm/cheerpx/tun/', import.meta.url));
 	const wasmBytes = fs.readFileSync(base + 'tailscale.wasm');
 
 	// Route tailscale.wasm: any fetch of it (file URL or blob-wrapped) lands

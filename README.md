@@ -74,12 +74,15 @@ EOF
 make build && docker compose up -d server
 
 # 2. create the two reusable, long-lived preauth keys and record them in .env
-#    (keep HEADSCALE_BOOTSTRAP=1 for now — see step 3)
+#    (keep HEADSCALE_BOOTSTRAP=1 for now — see step 3). The BROWSER key is
+#    --ephemeral (closed tabs stop accumulating stale nodes in headscale); the
+#    GATEWAY key is persistent so the gateway node — and therefore its
+#    allocated tailnet IP — stays stable across container recreations.
 docker compose exec server headscale users list          # note the user id (first user = 1)
+docker compose exec server headscale preauthkeys create --user 1 --reusable --ephemeral --expiration 100y
 docker compose exec server headscale preauthkeys create --user 1 --reusable --expiration 100y
-docker compose exec server headscale preauthkeys create --user 1 --reusable --expiration 100y
-#   -> copy BOTH printed values into .env as HEADSCALE_PREAUTHKEY and
-#      GATEWAY_AUTHKEY
+#   -> copy BOTH printed values into .env as HEADSCALE_PREAUTHKEY (first,
+#      ephemeral) and GATEWAY_AUTHKEY (second, persistent)
 
 # 3. bring up the tailnet stack and read the gateway's assigned tailnet IP.
 #    This recreates the server with the new .env — it MUST still be in
@@ -114,7 +117,7 @@ defaults — `CONTROL_HOST=127.0.0.1`, **zero configuration**.
 > hostname to resolve.
 
 > The control-plane URL is **path-less** (`https://${CONTROL_HOST}:${CONTROL_PORT}`):
-> verified against headscale v0.29.3, the Noise register path carries the
+> verified, the Noise register path carries the
 > `server_url` path verbatim and headscale's noise router serves it at the root
 > (a `/headscale` base path 404s registration). nginx proxies all of
 > `CONTROL_PORT` to headscale; the embedded-DERP relay URL is

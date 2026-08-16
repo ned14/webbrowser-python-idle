@@ -37,6 +37,12 @@ test('webdav mode: sync agent appears on the backend and pull runs on reload', a
 	// Two full VM boots + the assertion budgets exceed the 300s global
 	// timeout — give this spec its own budget like desktop.spec.js does.
 	test.setTimeout(600_000);
+	// Test isolation: clear every artifact a PREVIOUS session (or the
+	// network.spec that runs first) may have left on the backend. webvm.lock
+	// and snapshot.tar.gz already existing would make the polls below pass
+	// without THIS boot's agent ever syncing — a false positive.
+	await request.delete(WEBDAV_BASE + 'webvm.lock', { headers: authHeaders }).catch(() => {});
+	await request.delete(WEBDAV_BASE + 'snapshot.tar.gz', { headers: authHeaders }).catch(() => {});
 	await page.goto(SESSION_URL, { waitUntil: 'domcontentloaded' });
 
 	// The lease file must appear. The guest's boot pull (wait_for_tailnet)

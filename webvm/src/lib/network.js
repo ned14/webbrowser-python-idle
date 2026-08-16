@@ -230,8 +230,16 @@ async function startTailnet()
 		// lease/snapshot then land on the backend within ~2 min (2/2 runs
 		// with the call, 0/5 without). The core's own invocation (if it ever
 		// runs) is idempotent with this one.
-		if (typeof window.cheerpOSNetInit === 'function')
-		{
+		//
+		// cheerpOSNetInit only becomes a global when the runtime injects and
+		// evaluates its cheerpOS.js via a dynamically created <script> tag —
+		// an async step that races this driver reaching `up()`. A single
+		// instanceof check here could therefore MISS the healer entirely and
+		// leave the guest data path down, so poll for the global (up to ~20s)
+		// before invoking it once; if it still has not appeared (slow CI/WASM
+		// load), a background watcher keeps looking for a few minutes so a
+		// late injection still heals the session instead of failing silently.
+		const runCoreNetInitHeal = () => {
 			window.cheerpOSNetInit(
 				'/cheerpx/tun/tailscale_tun_auto.js',
 				loginUrlCb,
@@ -242,6 +250,34 @@ async function startTailnet()
 				netmapUpdateCb,
 				() => {}
 			);
+		};
+		let healed = false;
+		for (let i = 0; i < 80; i++)
+		{
+			if (typeof window.cheerpOSNetInit === 'function')
+			{
+				runCoreNetInitHeal();
+				healed = true;
+				break;
+			}
+			await new Promise((r) => setTimeout(r, 250));
+		}
+		if (!healed)
+		{
+			let tries = 0;
+			const watcher = setInterval(() => {
+				tries += 1;
+				if (typeof window.cheerpOSNetInit === 'function')
+				{
+					clearInterval(watcher);
+					runCoreNetInitHeal();
+				}
+				else if (tries >= 60) // ~5 min total watch window
+				{
+					clearInterval(watcher);
+					console.warn('tailnet driver: cheerpOSNetInit never appeared; guest data path may stay down');
+				}
+			}, 5000);
 		}
 	}
 	catch(e)
@@ -274,14 +310,35 @@ function connectedTcpSocket(sock, remoteAddress, remotePort, localPort)
 			autoAllocateChunkSize: 1500,
 			async pull(controller) {
 				for (;;) {
-					const view = controller.byobRequest ? controller.byobRequest.view : new Uint8Array(1500);
-					const n = sock.recv(view, 0, view.length);
+					let view;
+					let n;
+					try {
+						view = controller.byobRequest ? controller.byobRequest.view : new Uint8Array(1500);
+						n = sock.recv(view, 0, view.length);
+					} catch (e) {
+						// A throwing recv (tun torn down mid-read) must close
+						// the socket AND resolve `closed` — the invariant
+						// below — or the core wedges on guest teardown.
+						try { sock.close(); } catch (x) {}
+						resolveClosed();
+						controller.error(e);
+						return;
+					}
 					if (n > 0) {
 						if (controller.byobRequest) controller.byobRequest.respond(n);
 						else controller.enqueue(view.slice(0, n));
 						return;
 					}
-					if (n === -11) { await sock.waitIncoming(); continue; } // EAGAIN
+					if (n === -11) {
+						try { await sock.waitIncoming(); continue; } // EAGAIN
+						catch (e) {
+							// Same invariant on a rejecting waitIncoming.
+							try { sock.close(); } catch (x) {}
+							resolveClosed();
+							controller.error(e);
+							return;
+						}
+					}
 					if (controller.byobRequest) controller.byobRequest.respond(0);
 					controller.close();
 					try { resolveClosed(); } catch (e) {}
@@ -297,24 +354,32 @@ function connectedTcpSocket(sock, remoteAddress, remotePort, localPort)
 				// (the runtime's own TCPWrapper write loop).
 				const data = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
 				let off = 0;
-				while (off < data.length) {
-					const n = sock.send(data, off, data.length - off);
-					if (n > 0) { off += n; continue; }
-					if (n === -11) {
-						// EAGAIN — tx buffer full. MUST yield to
-						// the event loop: the tun drains the
-						// buffer asynchronously, so a synchronous
-						// retry loop never makes progress (the
-						// socket's send buffer stays full forever
-						// and the write never completes).
-						await new Promise((r) => setTimeout(r, 5));
-						continue;
+				try {
+					while (off < data.length) {
+						const n = sock.send(data, off, data.length - off);
+						if (n > 0) { off += n; continue; }
+						if (n === -11) {
+							// EAGAIN — tx buffer full. MUST yield to
+							// the event loop: the tun drains the
+							// buffer asynchronously, so a synchronous
+							// retry loop never makes progress (the
+							// socket's send buffer stays full forever
+							// and the write never completes).
+							await new Promise((r) => setTimeout(r, 5));
+							continue;
+						}
+						throw new Error('send failed rc=' + n);
 					}
-					throw new Error('send failed rc=' + n);
+				} catch (e) {
+					// A throwing/rejecting send must also resolve `closed`
+					// (the invariant) before the write failure propagates.
+					try { sock.close(); } catch (x) {}
+					resolveClosed();
+					throw e;
 				}
 			},
 			close() { try { sock.shutdownTx(); } catch (e) {} },
-			abort() { try { sock.close(); } catch (e) {} },
+			abort() { try { sock.close(); } catch (e) {} resolveClosed(); },
 		});
 		resolve({
 			readable: readable,

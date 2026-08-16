@@ -1,0 +1,9 @@
+# Build-context hygiene: exclude macOS/editor cruft and non-deterministic
+# bytecode from the Docker build context (docker build sends the whole
+# `diskimage/` directory to the daemon). A stray .DS_Store would otherwise be
+# COPY'd into the guest image and skew the build.sh content fingerprint
+# between macOS and Linux working trees.
+**/.DS_Store
+**/*.pyc
+**/__pycache__/
+*.swp

@@ -1,6 +1,8 @@
 #!/bin/sh
-# Boot the X desktop as the 'user' account (never as root — Xorg refuses root,
-# and i3's autostarts must land in /home/user).
+# Boot the X desktop. The session runs as the 'user' account; the X SERVER
+# itself runs as root (/usr/bin/Xorg here is the Xorg.wrap security wrapper,
+# which refuses to launch the real server for a non-root, non-console user —
+# see the launch block below).
 set -u
 
 BACKEND=$(cat /etc/webvm-backend 2>/dev/null || echo browser)

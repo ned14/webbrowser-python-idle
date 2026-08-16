@@ -102,6 +102,15 @@ AUTHKEY="$GATEWAY_AUTHKEY" CONTROL_URL="https://${GATEWAY_CONTROL_IP}:${CONTROL_
 docker compose exec -T server headscale nodes list | grep -q "ci-client" || fail "ci-client node did not register with headscale"
 
 echo "==> no exit node advertised"
-docker compose exec -T server headscale nodes list | grep -q "ci-client" && echo "   (node present; exit-node flags are never advertised by design)"
+# Assert the NEGATIVE: no node on this headnet advertises a default route
+# (an exit node or 0.0.0.0/0 route). The gateway itself never uses
+# --advertise-routes and never joins as an exit node, so list-routes must be
+# empty of default routes for every node.
+docker compose exec -T server headscale nodes list | grep -q "ci-client" \
+	|| fail "ci-client node did not register with headscale"
+if docker compose exec -T server headscale nodes list-routes 2>/dev/null | grep -E '0\.0\.0\.0/0|::/0'; then
+	fail "an exit-node default route is advertised on the headnet"
+fi
+echo "   (no 0.0.0.0/0 or ::/0 routes on any node — no exit node)"
 
 echo "==> integration PASS"

@@ -63,10 +63,16 @@ class TestNginx:
         assert 'add_header Cross-Origin-Resource-Policy "cross-origin" always;' in nginx
 
     def test_csp_connect_src_self_and_control_only(self, nginx):
-        # The CSP connect-src must allow only 'self' + the control host/port
-        # (blocks logtail and any other third-party fetch).
+        # The CSP connect-src must allow only 'self' + the control host:port
+        # family (blocks logtail and any other third-party fetch). The scheme-
+        # default 443 entries are the wasm client's PORT-DROPPED control-plane
+        # URLs (wss://<host>/ts2021, /derp, /derp/probe) — scoped to :443, never
+        # portless.
         csp = [l for l in nginx.splitlines() if "Content-Security-Policy" in l][0]
         assert "connect-src 'self' https://127.0.0.1:8443 wss://127.0.0.1:8443" in csp
+        assert "https://127.0.0.1:443 wss://127.0.0.1:443" in csp
+        # No portless host entry (would open the whole host to connect-src)
+        assert "wss://127.0.0.1 " not in csp
         # script-src covers the self-hosted CheerpX runtime (never the CDN)
         assert "script-src 'self'" in csp
 

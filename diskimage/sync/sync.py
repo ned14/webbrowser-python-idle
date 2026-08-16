@@ -344,28 +344,70 @@ class WebDAVTransport:
 # --------------------------------------------------------------------------
 
 class SMBTransport:
-    def __init__(self, host, share, user="", password=""):
-        from smb.SMBConnection import SMBConnection
+    """pysmb transport with a LAZY connection.
 
+    Connecting eagerly in __init__ defeated the boot-pull's wait_for_tailnet
+    retry loop: with the tailnet still down at boot, each of the ~12 retries
+    re-ran a single ~30s blocking connect and the documented "up to ~90s,
+    every 5s" cycle never actually retried. The connection is now established
+    on first use, so a failed ping is re-attempted by the loop exactly like
+    the WebDAV transport; a failed operation also DISCARDS the connection so
+    the next operation reconnects (a mid-session Samba restart cannot leave a
+    stale connection that fails forever).
+    """
+
+    def __init__(self, host, share, user="", password=""):
         self.host = host
         self.share = share
         self.user = user
-        self.conn = SMBConnection(
-            user or "guest", password, "webvm", "webvm-guest", use_ntlm_v2=True, is_direct_tcp=True
+        self.password = password
+        self.conn = None
+
+    def _connect(self):
+        if self.conn is not None:
+            return self.conn
+        from smb.SMBConnection import SMBConnection
+
+        conn = SMBConnection(
+            self.user or "guest", self.password, "webvm", "webvm-guest",
+            use_ntlm_v2=True, is_direct_tcp=True,
         )
-        self.conn.connect(host, 445, timeout=30)
+        # Short connect timeout (mirrors the WebDAV 3s ping): the boot-pull
+        # retry loop re-pings while the tailnet comes up, so a bounded timeout
+        # keeps the pull bounded instead of blocking ~30s per attempt.
+        conn.connect(self.host, 445, timeout=5)
+        self.conn = conn
+        return conn
+
+    def _reset(self):
+        try:
+            if self.conn is not None:
+                self.conn.close()
+        except Exception:
+            pass
+        self.conn = None
 
     def listdir(self, path=""):
         import io
 
+        try:
+            conn = self._connect()
+        except Exception:
+            self._reset()
+            raise
         entries = {}
         # Recursive walk so subdirectory files are part of the manifest.
         stack = [""]
         while stack:
             cur = stack.pop()
             try:
-                items = self.conn.listPath(self.share, "/" + cur)
+                items = conn.listPath(self.share, "/" + cur)
             except Exception:
+                # Unreadable subdirectory OR a dead connection — either way,
+                # discard the cached connection so the NEXT operation
+                # reconnects (the stale-connection invariant, see the class
+                # docstring); the current walk skips this directory.
+                self._reset()
                 continue
             for item in items:
                 if item.filename in (".", ".."):
@@ -380,29 +422,84 @@ class SMBTransport:
     def get(self, path):
         import io
 
+        try:
+            conn = self._connect()
+        except Exception:
+            self._reset()
+            raise
         buf = io.BytesIO()
-        self.conn.retrieveFile(self.share, "/" + path, buf)
+        try:
+            conn.retrieveFile(self.share, "/" + path, buf)
+        except Exception:
+            self._reset()
+            raise
         return buf.getvalue()
 
     def put(self, path, data):
         import io
 
-        self.conn.storeFile(self.share, "/" + path, io.BytesIO(data))
+        try:
+            conn = self._connect()
+        except Exception:
+            self._reset()
+            raise
+        try:
+            conn.storeFile(self.share, "/" + path, io.BytesIO(data))
+        except Exception:
+            self._reset()
+            raise
 
     def mkdir(self, path):
         try:
-            self.conn.createDirectory(self.share, "/" + path)
+            conn = self._connect()
         except Exception:
-            pass
+            self._reset()
+            return
+        try:
+            conn.createDirectory(self.share, "/" + path)
+        except Exception:
+            # "already exists" is the NORMAL outcome here — the sync MKCOLs
+            # parent collections before nested PUTs and they usually exist —
+            # and must NOT discard the connection (that would reconnect per
+            # file). Probe the directory: only a genuinely missing/
+            # inaccessible one (or a dead connection) discards the cached
+            # connection so the next operation reconnects.
+            try:
+                conn.listPath(self.share, "/" + path.strip("/"))
+            except Exception:
+                self._reset()
 
     def delete(self, path):
         try:
-            self.conn.deleteFiles(self.share, "/" + path)
+            conn = self._connect()
         except Exception:
-            pass
+            self._reset()
+            return
+        try:
+            conn.deleteFiles(self.share, "/" + path)
+        except Exception:
+            # A mid-op delete failure (e.g. a dead connection after a Samba
+            # restart) must discard the connection — release_lease() relies on
+            # this: without the reset the stale connection is reused forever
+            # and the lease file is never removed, delaying the next session.
+            self._reset()
 
     def ping(self):
-        return self.listdir("")
+        # Truthful + falsy-safe: an EMPTY but reachable share must count as up
+        # (returning the dict made wait_for_tailnet report "not up" forever on
+        # a healthy empty share). Exceptions propagate so the retry loop treats
+        # a down share as "not up yet".
+        try:
+            conn = self._connect()
+        except Exception:
+            self._reset()
+            raise
+        try:
+            conn.listPath(self.share, "/")
+        except Exception:
+            self._reset()
+            raise
+        return True
 
 
 # --------------------------------------------------------------------------
