@@ -5,7 +5,10 @@
 # The explorer is the desktop's only permanent window. When IDLE is opened
 # from it ("Open with IDLE"), the explorer WITHDRAWS itself — the process stays
 # alive but windowless, and re-shows itself once IDLE exits. This daemon:
-#   1. Polls the i3 layout tree for the number of real windows.
+#   1. Polls the window manager's client list for the number of real windows
+#      (via wm-clients.py, which reads the EWMH _NET_CLIENT_LIST root property
+#      Openbox maintains — withdrawn windows drop out of it, exactly as they
+#      used to disappear from i3's tree).
 #   2. Relaunches the explorer only when zero windows exist AND no explorer
 #      process is running. The process guard is what keeps the desktop safe
 #      around the IDLE swap: while IDLE is up the explorer is alive-but-
@@ -16,8 +19,8 @@
 #      process exists, force-kills it and relaunches — a deadlocked Tk startup
 #      cannot hold the desktop empty forever.
 #
-# i3-msg/python errors (empty count_windows output) must NOT trigger a
-# relaunch — hence the strict `= "0"` comparison.
+# wm-clients.py errors (empty count output) must NOT trigger a relaunch —
+# hence the strict `= "0"` comparison.
 
 set -u
 
@@ -27,23 +30,8 @@ EXPLORER=/usr/local/bin/file-explorer.py
 
 count_windows() {
 	# Returns the number of open program windows on stdout, or nothing (and a
-	# non-zero exit) if the i3 tree cannot be read.
-	i3-msg -t get_tree 2>/dev/null | python3 -c '
-import json, sys
-try:
-    tree = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-n = 0
-stack = [tree]
-while stack:
-    node = stack.pop()
-    if node.get("type") == "con" and node.get("window") is not None:
-        n += 1
-    stack.extend(node.get("nodes") or ())
-    stack.extend(node.get("floating_nodes") or ())
-print(n)
-'
+	# non-zero exit) if the WM client list cannot be read.
+	/usr/local/bin/wm-clients.py --count 2>/dev/null
 }
 
 explorer_running() {

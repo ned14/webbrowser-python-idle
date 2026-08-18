@@ -26,7 +26,7 @@ jobs:
           docker run --rm -v "$PWD":/work webvm-ext2-helper sh -c '
             debugfs -R "stat /sbin/init" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
             debugfs -R "stat /usr/bin/idle3.10" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
-            debugfs -R "stat /home/user/.config/i3/config" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
+            debugfs -R "stat /home/user/.config/openbox/rc.xml" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
             debugfs -R "stat /home/user" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 2>/dev/null | grep -Eq "User:[[:space:]]+1000" || exit 1
           '
       - name: Rootfs smoke

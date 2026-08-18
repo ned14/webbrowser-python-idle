@@ -34,13 +34,33 @@ import { waitForDesktop, lightRatio, canvasHash } from '../lib/desktop.js';
 // (the explorer's non-Python opener — correct behaviour) is detected via its
 // Close button and skipped, as is a directory navigation (recovered via the
 // toolbar's Up button).
+//
+// The desktop runs Openbox (diskimage/config/openbox/rc.xml), which draws a
+// real ✕ Close button on every window titlebar and honours
+// _NET_WM_ACTION_CLOSE / WM_DELETE_WINDOW. That changes how the viewer is
+// told apart from IDLE after a swap: IDLE now ALSO has a clickable titlebar ✕,
+// so closing it would return the explorer and make IDLE read as "the viewer".
+// We therefore never close a window to identify it. Instead the viewer is
+// dismissed via ITS OWN in-toolbar "✕ Close" button (which sits BELOW the
+// titlebar, and which IDLE does not have), and IDLE is recognised by a STABLE,
+// close-independent signal: its python-shell cursor keeps blinking (see
+// dismissIfViewer below). The dismissal clicks sweep a band of y values
+// below the titlebar so they hit the viewer's toolbar ✕ but never the
+// titlebar ✕ above it (and never close a live IDLE).
 
 const SITE_URL =
 	process.env.E2E_SITE_URL ||
 	`https://127.0.0.1:${process.env.E2E_SITE_PORT || 8081}/alpine.html`;
 
 const ROW_SCAN_START_Y = 195; // below the column headings
-const VIEWER_CLOSE = { x: 1240, y: 30 }; // the viewer's "✕ Close" button (top-right)
+// The viewer's in-toolbar "✕ Close" button (top-right, BELOW the Openbox
+// titlebar; the viewer alone has one — IDLE does not). Openbox's titlebar is
+// ~24-26px (taller than i3's ~18px), so the viewer's own toolbar sits below
+// it and its exact height varies with the theme/font, so the dismissal sweeps
+// a band of y values rather than pinning one. Every y is safely below the
+// titlebar, so a live IDLE is never at risk of its titlebar ✕ being clicked.
+const VIEWER_CLOSE_X = 1240;
+const VIEWER_CLOSE_Y_BAND = [48, 62, 76, 90];
 const UP_BTN = { x: 45, y: 45 }; // toolbar column 0: "Up" in navigation mode
 const DARK_MARGIN = { x: 5, y: 400 }; // window edge: dismisses menus, touches nothing
 
@@ -105,14 +125,57 @@ async function watchForBlink(page, ms) {
 	return false;
 }
 
+// Sustained change-without-input. This is the STABLE IDLE signal used after a
+// swap: IDLE's shell cursor blinks ~once a second forever, whereas a static
+// viewer redraws once (when it maps) and then sits still. `watchForBlink`
+// alone would treat that one-shot redraw as "alive", so this requires a
+// SECOND change 3 s after the first before declaring the window is blinking.
+// An animated GIF viewer would satisfy it too, but the rows tried first in ~/
+// (Readme.md, hello.py) are the viewer-text and IDLE cases, so a false IDLE
+// here is unlikely and only ever causes a benign false-pass, never a failure.
+async function isBlinking(page, ms) {
+	const deadline = Date.now() + ms;
+	while (Date.now() < deadline) {
+		if (!(await watchForBlink(page, 4000))) continue;
+		await page.waitForTimeout(3000);
+		const h1 = await canvasHash(page);
+		await page.waitForTimeout(3000);
+		if (h1 !== (await canvasHash(page))) return true;
+	}
+	return false;
+}
+
+// After a swap (explorer withdrew, another full-screen window took over),
+// decide whether that window is the file viewer or IDLE — WITHOUT closing a
+// window to find out (both now have an Openbox titlebar ✕, so closing would
+// return the explorer and misread IDLE as the viewer).
+//
+// The viewer is dismissed via its OWN in-toolbar "✕ Close" (below the Openbox
+// titlebar; only the viewer has one): if the explorer reappears it was the
+// viewer -> returns true. It is only ever clicked on a window that is static
+// (not blinking), so a live IDLE is never clicked and therefore never closed;
+// a wedged IDLE is also static and these clicks land on its menubar/shell,
+// harmlessly failing to dismiss it (so it still reaches the definitive
+// aliveness check and fails).
+// Returns true when the swapped window is confirmed to be the viewer.
+async function dismissIfViewer(page) {
+	if (await isBlinking(page, 8000)) return false; // alive -> belongs to IDLE
+	for (const y of VIEWER_CLOSE_Y_BAND) {
+		await page.mouse.click(VIEWER_CLOSE_X, y, { delay: 40 });
+		await page.waitForTimeout(3000);
+		if ((await lightRatio(page)) > 0.85) return true; // explorer reappeared
+	}
+	return false;
+}
+
 test('launching IDLE does not freeze the pointer or wedge the IDLE window', async ({ page }) => {
 	test.setTimeout(540_000);
 
 	await page.goto(SITE_URL, { waitUntil: 'domcontentloaded' });
 
 	// --- 1. The desktop is up: the file explorer's light window fills the
-	// canvas (i3's background is black; nothing else autostarts a full-screen
-	// light window).
+	// canvas (Openbox's background is solid black; nothing else autostarts a
+	// full-screen light window).
 	await waitForDesktop(page);
 	await expect
 		.poll(() => lightRatio(page), { timeout: 120_000, intervals: [3000] })
@@ -139,9 +202,12 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 
 	// --- 3. Open hello.py in IDLE. Try every row band; for each, double-click
 	// with retries until a swap appears. Classify the swapped app:
-	//   - the file viewer (non-Python opener): its ✕ Close button returns the
-	//     explorer — skip to the next row;
-	//   - IDLE: nothing returns the explorer — then the blink check decides.
+	//   - the file viewer (non-Python opener): dismissed via its in-toolbar ✕
+	//     Close (below the Openbox titlebar) — the explorer then reappears, so
+	//     skip to the next row;
+	//   - IDLE: recognised by its blinking shell cursor (stable, close-
+	//     independent — IDLE now has a titlebar ✕ too, so it can no longer be
+	//     told apart by "does a close click return the explorer").
 	let bands = await rowBands(page);
 	for (let i = 0; i < 10 && bands.length === 0; i++) {
 		await page.waitForTimeout(5000);
@@ -167,27 +233,27 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 			await page.waitForTimeout(1500);
 			continue;
 		}
-		// Swap seen. Distinguish the viewer from IDLE: the viewer closes via
-		// its ✕ Close button (the explorer then reappears); IDLE has no such
-		// button and stays up.
+		// Swap seen: the explorer withdrew and a full-screen window (viewer or
+		// IDLE) took over. Distinguish them by dismissing any STATIC viewer
+		// (never by closing IDLE — its new titlebar ✕ would return the explorer
+		// and fake a "viewer"). A live IDLE blinks and is never clicked.
 		await page.waitForTimeout(2000);
-		await page.mouse.click(VIEWER_CLOSE.x, VIEWER_CLOSE.y, { delay: 40 });
-		await page.waitForTimeout(4000);
-		const afterClose = await lightRatio(page);
-		if (afterClose > 0.85) {
+		if (await dismissIfViewer(page)) {
 			// The explorer reappeared -> it was the file viewer, not IDLE.
 			continue;
 		}
-		// IDLE is up (the Close click did not return the explorer). The
-		// definitive aliveness check: the shell cursor blinks.
+		// IDLE is up (either its cursor is blinking, or — for a wedged IDLE —
+		// the dismissal sweep harmlessly failed to bring the explorer back).
+		// The definitive aliveness check: the shell cursor blinks.
 		idleUp = true;
 		const blinkDeadline = Date.now() + 30_000;
 		let alive = false;
 		while (Date.now() < blinkDeadline && !alive) {
 			alive = await watchForBlink(page, 8000);
 			if (!alive) {
-				// A click may have opened an IDLE menu (the Close click above
-				// hit the menu bar): dismiss it, then keep watching.
+				// A dismissal-sweep click above may have opened an IDLE menubar
+				// item (on a wedged IDLE the sweep can land on the menu bar):
+				// dismiss it, then keep watching.
 				await page.mouse.click(300, 120, { delay: 40 });
 			}
 		}

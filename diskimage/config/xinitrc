@@ -17,5 +17,14 @@ setxkbmap us 2>/dev/null
 
 xrdb -merge "$HOME/.Xresources" 2>/dev/null
 
-# i3 runs under a per-session D-Bus.
-exec dbus-run-session -- i3
+# Solid black desktop root (Openbox paints no background itself; the X server's
+# raw root weave would otherwise leave a light, non-black backdrop that breaks
+# the "desktop went to black" swap detection in the E2E suite). Idempotent.
+xsetroot -solid black 2>/dev/null
+
+# Openbox runs through `openbox-session` under a per-session D-Bus: the session
+# wrapper is what actually executes ~/.config/openbox/autostart (a bare
+# `openbox` would not). It autostarts the file explorer + keep-alive daemon,
+# maximizes each window to fill the canvas, and draws a ✕ Close button on
+# every titlebar.
+exec dbus-run-session -- openbox-session

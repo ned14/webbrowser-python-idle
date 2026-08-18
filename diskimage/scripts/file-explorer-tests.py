@@ -819,7 +819,7 @@ def test_open_in_viewer_replaces_screen(done):
     calls = []
     class FakePopen:
         def __init__(self, args, **kw):
-            if args and args[0] != "i3-msg":  # ignore the watcher's i3 probes
+            if args and args[0] != "/usr/local/bin/wm-clients.py":  # ignore the watcher's wm-clients probes
                 calls.append(list(args))
             self._end = time.time() + 0.6
         def poll(self):
@@ -855,12 +855,12 @@ def test_open_in_viewer_replaces_screen(done):
 @test
 def test_viewer_window_close_returns_when_process_lingers(done):
     # A lingering viewer process must not keep the explorer hidden: the
-    # watcher returns when the viewer WINDOW disappears from the i3 tree.
+    # watcher returns when the viewer WINDOW disappears from the WM client list.
     _make_fixtures()
     calls = []
     class FakePopen:
         def __init__(self, args, **kw):
-            if args and args[0] != "i3-msg":  # ignore the watcher's i3 probes
+            if args and args[0] != "/usr/local/bin/wm-clients.py":  # ignore the watcher's wm-clients probes
                 calls.append(list(args))
             self.pid = 424243  # process never exits on its own
         def poll(self):
@@ -1070,7 +1070,7 @@ def test_open_with_idle_replaces_screen(done):
     calls = []
     class FakePopen:
         def __init__(self, args, **kw):
-            if args and args[0] != "i3-msg":  # ignore the watcher's i3 probes
+            if args and args[0] != "/usr/local/bin/wm-clients.py":  # ignore the watcher's wm-clients probes
                 calls.append(list(args))
             self._end = time.time() + 0.6
         def poll(self):
@@ -1111,7 +1111,7 @@ def test_idle_window_close_returns_when_process_lingers(done):
     calls = []
     class FakePopen:
         def __init__(self, args, **kw):
-            if args and args[0] != "i3-msg":  # ignore the watcher's i3 probes
+            if args and args[0] != "/usr/local/bin/wm-clients.py":  # ignore the watcher's wm-clients probes
                 calls.append(list(args))
             self.pid = 424242  # process never exits on its own
         def poll(self):

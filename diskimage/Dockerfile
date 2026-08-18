@@ -2,7 +2,7 @@
 # (launched from the file explorer — a stdlib-only Tk app that autostarts at
 # desktop boot and is replaced on screen by IDLE while IDLE runs),
 # the Tk file viewer (images via py3-pillow, text/Markdown via py3-mistune),
-# an Xorg/i3 desktop, terminal, git tooling, and (for
+# an Xorg/Openbox desktop, terminal, git tooling, and (for
 # samba/webdav builds) the home-sync agent.
 #
 # STORAGE_BACKEND selects the sync agent:
@@ -53,7 +53,9 @@ RUN apk add --no-cache \
 	xf86-input-libinput \
 	xrandr \
 	setxkbmap \
-	i3wm \
+	openbox \
+	xprop \
+	xsetroot \
 	font-dejavu \
 	python3 \
 	python3-tkinter \
@@ -138,14 +140,19 @@ RUN mkdir -p /home/user/.ssh && \
 	chown -R user:user /home/user/.ssh && \
 	chown user:user /home/user/.gitconfig
 
-# Desktop configs (xinitrc execs i3, i3 autostarts the file explorer)
+# Desktop configs (xinitrc execs openbox, openbox's autostart runs the file
+# explorer + keep-alive; rc.xml maximizes every window and adds a titlebar ✕).
 COPY config/xinitrc /home/user/.xinitrc
 COPY config/.Xresources /home/user/.Xresources
-COPY config/i3/config /home/user/.config/i3/config
+COPY config/openbox/rc.xml /home/user/.config/openbox/rc.xml
+COPY config/openbox/menu.xml /home/user/.config/openbox/menu.xml
+COPY config/openbox/autostart /home/user/.config/openbox/autostart
 RUN chmod +x /home/user/.xinitrc && \
+	chmod 755 /home/user/.config/openbox/autostart && \
 	chown -R user:user /home/user/.config /home/user/.xinitrc /home/user/.Xresources
 
-# File explorer (the desktop client): a stdlib-only Tk app autostarted by i3 on
+# File explorer (the desktop client): a stdlib-only Tk app autostarted by
+# Openbox on
 # the user's home directory. "Open with IDLE" / double-clicking a .py launches
 # IDLE via /usr/local/bin/idle3.10-launcher and REPLACES the explorer on screen
 # until IDLE exits. The keep-alive daemon relaunches it whenever the last
@@ -153,6 +160,11 @@ RUN chmod +x /home/user/.xinitrc && \
 # can run them in-guest under Xvfb.
 COPY scripts/file-explorer.py /usr/local/bin/file-explorer.py
 COPY scripts/file-explorer-tests.py /usr/local/bin/file-explorer-tests.py
+# Window-enumeration helper: Openbox (unlike the old i3) has no tree IPC, so
+# the explorer's window probes and the keep-alive daemon enumerate the WM's
+# client windows via xprop below. Installed for both the desktop and, for the
+# rootfs smoke suite, the in-guest tests.
+COPY scripts/wm-clients.py /usr/local/bin/wm-clients.py
 # Shared file-type contract (explorer routing + viewer rendering) — importable
 # from /usr/local/bin by both scripts (underscore name: it is a module, not
 # an executable).
@@ -164,7 +176,7 @@ COPY scripts/file-viewer.py /usr/local/bin/file-viewer.py
 COPY scripts/file-viewer-tests.py /usr/local/bin/file-viewer-tests.py
 COPY rootfs/usr/local/bin/open-file-explorer.sh /usr/local/bin/open-file-explorer.sh
 COPY rootfs/usr/local/bin/keep-file-explorer.sh /usr/local/bin/keep-file-explorer.sh
-RUN chmod +x /usr/local/bin/open-file-explorer.sh /usr/local/bin/keep-file-explorer.sh /usr/local/bin/file-viewer.py
+RUN chmod +x /usr/local/bin/open-file-explorer.sh /usr/local/bin/keep-file-explorer.sh /usr/local/bin/file-viewer.py /usr/local/bin/wm-clients.py
 
 # A starter .py in the home directory: new users can double-click it to try
 # IDLE right away, and the smoke suite's real-IDLE-launch check uses it.

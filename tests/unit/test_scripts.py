@@ -39,6 +39,7 @@ PYTHON_SOURCES = [
     ROOT / "diskimage" / "scripts" / "file_types.py",
     ROOT / "diskimage" / "scripts" / "file-viewer.py",
     ROOT / "diskimage" / "scripts" / "file-viewer-tests.py",
+    ROOT / "diskimage" / "scripts" / "wm-clients.py",
     ROOT / "server" / "render-webvm-config.py",
     ROOT / "tests" / "fixtures" / "fake_webdav.py",
 ]
@@ -56,6 +57,47 @@ def test_python_sources_compile(source):
     if not source.exists():
         pytest.skip("source not present")
     py_compile.compile(str(source), doraise=True)
+
+
+def test_openbox_rc_close_binding():
+    """The openbox rc.xml <mouse> section must re-bind the titlebar ✕ Close
+    button. openbox's config parser (config.c parse_mouse -> mouse_unbind_all)
+    WIPES the compiled-in default bindings whenever a <mouse> section exists,
+    including "Left click on Close -> Close" — so a <mouse> section without a
+    Close context leaves the ✕ rendered but dead (fixed 2026-08-18)."""
+    import xml.etree.ElementTree as ET
+
+    rc = ROOT / "diskimage" / "config" / "openbox" / "rc.xml"
+    root = ET.parse(rc).getroot()
+
+    ns = ""
+    if root.tag.startswith("{"):
+        ns = root.tag.split("}")[0] + "}"
+    tag = lambda name: f"{ns}{name}"
+
+    mouse = root.find(tag("mouse"))
+    assert mouse is not None, "rc.xml must define a <mouse> section"
+
+    close_context = None
+    for ctx in mouse.findall(tag("context")):
+        if ctx.get("name") == "Close":
+            close_context = ctx
+            break
+    assert close_context is not None, (
+        "rc.xml <mouse> section must define a <context name=\"Close\"> — "
+        "without it openbox wipes its default Close-click binding and the "
+        "titlebar ✕ does nothing"
+    )
+
+    click_binds_close = False
+    for mb in close_context.findall(tag("mousebind")):
+        if mb.get("button") == "Left" and mb.get("action") == "Click":
+            for act in mb.findall(tag("action")):
+                if act.get("name") == "Close":
+                    click_binds_close = True
+    assert click_binds_close, (
+        "Close context must bind Left-click to the Close action"
+    )
 
 
 def _baked_config(env, backend="webdav"):

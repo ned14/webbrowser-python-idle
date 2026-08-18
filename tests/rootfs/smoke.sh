@@ -20,7 +20,7 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	python3 -c "import PIL, PIL.ImageTk, mistune" || { echo "FAIL: PIL.ImageTk/mistune import failed" >&2; exit 1; }
 
 	# Core binaries (nc comes from the base busybox)
-	for cmd in xterm i3 git ssh nc pip3; do
+	for cmd in xterm openbox xprop git ssh nc pip3; do
 		command -v "$cmd" >/dev/null || { echo "FAIL: $cmd missing" >&2; exit 1; }
 	done
 
@@ -36,11 +36,18 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	[ -x /sbin/init ] || { echo "FAIL: /sbin/init missing" >&2; exit 1; }
 	[ -x /etc/local.d/desktop.start ] || { echo "FAIL: desktop.start missing" >&2; exit 1; }
 	[ -x /etc/X11/xinit/xinitrc.d/99-screen-resize.sh ] || { echo "FAIL: screen-resize missing" >&2; exit 1; }
-	grep -q "dbus-run-session -- i3" /home/user/.xinitrc || { echo "FAIL: .xinitrc does not exec i3 under a session bus" >&2; exit 1; }
-	grep -q "open-file-explorer.sh" /home/user/.config/i3/config || { echo "FAIL: i3 does not autostart the file explorer" >&2; exit 1; }
+	grep -q "dbus-run-session -- openbox-session" /home/user/.xinitrc || { echo "FAIL: .xinitrc does not exec openbox-session under a session bus" >&2; exit 1; }
+	grep -q "open-file-explorer.sh" /home/user/.config/openbox/autostart || { echo "FAIL: openbox autostart does not run the file explorer" >&2; exit 1; }
 	# Keep-alive: the explorer is relaunched when the last window closes
 	[ -x /usr/local/bin/keep-file-explorer.sh ] || { echo "FAIL: keep-file-explorer.sh missing" >&2; exit 1; }
-	grep -q "keep-file-explorer.sh" /home/user/.config/i3/config || { echo "FAIL: i3 does not autostart the keep-alive daemon" >&2; exit 1; }
+	grep -q "keep-file-explorer.sh" /home/user/.config/openbox/autostart || { echo "FAIL: openbox autostart does not run the keep-alive daemon" >&2; exit 1; }
+	# The openbox <mouse> section WIPES the built-in default bindings
+	# (config.c parse_mouse -> mouse_unbind_all), so the titlebar ✕ Close
+	# button must be re-bound explicitly or it renders but does nothing on
+	# click (2026-08-18 fix). Without this the E2E close path and the desktop
+	# keep-alive close->relaunch contract both silently break.
+	grep -q "<context name=\"Close\">" /home/user/.config/openbox/rc.xml || { echo "FAIL: openbox rc.xml missing the Close-context mousebind (titlebar ✕ would do nothing)" >&2; exit 1; }
+	grep -q "<action name=\"Close\"/>" /home/user/.config/openbox/rc.xml || { echo "FAIL: openbox rc.xml Close context has no Close action" >&2; exit 1; }
 	# File explorer -> IDLE integration: the explorer launches IDLE for .py
 	# files and replaces itself on screen until IDLE exits.
 	[ -f /usr/local/bin/file-explorer.py ] || { echo "FAIL: file-explorer.py missing" >&2; exit 1; }
@@ -182,22 +189,41 @@ EOF
 	fi
 	kill "$XPID2" 2>/dev/null || true
 
-	# The keep-alive daemon relaunches the explorer when it dies: run i3 with
-	# the real config (autostarts the explorer + keep-alive), kill the explorer
-	# process, and verify the keep-alive brings it back.
+	# The keep-alive daemon relaunches the explorer when it dies: run
+	# openbox-session with the real config + autostart (which starts the
+	# explorer + keep-alive), kill the explorer process, and verify the
+	# keep-alive brings it back.
 	Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb3.log 2>&1 &
 	XPID3=$!
 	sleep 1
 	export DISPLAY=:99
-	i3 -c /home/user/.config/i3/config >/tmp/i3.log 2>&1 &
-	I3PID=$!
+	export HOME=/home/user
+	openbox-session >/tmp/openbox.log 2>&1 &
+	OBPID=$!
 	sleep 4
 	if ! pgrep -f "file-explorer.py" >/dev/null 2>&1; then
-		echo "FAIL: explorer did not start under i3 (i3 log tail below)" >&2
-		tail -n 20 /tmp/i3.log >&2 || true
-		kill "$I3PID" "$XPID3" 2>/dev/null || true
+		echo "FAIL: explorer did not start under openbox (openbox log tail below)" >&2
+		tail -n 20 /tmp/openbox.log >&2 || true
+		kill "$OBPID" "$XPID3" 2>/dev/null || true
 		exit 1
 	fi
+	# Openbox must be managing the explorer as a decorated client window: the
+	# EWMH root _NET_CLIENT_LIST must list it (wm-clients.py counts it). This
+	# is the Openbox analog of the old i3 "decorated titlebar window" guard —
+	# a WM that never managed the window leaves the list empty. Poll briefly
+	# for the window to map, then refuse if it never appears.
+	CLIENT_OK=0
+	for _c in 1 2 3 4 5 6 7 8 9 10; do
+		COUNT=$(/usr/local/bin/wm-clients.py --count 2>/dev/null || true)
+		[ "${COUNT:-0}" = "0" ] || [ -z "${COUNT:-}" ] || { CLIENT_OK=1; break; }
+		sleep 1
+	done
+	if [ "$CLIENT_OK" != "1" ]; then
+		echo "FAIL: no client window in the Openbox _NET_CLIENT_LIST (WM not managing the explorer?)" >&2
+		kill "$OBPID" "$XPID3" 2>/dev/null || true
+		exit 1
+	fi
+	echo "Openbox client list contains a managed (decorated) window"
 	pkill -9 -f "file-explorer.py"
 	ALIVE=0
 	for _i in 1 2 3 4 5 6 7 8 9 10; do
@@ -206,7 +232,7 @@ EOF
 	done
 	[ "$ALIVE" = "1" ] || { echo "FAIL: keep-alive did not relaunch the explorer" >&2; exit 1; }
 	echo "keep-alive relaunched the explorer"
-	kill "$I3PID" 2>/dev/null || true
+	kill "$OBPID" 2>/dev/null || true
 	kill "$XPID3" 2>/dev/null || true
 '
 

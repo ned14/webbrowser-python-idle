@@ -15,7 +15,7 @@ repos and the viewer degrades gracefully without them (markdown -> plain
 text; image -> error).
 
 The viewer window reports class "FileViewer" and a "<name> — Viewer" title so
-the explorer's i3-tree watcher can detect it.
+the explorer's WM-client-list watcher can detect it.
 """
 
 import io
@@ -225,9 +225,9 @@ class FileViewer(tk.Tk):
         self.title((f"{os.path.basename(paths[0])} — Viewer") if paths
                    else "File Viewer")
         # WM_CLASS cannot be set here: this Tk 8.6 build's `wm` command has
-        # no `class` subcommand. The explorer's i3-tree watcher therefore
-        # detects the viewer by its "<name> — Viewer" title (and by class
-        # "FileViewer" where newer Tk builds allow it).
+        # no `class` subcommand. The explorer's WM-client-list watcher
+        # therefore detects the viewer by its "<name> — Viewer" title (and by
+        # class "FileViewer" where newer Tk builds allow it).
         self.geometry(f"{min(1400, self.winfo_screenwidth() - 10)}x"
                       f"{min(800, self.winfo_screenheight() - 10)}")
         self.protocol("WM_DELETE_WINDOW", self.destroy)

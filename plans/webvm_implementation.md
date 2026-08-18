@@ -216,7 +216,7 @@ that this plan's self-hosted nginx makes unnecessary.
     `apk add python3-idle`** so the guest stays minimal, Step 2), `xterm`,
     and **the file explorer** — a stdlib-only Tk app
     (`/usr/local/bin/file-explorer.py`, §12/25). **No display manager** (direct
-    `su user -c startx` → i3; fallback LightDM autologin). **The file explorer
+    `su user -c startx` → openbox; fallback LightDM autologin). **The file explorer
     autostarts on the user's home directory**; `.py` files open in IDLE via
     `idle3.10-launcher` (the explorer yields the screen to IDLE while it runs);
     and a keep-alive daemon (`keep-file-explorer.sh`) relaunches the explorer
@@ -456,11 +456,11 @@ the write-triggered push, i.e. seconds). The IndexedDB overlay remains the
 live overlay, the backend is the durable copy. **The agent is a single
 process** started by `desktop.start` as `user` (`su user -c sync-home.sh …` —
 the boot pull and the push loop are one invocation, so they cannot race the
-lease or the manifest); i3 autostarts the file manager only. **The boot-pull is
+lease or the manifest); the WM autostarts the file manager only. **The boot-pull is
 best-effort: it runs as `user`, and X starts after the timeout regardless** (a
 misconfigured tailnet must not delay the desktop indefinitely). **X itself is
 also started as `user`** (`su user -c startx` in `desktop.start` — never as
-root: Xorg refuses to run as root, and i3's autostarts must land in
+root: Xorg refuses to run as root, and the WM's autostarts must land in
 `/home/user`). `browser`/`none` need neither a sync agent nor a storage
 endpoint.
 
@@ -713,7 +713,7 @@ webvm-custom/
 │  │                        # ARG SAMBA_*/SYNC_* render /root/.syncrc)
 │  ├─ python-examples/      # curriculum scripts baked READ-ONLY into ~/python-examples
 │  ├─ scripts/99-screen-resize.sh
-│  ├─ config/               # xinitrc, i3 config (file-manager autostart), .Xresources
+│  ├─ config/               # xinitrc, openbox config (file-manager autostart), .Xresources
 │  ├─ sync/                 # sync.py per backend (samba/webdav) + sync-home.sh
 │  │                        # (not built for browser/none)
 │  ├─ rootfs/root/.syncrc   # backend endpoint + credentials; rendered at build
@@ -839,7 +839,7 @@ EOF
 then:
 ```
 apk add --no-cache alpine-base udev-init-scripts udev-init-scripts-openrc eudev \
-  xorg-server xinit xf86-input-libinput xrandr i3wm font-dejavu \
+  xorg-server xinit xf86-input-libinput xrandr openbox xprop xsetroot font-dejavu \
   python3 python3-tkinter xterm git openssh-client-default \
   busybox-extras dbus
 ```
@@ -914,12 +914,17 @@ needs the package installed.)
 - No display manager (saves ~30–50 MB vs LightDM + GTK greeter; autologin is
   implicit — nothing here needs a login screen). Consequences handled manually:
    `99-screen-resize.sh` → `/etc/X11/xinit/xinitrc.d/`; `config/xinitrc` →
-   `/home/user/.xinitrc` (`exec i3`); `config/i3` → `/home/user/.config/i3`
-   (autostart `open-file-explorer.sh`, `$mod+Return`→xterm,
-   `$mod+Shift+f`→`open-file-explorer.sh`); optional `.Xresources`; keyboard
-   layout via
-   `setxkbmap` in `.xinitrc`. (The sync agent is a **single process started by
-   `desktop.start`** — not an i3 autostart — so the boot pull and the push loop
+   `/home/user/.xinitrc` (`exec openbox-session` under `dbus-run-session`, plus
+   `xsetroot -solid black`); `config/openbox` → `/home/user/.config/openbox`
+   (`rc.xml` maximizes every window and binds `W+Return`→xterm,
+   `W+Shift+f`→`open-file-explorer.sh`; `autostart` runs `open-file-explorer.sh`
+   and `keep-file-explorer.sh`); optional `.Xresources`; keyboard layout via
+   `setxkbmap` in `.xinitrc`. (The WM was switched 2026-08-18 from i3 to Openbox
+   so each window gets a real titlebar ✕ Close button — i3 renders no close
+   button. Openbox has no `i3-msg -t get_tree` tree IPC, so window enumeration
+   is via `wm-clients.py` reading the EWMH `_NET_CLIENT_LIST` root property the
+   WM maintains. The sync agent is a **single process started by
+   `desktop.start`** — not an Openbox autostart — so the boot pull and the push loop
    cannot race, §4.)
 - X bootstrap without a seat manager: rely on udev + group membership
   (`video`/`input`/`tty`, added above) for the emulated DRM/input devices;
@@ -928,10 +933,11 @@ needs the package installed.)
   behave. **Enable the openrc `local` service**
   (`rc-update add local default`) so `/etc/local.d/*.start` actually runs.
 - Boot to X: `/etc/local.d/desktop.start` starts X **as the `user` account**
-  (`su user -c startx` — never as root: Xorg refuses root, and i3's autostarts
-  must land in `/home/user`); if `startx`'s VT handling misbehaves in the WASM
-  guest (no real TTYs), fall back to launching `Xorg :0 -nolisten tcp
-  -noreset` as `user` and then i3. Ultimate fallback: the LightDM-autologin
+  (`su user -c startx` — never as root: Xorg refuses root, and the WM's
+  autostarts must land in `/home/user`); if `startx`'s VT handling misbehaves
+  in the WASM guest (no real TTYs), fall back to launching `Xorg :0
+  -nolisten tcp -noreset` as `user` and then openbox. Ultimate fallback: the
+  LightDM-autologin
   reference setup (add `lightdm` then). **In `samba`/`webdav` modes,
   `desktop.start` runs the boot pull FIRST (wait-for-tailnet retry loop, up to
   ~90 s, every 5 s) and only then starts X as `user`** (see Step 9).
@@ -971,7 +977,7 @@ they survive only if the untar + `mkfs.ext2 -d` run as root on a
 **container-local** path — never into the macOS-mounted `$PWD`, which would
 remap uids to the host user (the upstream `deploy.yml` documents the same loss
 even with `docker cp -a`). Sanity-check with `debugfs` in the same container:
-`/sbin/init`, `/home/user/.config/i3/config`, `/usr/bin/idle3.10`, the sync
+`/sbin/init`, `/home/user/.config/openbox/`, `/usr/bin/idle3.10`, the sync
 agent, **and ownership** (`/home/user` = `1000:1000`, busybox applet symlinks
 intact, setuid bits preserved).
 
@@ -985,7 +991,7 @@ the dependency closure was resolved over main + community, including
 | Base `i386/alpine:3.17` | 7.5 |
 | Step 2 `apk add` dependency closure (166 packages) | ≈ 190 |
 | idlelib extraction (`python3-idle` contents, no `python3-tests`) | +3.3 |
-| guest overlays/configs (`syncrc`, i3/xinitrc, agent scripts) | +0.1 |
+| guest overlays/configs (`syncrc`, openbox/xinitrc, agent scripts) | +0.1 |
 | `pysmb` (samba mode only) | +0.5 |
 | Step 2 trimming (strip `doc/man/info`, trim locale — measured at build) | −≈10 |
 | **Rootfs** | **≈ 190** |
@@ -1018,7 +1024,7 @@ below 0.5 MiB total ≈ 12.0):
 | `libjpeg-turbo` | 1.1 | `libfm` | 1.1 |
 | `cairo` | 1.1 | `libxcb` | 1.0 |
 | `libepoxy` | 1.0 | `xterm` | 0.9 |
-| `openssh-client-default` | 0.9 | `i3wm` | 0.9 |
+| `openssh-client-default` | 0.9 | `openbox` (replacing `i3wm`) | 0.9 |
 | `py3-parsing` | 0.8 | `freetype` | 0.8 |
 | `encodings` | 0.8 | `brotli-libs` | 0.8 |
 | `pcre2` | 0.7 | `pango` | 0.7 |
@@ -1544,7 +1550,7 @@ those; defaults come from build args). `.github/workflows/ci.yml`:
    - Matrix `STORAGE_BACKEND: [browser, samba, webdav, none]`:
      `docker build --platform=linux/i386 --build-arg STORAGE_BACKEND=${{ matrix.backend }} diskimage`.
     - Install `e2fsprogs`, run `build.sh`, then verify the ext2 with `debugfs`:
-      `/sbin/init`, `/usr/bin/idle3.10`, `/home/user/.config/i3/config`, sync
+      `/sbin/init`, `/usr/bin/idle3.10`, `/home/user/.config/openbox/`, sync
       agent, **and ownership** (`/home/user` = `1000:1000`, setuid bits intact —
       the untar must run as root on a container-local path, §6 Step 3).
     - Upload the ext2 **and its content fingerprint** (`sha256sum`, computed by
@@ -1669,20 +1675,23 @@ runner):
   - `python3 -c "import tkinter, idlelib"` succeeds; **`/usr/bin/idle3.10`
     exists** (there is no `idle3`; skip a display-dependent `idle3.10 --help`
     check — the E2E covers a real IDLE launch).
-  - `command -v xterm i3 git ssh nc` present and **`pcmanfm`/`spacefm` absent**
+  - `command -v xterm openbox xprop git ssh nc` present and
+    **`pcmanfm`/`spacefm` absent**
     (replaced by the Tk file explorer, §12/25; `nc` comes from the base
     busybox, not `busybox-extras`).
   - **curriculum packages are absent:** `python3 -c "import numpy"` and
     `import requests` and `import pytest` each fail (guards against
     re-adding the removed packages); `python3 -c "import pip"` succeeds.
-  - i3 config autostarts `open-file-explorer.sh` (the file explorer) and
-    `keep-file-explorer.sh` (the keep-alive); `~user/.xinitrc` execs i3; the
+  - Openbox autostart runs `open-file-explorer.sh` (the file explorer) and
+    `keep-file-explorer.sh` (the keep-alive); `~user/.xinitrc` execs openbox
+    (and `xsetroot -solid black`); the
     sync agent is a single process started by `desktop.start` (samba/webdav
     builds).
   - **In-guest GUI suite:** `tests/rootfs/smoke.sh` runs the full
     `file-explorer-tests.py` suite (98 checks — every explorer function,
-    including the withdraw→IDLE→reappear flow), a real IDLE launch, and an i3
-    keep-alive relaunch check, all under an in-image `Xvfb` (§12/25).
+    including the withdraw→IDLE→reappear flow), a real IDLE launch, and an
+    Openbox keep-alive relaunch check (the WM client list must contain a
+    managed window), all under an in-image `Xvfb` (§12/25).
   - `/sbin/init`, the openrc `local` service (enabled via `rc-update add
     local default`), and `/etc/local.d/desktop.start` (`sh -n` valid; starts X
     via `su user -c startx`); `/etc/X11/xinit/xinitrc.d/99-screen-resize.sh`
@@ -1691,7 +1700,7 @@ runner):
   - git config, SSH key, `/root/.syncrc` present (CI placeholders via build-arg
     defaults).
 - Ext2: `e2fsck -f` clean; `debugfs` shows `/sbin/init`, `/usr/bin/idle3.10`,
-  the i3 config, and the sync agent.
+  the Openbox config, and the sync agent.
 
 ### 9.3 Server integration tests (CI) — `tests/server/`
 - `docker compose config -q`; bring the stack up; assert nginx serves COOP/COEP/
@@ -2068,7 +2077,7 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
      the patched `libtcl8.6.so` (exercised by the in-guest Xvfb image test);
      **this Tk 8.6 build's `wm` command has no `class` subcommand** (WM_CLASS
      is not settable — the explorer's watcher detects the viewer by its
-     `<name> — Viewer` i3 window title); `ImageOps.exif_transpose()` returns a
+     `<name> — Viewer` WM window title); `ImageOps.exif_transpose()` returns a
      **copy that loses `is_animated`/`n_frames`** (capture animation info from
      the opener before transposing, and skip transposing animated GIFs);
      mistune 2.0.4's streaming renderer API cannot emit directly (children are
@@ -2100,7 +2109,7 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
       (single-user autologin desktop). Two secondary fixes: the system
       `/etc/X11/xinit/xinitrc` EXECs `~/.xinitrc` before it ever reaches
       `xinitrc.d`, so the screen-resize hook is sourced from `~/.xinitrc`;
-      and i3 runs under `dbus-run-session` (a per-session D-Bus).
+      and the WM runs under `dbus-run-session` (a per-session D-Bus).
 
 23. **File-manager-first desktop (implementation change, 2026-08-13):** the
     autostarted desktop client was switched from IDLE to the **pcmanfm** file
@@ -2111,7 +2120,7 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     new `.py` files came from *File ▸ Create New* (`~/Templates/Python
     Script.py`); `shared-mime-info` handled `.py` MIME detection. A keep-alive
     daemon (`diskimage/rootfs/usr/local/bin/keep-file-manager.sh`) polled the
-    i3 layout tree and relaunched `pcmanfm /home/user` whenever the number of
+    WM client list and relaunched `pcmanfm /home/user` whenever the number of
     real windows dropped to zero.
     **SUPERSEDED (2026-08-14):** pcmanfm is replaced by the Tk file explorer
     (§12/25); the keep-alive became `keep-file-explorer.sh` and the pcmanfm
@@ -2135,10 +2144,10 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     because pcmanfm/spacefm (GTK3 + libfm) still carried a startup
     deadlock/stall burden under CheerpX even after §2.9's shims. Installed as
     `/usr/local/bin/file-explorer.py` (+ sibling `file-explorer-tests.py`),
-    autostarted by i3 via the guarded single-instance launcher
+    autostarted by Openbox via the guarded single-instance launcher
     `/usr/local/bin/open-file-explorer.sh`; `keep-file-manager.sh` became
-    `keep-file-explorer.sh` (same i3-tree polling, plus a "relaunch only when
-    no explorer process exists" guard so a withdrawn explorer is never
+    `keep-file-explorer.sh` (same WM-client-list polling, plus a "relaunch only
+    when no explorer process exists" guard so a withdrawn explorer is never
     doubled). Removed from the image: the `pcmanfm`/`spacefm`/`shared-mime-info`
     packages, the pcmanfm/libfm instrumentation and the whole `/trace`
     diagnostic tree (the Tcl/Tk `libtcl8.6.so.patched` fix stays), the
@@ -2149,7 +2158,9 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     **Screen replacement:** "Open with IDLE" (or double-clicking a `.py`)
     launches `idle3.10-launcher` per file and then **withdraws the explorer
     window** — the whole screen is IDLE's. A watcher thread decides when IDLE
-    is gone by watching the **i3 window tree** (not the process): under CheerpX
+    is gone by watching the **window manager's client list** (not the
+    process): the WM (Openbox) maintains the EWMH `_NET_CLIENT_LIST` root
+    property, read by `/usr/local/bin/wm-clients.py` — under CheerpX
     closing IDLE can leave the `idle3.10` process alive (it waits on its
     Python-shell subprocess, which a running program such as the snake game
     keeps busy), so waiting on the process would never return. The watcher
@@ -2174,15 +2185,15 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     tap, the Ctrl+O/Ctrl+W shortcuts, and the withdraw→IDLE→reappear flow —
     98 checks) and now runs **inside the guest** as part of
     `tests/rootfs/smoke.sh` under an in-image Xvfb (`xvfb` package added for
-    this); the same smoke block runs a REAL IDLE launch and boots i3 under
-    Xvfb to verify the keep-alive relaunches a killed explorer; `tests/unit`
+     this); the same smoke block runs a REAL IDLE launch and boots Openbox
+     under Xvfb to verify the keep-alive relaunches a killed explorer; `tests/unit`
     and CI shellcheck cover the new scripts. The E2E
     (`tests/e2e/tests/desktop.spec.js`) asserts the real-browser boot: no
     login prompt, no boot hang, and the explorer filling the canvas — synthetic
     input into the guest is not driven there because CheerpX's delayed
     release/Meta-key quirks make it non-deterministic (input behaviour is
     covered by the in-guest suites instead). Updated:
-    `diskimage/Dockerfile`, `diskimage/config/i3/config`,
+    `diskimage/Dockerfile`, `diskimage/config/openbox/`,
     `diskimage/config/xinitrc`, `diskimage/rootfs/etc/local.d/desktop.start`,
     `tests/rootfs/smoke.sh`, `tests/unit/test_scripts.py`,
     `.github/workflows/ci.yml`, `tests/e2e/tests/desktop.spec.js`.

@@ -91,12 +91,12 @@ chmod 1777 /tmp/.X11-unix
 #     ioctls hang in the VT-less CheerpX guest, so Xorg is launched directly
 #     with VT switching disabled (the plan's sanctioned fallback).
 #   * The session then runs as `user` via ~/.xinitrc (screen-resize hook,
-#     setxkbmap, xrdb, i3 under a per-session D-Bus).
+#     setxkbmap, xrdb, openbox under a per-session D-Bus).
 # The X server startup and the socket wait run in the FOREGROUND of
 # desktop.start so their output (and any failure reason from /var/log/xorg.log)
 # is visible on the boot console; the wait is BOUNDED (60s), so the boot
 # always continues. Only the user session is backgrounded — OpenRC's `local`
-# service completes while i3/IDLE keep running.
+# service completes while openbox/IDLE keep running.
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
 # stderr is NOT redirected: Xorg's startup errors go to the boot console
 # (xterm) as well as /var/log/xorg.log, so a failed start is visible in-page.
@@ -117,7 +117,7 @@ fi
 # to report its details to the page).
 tail -n 8 /var/log/xorg.log >/dev/console 2>/dev/null || true
 # The session is backgrounded; its output is redirected to /dev/console so
-# i3/dbus failures stay visible on the page's console (the boot log screen
+# openbox/dbus failures stay visible on the page's console (the boot log screen
 # would otherwise hide them).
 echo "launching the X desktop session as 'user'..." >/dev/console
 su user -c "export XDG_RUNTIME_DIR=/run/user/1000; DISPLAY=:0 sh /home/user/.xinitrc" >/dev/console 2>&1 &

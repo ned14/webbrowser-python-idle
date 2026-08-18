@@ -694,7 +694,7 @@ class SingleTab(ttk.Frame):
             messagebox.showerror("Error", "Path does not exist!")
 
     def open_terminal(self):
-        """Launch an xterm shell in the current folder (like i3 $mod+Return,
+        """Launch an xterm shell in the current folder (like Openbox W+Return,
         but starting in the folder the explorer is showing)."""
         xterm = shutil.which("xterm")
         if not xterm:
@@ -790,8 +790,8 @@ class SingleTab(ttk.Frame):
 
         Same swap model as IDLE (_open_in_idle): the explorer withdraws while
         the viewer is up and only returns once the viewer's window is gone
-        from the i3 tree (the viewer exits with its window, so the window
-        check doubles as the process check and is robust to a lingering
+        from the WM client list (the viewer exits with its window, so the
+        window check doubles as the process check and is robust to a lingering
         process)."""
         try:
             proc = subprocess.Popen([VIEWER] + list(paths),
@@ -824,7 +824,7 @@ class SingleTab(ttk.Frame):
             time.sleep(0.5)
         # Phase 2: watch for the user closing the viewer window. The 0.5 s
         # cadence of phase 1 is only needed for window-mapping; here a slow
-        # poll avoids ~7200 i3-msg spawns/hour (subprocess + IPC + full-tree
+        # poll avoids ~7200 wm-clients.py spawns/hour (subprocess + xprop +
         # JSON parse each) competing with the viewer's rendering — a couple of
         # seconds of delay before the explorer reappears is imperceptible.
         while True:
@@ -839,28 +839,24 @@ class SingleTab(ttk.Frame):
 
     @staticmethod
     def _viewer_window_open():
-        """True while the viewer's window is present in the i3 tree. The
-        viewer sets class 'FileViewer' and a '<name> — Viewer' title. On i3
-        failure, assume still open so a transient error never kills it
-        prematurely."""
+        """True while the viewer's window is present in the WM's client list.
+        The viewer sets class 'FileViewer' and a '<name> — Viewer' title. The
+        list comes from /usr/local/bin/wm-clients.py (reads Openbox's EWMH
+        _NET_CLIENT_LIST). On failure, assume still open so a transient error
+        never kills it prematurely."""
         try:
-            out = subprocess.check_output(["i3-msg", "-t", "get_tree"],
-                                          stderr=subprocess.DEVNULL)
-            tree = json.loads(out)
+            out = subprocess.check_output(
+                ["/usr/local/bin/wm-clients.py", "--json"],
+                stderr=subprocess.DEVNULL)
+            windows = json.loads(out)
         except Exception:
             return True
-        stack = [tree]
-        while stack:
-            node = stack.pop()
-            if node.get("window") is not None:
-                wp = node.get("window_properties") or {}
-                if wp.get("class") == "FileViewer":
-                    return True
-                name = node.get("name") or ""
-                if name.endswith("— Viewer") or name.endswith("- Viewer"):
-                    return True
-            stack.extend(node.get("nodes") or ())
-            stack.extend(node.get("floating_nodes") or ())
+        for w in windows:
+            if w.get("class") == "FileViewer":
+                return True
+            name = w.get("name") or ""
+            if name.endswith("— Viewer") or name.endswith("- Viewer"):
+                return True
         return False
 
     def open_with_idle(self):
@@ -944,30 +940,27 @@ class SingleTab(ttk.Frame):
 
     @staticmethod
     def _idle_window_open(basenames):
-        """True while an IDLE window (editor/shell) is present in the i3 tree.
-        IDLE windows report class 'Toplevel' or a 'Python ... Shell' title, or
-        contain the opened file's name; a program window (e.g. the snake game's
-        plain Tk root, titled 'tk') does not match. On i3 failure, assume still
-        open so a transient error never kills IDLE prematurely."""
+        """True while an IDLE window (editor/shell) is present in the WM's
+        client list (via wm-clients.py). IDLE windows report class 'Toplevel'
+        or a 'Python ... Shell' title, or contain the opened file's name; a
+        program window (e.g. the snake game's plain Tk root, titled 'tk') does
+        not match. On failure, assume still open so a transient error never
+        kills IDLE prematurely."""
         try:
-            out = subprocess.check_output(["i3-msg", "-t", "get_tree"],
-                                          stderr=subprocess.DEVNULL)
-            tree = json.loads(out)
+            out = subprocess.check_output(
+                ["/usr/local/bin/wm-clients.py", "--json"],
+                stderr=subprocess.DEVNULL)
+            windows = json.loads(out)
         except Exception:
             return True
-        stack = [tree]
-        while stack:
-            node = stack.pop()
-            if node.get("window") is not None:
-                name = node.get("name") or ""
-                wp = node.get("window_properties") or {}
-                if wp.get("class") == "Toplevel" or "Python" in name:
+        for w in windows:
+            name = w.get("name") or ""
+            cls = w.get("class") or ""
+            if cls == "Toplevel" or "Python" in name:
+                return True
+            for base in basenames:
+                if base in name:
                     return True
-                for base in basenames:
-                    if base in name:
-                        return True
-            stack.extend(node.get("nodes") or ())
-            stack.extend(node.get("floating_nodes") or ())
         return False
 
     @staticmethod

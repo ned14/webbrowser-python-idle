@@ -1,0 +1,6 @@
+## autostart for the WebVM desktop under Openbox.
+## Replaces the autostart lines from the old i3 config: launch the file
+## explorer and the keep-alive daemon that relaunches it whenever the last
+## window closes (see /usr/local/bin/keep-file-explorer.sh).
+open-file-explorer.sh >/dev/null 2>&1 &
+keep-file-explorer.sh >/dev/null 2>&1 &

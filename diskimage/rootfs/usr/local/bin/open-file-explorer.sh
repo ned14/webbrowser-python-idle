@@ -1,6 +1,6 @@
 #!/bin/sh
-# Launch the file explorer unless one is already running. Used by the i3
-# autostart, the $mod+Shift+f binding, and the keep-alive daemon, so the launch
+# Launch the file explorer unless one is already running. Used by the Openbox
+# autostart, the W+Shift+f binding, and the keep-alive daemon, so the launch
 # command (and the single-instance guard) live in exactly one place.
 #
 # While IDLE is open the explorer is merely withdrawn (process alive, no

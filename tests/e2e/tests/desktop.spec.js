@@ -8,22 +8,22 @@ import { waitForDesktop, lightRatio } from '../lib/desktop.js';
 //      completes and the desktop comes up).
 //   2. There is NO console login prompt ("login:").
 //   3. The FILE EXPLORER (a stdlib Tk app, file-explorer.py) has STARTED — its
-//      tiled window fills the canvas (the desktop is not a bare black i3
-//      background).
+//      maximized window fills the canvas (the desktop is not a bare black
+//      Openbox root).
 //
 // The full explorer behaviour — including the "Open with IDLE" swap (explorer
 // withdraws, IDLE takes the screen, the explorer reappears refreshed when
 // IDLE exits), every other function, and the keep-alive relaunch — is
 // exercised in-guest: file-explorer-tests.py runs under Xvfb (part of
-// tests/rootfs/smoke.sh), and smoke.sh additionally boots i3 under Xvfb,
+// tests/rootfs/smoke.sh), and smoke.sh additionally boots Openbox under Xvfb,
 // kills the explorer, and verifies the keep-alive relaunches it. This spec
 // covers what only a real VM boot in a real browser can prove.
 //
 // NOTE: synthetic input into the guest is intentionally NOT driven here.
 // Under CheerpX's event pipeline a synthetic button-release can arrive
 // seconds late (firing the touch model's long-press), and the browser Meta
-// key does not map to i3's Mod4, so i3 keybindings are unreachable from the
-// test. Input handling is covered by the in-guest suites instead.
+// key does not map to Openbox's Mod4, so Openbox keybindings are unreachable
+// from the test. Input handling is covered by the in-guest suites instead.
 
 const SITE_URL =
 	process.env.E2E_SITE_URL ||
@@ -44,9 +44,10 @@ test('boots to the file explorer: no login prompt, no boot hang', async ({ page 
 	// The desktop must come up — the canvas shows the X session.
 	await waitForDesktop(page);
 
-	// --- 3. The file explorer has started: its tiled window fills the canvas
-	// with light pixels (i3's background is black; nothing else autostarts a
-	// full-screen light window).
+	// --- 3. The file explorer has started: its maximized window fills the
+	// canvas with light pixels (the Openbox root is solid black via
+	// `xsetroot -solid black`, so nothing else autostarts a full-screen light
+	// window).
 	await expect
 		.poll(() => lightRatio(page), { timeout: 120_000, intervals: [3000] })
 		.toBeGreaterThan(0.35);
