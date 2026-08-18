@@ -52,6 +52,20 @@ See `plans/implementation_options.md` for the option comparison.
 > propagate to one `onMount` catch, a rejecting `cx.run()` is caught as
 > phase "runtime" instead of an unhandled rejection, and the session-lock
 > path can no longer stall the page — details §12/21(29)).
+> Round 12 (2026-08-16) records **silent-halt surfacing**: the CheerpX core
+> swallows guest-side WASM traps (e.g. `memory access out of bounds`) at its
+> own thread trampolines — it logs "Unexpected exit", pauses on a literal
+> `debugger;` when DevTools is open, and carries on, so a boot-critical
+> guest process can die with `cx.run()` never rejecting and the page black
+> forever (no overlay). The app now captures the engine's report off the
+> console, routes uncaught engine errors and rejecting `cx.run()` RuntimeErrors
+> to the overlay, retries ONCE automatically only on definitive boot-death
+> signals (a rejecting `cx.run()` or the stuck-watchdog verdict), surfaces
+> ambiguous engine trap reports immediately with the exact reason, and a boot
+> watchdog declares the VM stuck when a boot makes no progress beyond the
+> E2E-readiness budget; the vendored cxcore patch removes the `debugger;`
+> freeze, the spurious `e()`-calls-the-exception TypeError wedge, and elevates
+> the trap to `console.error`. Details §12/21(32).)
 > Round 10 (2026-08-16, late) recorded the **control-host verdict**: a
 > browser-facing `CONTROL_HOST=127.0.0.1` was implemented and REVERTED
 > because it appeared to break the guest data path. **Round 11 (2026-08-16,
@@ -2383,6 +2397,67 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `tests/server/join-test-client.sh`, `tests/e2e/playwright.config.js`,
     `tests/e2e/tests/boot.spec.js`, `tests/e2e/*.mjs` probes, `README.md`,
     `AGENTS.md`, `plans/networking-bug.md` §16.10.
+
+32. **Silent-halt surfacing — the CheerpX swallowed-trap path (2026-08-16).**
+    **Symptom reported:** "sometimes the VM doesn't load and nothing appears";
+    with DevTools open the console shows `Unexpected exit` and the thrown
+    exception is `RuntimeError: memory access out of bounds`. **Root cause
+    (verified in the pinned 1.3.7 self-hosted runtime):** the core catches
+    guest-side WASM traps at its own thread trampolines —
+    `cxcore.js`(/`cxcore-no-return-call.js`) `catch(e){if(e!='CheerpJContinue')
+    {debugger;console.log('Unexpected exit',e.stack)}}` (+ a variant that
+    then `e()`-CALLS the caught exception → spurious uncaught
+    `TypeError: e is not a function` exactly as in plans/networking-bug.md §2
+    PAGEERROR). The swallow kills just that guest process (a boot-critical one
+    e.g. Xorg/init) and the run loop carries on — `cx.run()` NEVER settles, so
+    the §12/21(29) overlay could not fire and the screen stayed black. A
+    `memory access out of bounds` is a host-level WASM trap (guest physical
+    access beyond linear memory — memory-growth/layout race inside the
+    emulator), which is why it is intermittent and why the same boot usually
+    succeeds on retry. **Fixes:**
+    - `WebVM.svelte` now captures the engine's own `console.log/error
+      "Unexpected exit"` report (`installTrapCapture`, installed before the
+      CheerpX import) and routes uncaught engine errors +
+      `unhandledrejection` + rejecting `cx.run()` RuntimeErrors to the
+      overlay. The one-shot auto-reload is restricted to DEFINITIVE
+      boot-death signals (a rejecting `cx.run()` or the watchdog's
+      sustained-silence verdict, sessionStorage `webvm-trap-reload`
+      counter, cleared when a boot succeeds, block cache untouched);
+      ambiguous engine console reports surface the overlay immediately
+      with the exact reason but never reload — the core may have killed
+      only a disposable guest process and the boot can still reach the
+      desktop.
+    - A **boot watchdog** (2 s tick) declares the boot stuck when, visible-tab
+      only, there is no guest console output (`writeData` timestamp) AND no
+      non-black KMS pixel (`hasDisplayPixels` 256×256 probe) for 200 s with a
+      270 s floor since boot start — deliberately ABOVE the project's own
+      boot-readiness budget (240 s first-pixel timeout in
+      `tests/e2e/lib/desktop.js`) so a slow-but-successful cold-cache boot
+      can never be declared stuck while the E2E definition would accept it.
+      The last guest boot text is shown in the overlay. A "Booting the VM…
+      Ns" pill makes a still-booting screen honest instead of silently
+      black. Terminal-only VMs (no canvas) are excluded from the pixel
+      watchdog and pill (trap capture + global handlers still cover them).
+    - Vendored-runtime patch (reproducible: applied by
+      `scripts/fetch-cheerpx-runtime.sh` after every fetch): removes all
+      `debugger;` statements (they froze the whole tab exactly when DevTools
+      is open), drops the `e()` call, and reports EVERY swallowed trap via
+      the SAME `console.error('Unexpected exit', e.stack)` prefix so the
+      capture sees all three trampolines. The fetch script downloads into a
+      STAGING tree (`--fail` on curl) and only installs into the repo after
+      the patch and its presence-based guards pass (exactly three
+      `console.error('Unexpected exit'` sites, no `debugger`, no `e()` call)
+      — an interrupted fetch or CDN error never corrupts the committed
+      runtime.
+    - Test hook `webvm-test-trapreport` (mirrors `webvm-test-bootfail`) +
+      `tests/e2e/tests/error-overlay.spec.js` case asserting the overlay shows
+      the exact captured reason and that Reload recovers.
+    **Known limitation:** the underlying trap (a CheerpX-core memory-layout
+    bug, not a guest code bug — no guest fix exists for wild host-level
+    accesses) is not preventable from here; retry-once + exact-reason overlay
+    is the mitigation. Updated: `webvm/src/lib/WebVM.svelte`,
+    `webvm/cheerpx/cxcore.js`, `webvm/cheerpx/cxcore-no-return-call.js`,
+    `scripts/fetch-cheerpx-runtime.sh`, `tests/e2e/tests/error-overlay.spec.js`.
 
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path

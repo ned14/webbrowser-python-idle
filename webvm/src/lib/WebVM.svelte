@@ -47,10 +47,282 @@
 			console.warn("copy fatal details failed:", e);
 		}
 	}
+	// ------------------------------------------------------------------
+	// Runtime-trap surfacing. The CheerpX core catches guest-side WASM
+	// traps (e.g. "memory access out of bounds") at its own trampolines,
+	// logs "Unexpected exit <error>" and then either silently kills just
+	// that guest process or wedges — cx.run() never rejects, so the fatal
+	// overlay above would never fire on its own and the display stays
+	// black. These hooks guarantee the failure IS seen: the engine's own
+	// report is captured off the console, uncaught engine errors route
+	// here, and a boot watchdog gives up on a boot that stops making
+	// progress. See plans/webvm_implementation.md §12/21(32).
+	var cxDiag = null;          // { message, detail } — the engine's own trap report (if any)
+	var cxBootConsoleTail = ""; // rolling tail of the guest boot console (diagnosis aid)
+	var guestOutputTs = 0;      // last time the guest wrote to the boot console (ms)
+	var bootStarted = false;
+	var bootStartTs = 0;
+	var lastPixelCheckAt = 0;
+	var pixelSeen = false;
+	var trapReloadUsed = false; // in-memory guard for the one-shot auto reload
+	var watchdogTimer = null;
+	var bootElapsed = 0;
+
+	// The runtime reports guest traps as `console.log('Unexpected exit',
+	// <RuntimeError>)` (after the vendored runtime patch:
+	// `console.error`). Capture the FIRST one so the fatal overlay can
+	// show the engine's exact reason, and route it to the overlay right
+	// away instead of waiting for the watchdog.
+	function installTrapCapture()
+	{
+		if (typeof window === "undefined" || window.__webvmTrapCaptureInstalled)
+			return;
+		window.__webvmTrapCaptureInstalled = true;
+		var capture = function (args)
+		{
+			if (!args || !args.length || cxDiag)
+				return;
+			var msg = args[0];
+			if (typeof msg !== "string" || msg.indexOf("Unexpected exit") !== 0)
+				return;
+			var e = args[1];
+			cxDiag = {
+				message: e && e.message ? e.message : String(e !== undefined ? e : msg),
+				detail: e && e.stack ? e.stack : args.slice(1).map(String).join(" ")
+			};
+			console.warn("[WebVM] CheerpX engine reported an internal trap:", cxDiag.message);
+			reportEngineTrap();
+		};
+		var wrap = function (orig)
+		{
+			return function ()
+			{
+				capture(Array.prototype.slice.call(arguments));
+				return orig.apply(console, arguments);
+			};
+		};
+		console.log = wrap(console.log);
+		console.error = wrap(console.error);
+	}
+
+	// Only CheerpX engine/WASM failures take the whole session to the
+	// fatal overlay — unrelated page errors must not.
+	function isEngineError(err)
+	{
+		var text = "";
+		if (typeof err === "string")
+			text = err;
+		else if (err && (err.message || err.stack))
+			text = err.message + "\n" + (err.stack || "");
+		else if (err)
+			text = String(err);
+		return /RuntimeError|memory access out of bounds|function signature mismatch|call_indirect|wasm:\/\//.test(text);
+	}
+
+	// Build the overlay's error from the captured engine diagnostic, plus
+	// the last guest boot output so the user/developer can see WHERE the
+	// boot stopped.
+	function buildDiagError()
+	{
+		if (!cxDiag)
+		{
+			return new Error("The virtual machine stopped unexpectedly inside the CheerpX engine; no further detail was reported.");
+		}
+		var e = new Error(cxDiag.message);
+		e.stack = cxDiag.detail +
+			(cxBootConsoleTail ? "\n\nLast guest boot output:\n" + cxBootConsoleTail : "");
+		return e;
+	}
+
+	// The single funnel for a detected engine trap. `reloadAllowed` marks the
+	// call as a DEFINITIVE boot-death signal (a rejecting cx.run() — the run
+	// loop is gone — or the watchdog's sustained-silence verdict). Only those
+	// may trigger the one-shot auto reload, because the engine's own console
+	// trap reports are ambiguous: when it swallows a trap it kills just that
+	// guest process and carries on, so a report during boot might not be boot-
+	// fatal. Ambiguous reports (the console capture, window errors/unhandled
+	// rejections) surface the overlay immediately instead — never a surprise
+	// reload of a boot that could still reach the desktop. The reload itself
+	// is plain (block cache untouched: a blockCache.reset() would wipe the
+	// user's persisted overlay); a second consecutive definitive failure
+	// shows the overlay.
+	function maybeReportRuntimeTrap(reloadAllowed)
+	{
+		if (fatal)
+			return;
+		var allowAutoReload = reloadAllowed && bootStarted && !pixelSeen && !bootedOnce;
+		if (allowAutoReload && !trapReloadUsed)
+		{
+			trapReloadUsed = true;
+			try
+			{
+				if (sessionStorage.getItem("webvm-trap-reload") !== "1" &&
+					!sessionStorage.getItem("webvm-test-bootfail") &&
+					!sessionStorage.getItem("webvm-test-trapreport"))
+				{
+					sessionStorage.setItem("webvm-trap-reload", "1");
+					location.reload();
+					return;
+				}
+			}
+			catch(e)
+			{
+				// storage blocked — fall through to the overlay
+			}
+		}
+		showFatal(pixelSeen || bootedOnce ? "runtime" : "boot", buildDiagError());
+	}
+
+	// The engine's own console trap reports (and window errors / unhandled
+	// rejections they surface) are AMBIGUOUS: when the core swallows a WASM
+	// trap it logs "Unexpected exit" and carries on — it may have killed
+	// only a disposable guest process, in which case the boot still reaches
+	// the desktop. So these funnel to the overlay immediately (with the
+	// exact reason) but NEVER trigger the one-shot auto reload; only
+	// definitive boot-death signals (a rejecting cx.run(), the watchdog)
+	// may reload. See maybeReportRuntimeTrap.
+	function reportEngineTrap()
+	{
+		maybeReportRuntimeTrap(false);
+	}
+
+	// Uncaught engine errors (e.g. the runtime re-raising a WASM trap as a
+	// pageerror) and unhandled promise rejections must also reach the
+	// overlay instead of staying in the DevTools console.
+	function onWindowError(ev)
+	{
+		var e = (ev && ev.error) ||
+			{ message: (ev && ev.message) || "", stack: (ev && (ev.filename + ":" + ev.lineno)) || "" };
+		if (!isEngineError(e))
+			return true; // unrelated page error — leave default handling on
+		if (!cxDiag)
+			cxDiag = { message: e.message || String(e), detail: e.stack || "" };
+		reportEngineTrap();
+		return false;
+	}
+	function onUnhandledRejection(ev)
+	{
+		var e = ev && ev.reason;
+		if (!e || !isEngineError(e))
+			return;
+		if (!cxDiag)
+			cxDiag = { message: e.message || String(e), detail: e.stack || "" };
+		reportEngineTrap();
+	}
+
+	// Cheap version of the E2E's waitForDesktop pixel probe: has the KMS
+	// framebuffer rendered anything non-black yet? (256x256 downscale.)
+	// Terminal-only VMs have no canvas — the caller gates on needsDisplay,
+	// so this probes nothing there.
+	function hasDisplayPixels()
+	{
+		if (!configObj.needsDisplay)
+			return false;
+		var display = document.getElementById("display");
+		if (!display || !display.width || !display.height)
+			return false;
+		try
+		{
+			var scratch = document.createElement("canvas");
+			scratch.width = Math.min(display.width, 256);
+			scratch.height = Math.min(display.height, 256);
+			var ctx = scratch.getContext("2d");
+			ctx.drawImage(display, 0, 0, scratch.width, scratch.height);
+			var data = ctx.getImageData(0, 0, scratch.width, scratch.height).data;
+			for(var i = 0; i < data.length; i += 4)
+			{
+				if(data[i] || data[i+1] || data[i+2])
+					return true;
+			}
+		}
+		catch(e)
+		{
+			// canvas not readable yet — not an error
+		}
+		return false;
+	}
+
+	// Boot watchdog: a boot that makes no progress (no guest console
+	// output AND no display pixels) for a long stretch is a silent halt
+	// (trapped boot process, wedged core). Declare it stuck only after a
+	// generous floor, and never while the tab is hidden (background tab
+	// throttling makes real boots look silent). The thresholds stay ABOVE
+	// the project's own boot-readiness budget (240 s first-pixel timeout in
+	// tests/e2e/lib/desktop.js) so a slow-but-successful boot — e.g. a cold
+	// cache streaming the disk image — can never be declared stuck by the
+	// page while the E2E definition would accept it.
+	var STUCK_SILENT_MS = 200000; // continuous silence, no floor yet included
+	var STUCK_FLOOR_MS = 270000;  // never declare stuck before this since the run started
+	var WATCHDOG_INTERVAL_MS = 2000;
+
+	function watchdogTick()
+	{
+		if (fatal)
+		{
+			clearInterval(watchdogTimer);
+			watchdogTimer = null;
+			return;
+		}
+		if (pixelSeen || bootedOnce)
+		{
+			// Boot came up (or a run completed): disarm, and clear the
+			// one-shot trap-reload counter so a later, real trap gets its
+			// one retry.
+			try { sessionStorage.removeItem("webvm-trap-reload"); } catch(e) {}
+			clearInterval(watchdogTimer);
+			watchdogTimer = null;
+			return;
+		}
+		if (bootStarted)
+		{
+			var now = Date.now();
+			bootElapsed = Math.floor((now - bootStartTs) / 1000);
+			if (configObj.needsDisplay && !pixelSeen && now - lastPixelCheckAt > 3000)
+			{
+				lastPixelCheckAt = now;
+				if (hasDisplayPixels())
+					pixelSeen = true;
+			}
+			// Only display VMs get the pixel-based stuck detection. A
+			// terminal-only VM has no canvas, so a user idling at a shell
+			// must not look "stuck" — trap capture + global handlers still
+			// cover its failure modes.
+			if (configObj.needsDisplay && !pixelSeen &&
+				document.visibilityState === "visible" &&
+				now - guestOutputTs > STUCK_SILENT_MS &&
+				now - bootStartTs > STUCK_FLOOR_MS)
+			{
+				cxDiag = {
+					message: "The virtual machine stopped making progress during boot: no guest activity or display output for a long time. This is the CheerpX engine silently halting (a guest process trapped inside the emulator), not a normal error.",
+					detail: (cxDiag ? cxDiag.detail + "\n\n" : "") +
+						(cxBootConsoleTail ? "Last guest boot output:\n" + cxBootConsoleTail : "(no guest boot output captured)")
+				};
+				// Sustained silence is a definitive death signal — the
+				// one-shot auto-reload may run (see maybeReportRuntimeTrap).
+				maybeReportRuntimeTrap(true);
+				clearInterval(watchdogTimer);
+				watchdogTimer = null;
+			}
+		}
+	}
+	var __bootTextDecoder = null;
 	function writeData(buf, vt)
 	{
 		if(vt != 1)
 			return;
+		// Watchdog input: the guest is making progress while it writes to
+		// the boot console. Keep a rolling tail for the fatal overlay's
+		// diagnosis (shows WHERE the boot stopped), but only while the
+		// diagnostic window is open (boot, not a whole session of
+		// interactive terminal I/O). buf is already a Uint8Array, so no
+		// extra copy is needed for the decoder.
+		guestOutputTs = Date.now();
+		if(!pixelSeen && !bootedOnce && !fatal)
+		{
+			if(__bootTextDecoder == null)
+				__bootTextDecoder = new TextDecoder();
+			cxBootConsoleTail = (cxBootConsoleTail + __bootTextDecoder.decode(buf)).slice(-4096);
+		}
 		term.write(new Uint8Array(buf));
 	}
 	function readData(str)
@@ -232,6 +504,14 @@
 		raiseDisplay();
 		if(configObj.printIntro)
 			printMessage(introMessage);
+		// Boot began: arm the trap/watchdog machinery (the CheerpX core can
+		// swallow guest WASM traps and carry on silently — see
+		// maybeReportRuntimeTrap / watchdogTick).
+		bootStartTs = Date.now();
+		guestOutputTs = bootStartTs;
+		bootStarted = true;
+		if(watchdogTimer == null)
+			watchdogTimer = setInterval(watchdogTick, WATCHDOG_INTERVAL_MS);
 		await initCheerpX();
 	}
 
@@ -302,6 +582,15 @@
 		if (sessionStorage.getItem("webvm-test-bootfail"))
 		{
 			throw new Error("test-forced boot failure (webvm-test-bootfail)");
+		}
+		// Test-only hook: emulate the CheerpX core's swallowed-trap console
+		// report (`console.log('Unexpected exit', <err>)`), exercising the
+		// interceptor -> fatal-overlay path for a silent guest crash. The
+		// marker is consumed on the NEXT navigation by the E2E init script
+		// (mirroring the webvm-test-bootfail latch).
+		if (sessionStorage.getItem("webvm-test-trapreport"))
+		{
+			console.log("Unexpected exit", new Error("test-forced engine trap (webvm-test-trapreport)"));
 		}
 		blockCache = await CheerpX.IDBDevice.create(cacheId);
 		var overlayDevice = await CheerpX.OverlayDevice.create(blockDevice, blockCache);
@@ -381,13 +670,36 @@
 		}
 		catch(e)
 		{
-			showFatal(bootedOnce ? "runtime" : "boot", e);
+			// A rejecting cx.run() is a DEFINITIVE death signal (the run
+			// loop is gone) — the one-shot auto-reload is allowed here (the
+			// trap is intermittent; the same boot usually succeeds next
+			// try). Console-captured reports go through reportEngineTrap
+			// instead and never reload.
+			if(isEngineError(e))
+			{
+				cxDiag = { message: e.message || String(e), detail: e.stack || "" };
+				maybeReportRuntimeTrap(true);
+			}
+			else
+			{
+				showFatal(bootedOnce ? "runtime" : "boot", e);
+			}
 		}
 	}
 	onMount(() => {
 		// Any error while booting (terminal setup, CheerpX runtime, disk
 		// image, Linux.create) surfaces as the visible fatal overlay — a
 		// failed load must never be silent.
+		installTrapCapture();
+		window.addEventListener("error", onWindowError);
+		window.addEventListener("unhandledrejection", onUnhandledRejection);
+		// The watchdog only judges boot progress while the tab is actually
+		// visible (background-throttled boots look silent otherwise). On
+		// return, don't count the background time as silence.
+		document.addEventListener("visibilitychange", () => {
+			if(document.visibilityState === "visible" && bootStarted && !pixelSeen)
+				guestOutputTs = Date.now();
+		});
 		initTerminal().catch((e) => { showFatal("boot", e); });
 	});
 	async function handleConnect()
@@ -439,6 +751,15 @@
 		{/if}
 		<div class="absolute top-0 bottom-0 {sideBarPinned ? 'left-[23.5rem]' : 'left-14'} right-0 p-1 scrollbar" id="console">
 		</div>
+		{#if configObj.needsDisplay && bootStarted && !fatal && !pixelSeen}
+			<!-- Boot in progress: the display canvas covers the console, so an
+			     unresponsive-looking black screen is honest only if the page
+			     says it is still booting. Also the first sign that a boot has
+			     quietly died (silently increasing counter). -->
+			<div class="absolute top-3 right-3 z-40 rounded bg-black/70 text-green-300 font-mono text-xs px-3 py-1.5 pointer-events-none select-none">
+				Booting the VM… {bootElapsed}s
+			</div>
+		{/if}
 	</div>
 	{#if fatal}
 		<div
@@ -453,7 +774,9 @@
 					{fatal.phase === "runtime"
 						? "The guest session terminated while running."
 						: "The browser could not boot the guest."}
-					The exact reason is below; the DevTools console carries the full stack.
+					The exact reason is below. If the engine quietly stopped
+					mid-boot, Reload usually recovers; the DevTools console
+					carries the full stack.
 				</div>
 				<div class="bg-black rounded p-3 overflow-auto max-h-64 mb-4 whitespace-pre-wrap break-all">
 {fatal.message}{#if fatal.detail}

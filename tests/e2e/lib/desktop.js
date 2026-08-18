@@ -59,3 +59,29 @@ export async function lightRatio(page) {
 		}
 	});
 }
+
+// Hash of the display canvas downscaled to 256x256 (all pixels sampled, so
+// even the guest-drawn mouse pointer's few pixels change the hash). Used to
+// detect that the canvas KEEPS changing while the mouse moves — a frozen
+// pointer means the hash stops changing.
+export async function canvasHash(page) {
+	return page.evaluate(() => {
+		const display = document.getElementById('display');
+		if (!display || !display.width || !display.height) return null;
+		const scratch = document.createElement('canvas');
+		scratch.width = Math.min(display.width, 256);
+		scratch.height = Math.min(display.height, 256);
+		const ctx = scratch.getContext('2d');
+		ctx.drawImage(display, 0, 0, scratch.width, scratch.height);
+		try {
+			const data = ctx.getImageData(0, 0, scratch.width, scratch.height).data;
+			let hash = 0;
+			for (let i = 0; i < data.length; i += 4) {
+				hash = (hash * 31 + data[i] + data[i + 1] + data[i + 2]) | 0;
+			}
+			return hash;
+		} catch (e) {
+			return null;
+		}
+	});
+}

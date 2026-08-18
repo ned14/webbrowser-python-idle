@@ -44,3 +44,44 @@ test('a boot failure shows the exact reason on screen with a working Reload', as
 	await expect(page.locator('#display')).toBeVisible({ timeout: 60_000 });
 	await expect(page.getByRole('alert')).toHaveCount(0);
 });
+
+test('a swallowed engine trap (Unexpected exit) surfaces the exact reason', async ({
+	page,
+	context,
+}) => {
+	test.setTimeout(120_000);
+
+	// The CheerpX core swallows guest WASM traps at its own trampolines: it
+	// only `console.log`s "Unexpected exit <err>" and carries on, so
+	// cx.run() never rejects and the old page stayed black forever. The
+	// webvm-test-trapreport hook emits exactly that report from
+	// initCheerpX; WebVM.svelte's trap capture must turn it into the fatal
+	// overlay (same one-shot latch pattern as the bootfail test above).
+	await page.addInitScript(() => {
+		const armed = sessionStorage.getItem('webvm-test-trapreport');
+		if (armed) {
+			sessionStorage.removeItem('webvm-test-trapreport');
+			return;
+		}
+		sessionStorage.setItem('webvm-test-trapreport', '1');
+	});
+
+	await page.goto(SITE_URL, { waitUntil: 'domcontentloaded' });
+	const alert = page.getByRole('alert');
+	await expect(alert).toBeVisible({ timeout: 60_000 });
+	await expect(alert).toContainText('The VM failed to start');
+	// The EXACT reason captured from the engine report, not a generic
+	// "something went wrong".
+	await expect(alert).toContainText('test-forced engine trap');
+
+	// Error-level engine reports must not imply the session is fine: the
+	// page must have at most this one fatal alert and nothing else.
+	await expect(alert.getByRole('button', { name: 'Reload' })).toBeVisible();
+
+	// And Reload must recover: the hook is consumed on this navigation, so
+	// the second load boots to the desktop with no overlay.
+	await alert.getByRole('button', { name: 'Reload' }).click();
+	await page.waitForLoadState('domcontentloaded');
+	await expect(page.locator('#display')).toBeVisible({ timeout: 60_000 });
+	await expect(page.getByRole('alert')).toHaveCount(0);
+});

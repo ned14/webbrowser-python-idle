@@ -3,33 +3,74 @@
 #
 # IDLE's default mode runs the Python shell in a subprocess connected over a
 # 127.0.0.1 TCP loopback socket. That only works when the guest has working
-# networking. Under CheerpX, guest networking exists only when a tailnet
+# loopback TCP. Under CheerpX, guest networking exists only when a tailnet
 # controlUrl is configured (webvm/src/lib/network.js); without it there is no
 # loopback TCP at all, IDLE cannot bind, warns, and degrades (menus stop
 # working).
 #
 # So the -n switch (run in-process, no subprocess, no networking) is applied
-# CONDITIONALLY: only when the loopback bind actually fails. When networking
-# is enabled, IDLE runs normally with its subprocess.
+# UNLESS the guest's network stack is actually up AND a complete loopback
+# round trip works: bind+listen, then a second socket connects to the
+# listener, then the listener accepts.
 #
-# The bind probe must not hang: socket()+bind() fail fast under CheerpX with
-# no network (the whole point), and succeed fast when networking exists.
+# Two conditions must hold for subprocess mode:
+#
+# 1. The guest must have a network stack with an assigned address
+#    (eth0 + an inet address). The CheerpX NIC is only created once the
+#    browser-side Tailscale client CONNECTS; while the client is up but
+#    unregistered (registering against an unreachable control plane — e.g.
+#    `make up` without the gateway) the tun/ipstack sits in a state where a
+#    TCP connect can hang the whole guest display — the mouse pointer
+#    freezes — before any timeout can fire (plans/display-bug.md §2.11,
+#    plans/networking-bug.md §16.9). NEVER attempt the connect in that
+#    state: -n is applied unconditionally.
+# 2. Even with the stack up, a bare bind() is NOT enough: on the rebuilt
+#    tailscale.wasm the inbound accept path is dead (it consumes inbound
+#    SYNs: guest servers can bind+listen but never accept), so IDLE's
+#    shell-subprocess handshake would hang forever. The round-trip probe
+#    (bounded by Python socket timeouts AND the busybox `timeout` wrapper —
+#    select()-based timeouts are not guaranteed to fire under CheerpX) fails
+#    on that runtime, so -n is applied and IDLE works.
+#
+# On real Linux (Xvfb smoke tests, future fixed runtimes) eth0 is up with an
+# address, the round trip completes in milliseconds and IDLE runs with its
+# subprocess.
 
-if python3 - <<'EOF' >/dev/null 2>&1
-import socket, sys
+# Condition 1: a network stack with an assigned address.
+if ip addr show eth0 2>/dev/null | grep -q "inet "; then
+	if timeout 8 python3 - <<'EOF' >/dev/null 2>&1
+import socket, select, sys
 try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", 0))
-    s.close()
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    cli.setblocking(False)
+    rc = cli.connect_ex(("127.0.0.1", port))
+    # connect_ex returns immediately (EINPROGRESS) when the round trip can
+    # complete; under the dead-accept runtime the SYN is consumed and the
+    # connection never becomes writable, so the select times out -> -n.
+    if rc not in (0, 115, 36):  # 0 done, 115 EINPROGRESS, 36 EALREADY
+        sys.exit(1)
+    _, w, _ = select.select([], [cli], [], 4)
+    if not w:
+        sys.exit(1)
+    srv.settimeout(2)
+    conn, _ = srv.accept()
+    conn.close()
+    cli.close()
+    srv.close()
     sys.exit(0)
 except Exception:
     sys.exit(1)
 EOF
-then
-    # Networking available: run IDLE with its subprocess (no -n).
-    exec idle3.10 "$@"
-else
-    # Networking unavailable: run IDLE in-process (-n).
-    exec idle3.10 -n "$@"
+	then
+		# Full loopback round trip works: run IDLE with its subprocess (no -n).
+		exec idle3.10 "$@"
+	fi
 fi
+# Loopback TCP unusable (no networking, an unregistered/unreachable tailnet,
+# or the runtime's dead accept path): run IDLE in-process (-n).
+exec idle3.10 -n "$@"

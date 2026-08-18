@@ -438,7 +438,8 @@ via ANSI cursor-up, rendered on a separate xterm row). The corrected
 assertion checks the boot actually progressed: `trimEnd()` not ending in
 `Starting local ...` AND `"launching the X desktop session"` present.
 
-**Final piece — IDLE's shell subprocess (DONE 2026-08-12):** IDLE by default
+ **Final piece — IDLE's shell subprocess (DONE 2026-08-12, PARTIALLY
+SUPERSEDED by §2.11 2026-08-17):** IDLE by default
 runs the Python shell in a subprocess over a 127.0.0.1 TCP loopback socket.
 Under CheerpX with no tailnet controlUrl there is no loopback networking, so
 the bind fails and IDLE degrades (warning dialog + broken menus). Fixed with a
@@ -447,7 +448,13 @@ wired into the i3 autostart): it probes loopback bindability with a fast
 `python3 socket.bind()` and applies IDLE's `-n` (in-process, no subprocess)
 ONLY when the bind fails. **`-n` is intentionally NOT applied when networking
 is enabled** (tailnet controlUrl set, samba/webdav/any net-capable guest) —
-IDLE then runs normally with its subprocess.
+IDLE then runs normally with its subprocess. **§2.11 (2026-08-17):** the
+bind-only probe is insufficient now that the guest data path works — the
+runtime's inbound accept path is dead (§16.9), so with networking up the
+subprocess handshake hangs forever and freezes the desktop. The launcher now
+gates subprocess mode on a complete loopback round trip (bind+listen+
+connect+accept, timeout-bounded); net-enabled guests get `-n` until the
+runtime's accept path is fixed.
 
 ## 2.9 PARTIAL — the GTK3 file manager (pcmanfm) desktop (DONE 2026-08-13)
 
@@ -532,6 +539,123 @@ Dockerfile. Remove the marker instrumentation for a clean production build
 `gtkmonitor-probe`, `statvfs-probe`, `fmgtk-probe` (dlsym-based, needs
 exported symbols so unbuilt), `trace-run.sh` verify-* modes. `run-mode`
 default is `both`.
+
+## 2.10 FIXED — after()-timer drawing freezes on screen (2026-08-17)
+
+**Symptom:** timed animation freezes — the shipped **snake game** ("enter the
+file manager, choose the snake game, open in Python IDLE — it hangs forever")
+maps its window (the i3 tree shows `GFG Snake game `) yet the browser canvas
+never changes: a static first frame while the process stays alive. IDLE's own
+editor is affected the same way (caret/selection redraws never repaint), so
+running any long-running timer-driven Tk program in IDLE looks hung.
+
+**Root cause (verified in-browser, in-guest, standalone):** under this
+CheerpX runtime, **canvas drawing done from an `after()` timer callback is
+never flushed to the framebuffer by the passive event loop** — the screen
+updates only when the loop performs a full event drain.
+- Plain `Tk()` + `after(200, …)` timers DO fire (logged 30 ticks / 8 s).
+- The snake game's loop (canvas `create_rectangle`/`delete` + `label.config`
+  from the timer) — screen STATIC for 45 s (verified standalone and in-IDLE).
+- The EXACT same loop plus a `window.update()` every 10th tick — canvas hash
+  changes every ~0.5 s: **it animates**.
+- `update_idletasks()`/`update()` force Tcl_DoOneEvent's idle pass, which is
+  what schedules Tk's deferred canvas redraw. The natural loop never runs that
+  pass because the emulated X socket stays perpetually "readable" to the Tcl
+  notifier (the `tcl-notifier-stale-fdset` §2.8 patch only zeroes the fd sets
+  on `select() <= 0`; `select() > 0`-with-stale-readiness — which idles every
+  process's event loop — is not covered, so the idle pass starves).
+- Odd numbers of X/file fds, the sync agent, the runtime-patch A/B, and
+  nested mainloops were all ruled out by controlled probes.
+
+**Fix (shipped):** `diskimage/python-examples/snake-game.py` now calls
+`window.update()` every tick (with a comment referencing this section). The
+general rule for Tk code that must animate under CheerpX: **flush from the
+timer callback** (`window.update_idletasks()` usually suffices; use `update()`
+when in doubt) — passive reliance on the event loop's idle redraw does not
+work here. The deeper notifier gap (idle starvation from a perpetually-ready
+X fd) remains open as a future Tcl patch; the game fix works within the
+limitation.
+
+**Verification:** guest rebuilt with the fix; browser canvas sampling shows
+the game animating (9 framebuffer changes during the motion phase vs. 0
+before); `tests/rootfs/smoke.sh webdav` PASS (incl. real IDLE launch). Temp
+diagnostic probes (in-guest snake-diag/sitecustomize + a Playwright spec)
+were removed after use.
+
+## 2.11 FIXED — IDLE hangs forever when opening any .py with networking enabled (2026-08-17)
+
+**Symptom (user report):** "enter the file manager, choose any python file,
+open that in Python IDLE — it hangs forever; the mouse pointer stops moving."
+**Regression:** this worked a few commits ago (IDLE launched, pointer moved).
+
+**Root cause — the launcher's bind-only probe is insufficient now that the
+guest data path works.** `idle3.10-launcher` decided subprocess vs `-n` mode
+by probing `socket.bind("127.0.0.1")` only:
+- A few commits ago the guest data path was dead (networking-bug.md
+  §15/§16.8), so `bind()` **failed** → launcher applied **`-n`** (in-process)
+  → IDLE worked.
+- Once guest networking became functional (app-side tailnet driver + heal,
+  networking-bug.md §16.8), `bind()` **succeeds** → launcher ran `idle3.10`
+  **without `-n`** → IDLE spawns its Python-shell **subprocess over a
+  127.0.0.1 TCP loopback socket** (idlelib/pyshell.py `start_subprocess`:
+  GUI binds+listens, child connects back, GUI accepts).
+
+But the rebuilt tailscale.wasm's **inbound accept path is dead** (§16.9:
+guest servers can bind+listen but never accept; the IpStack spins a
+SYN/SYNACK retransmission loop). The loopback connect never completes, so
+IDLE hangs forever in the subprocess handshake, and the IpStack spin (or the
+parked connect) starves the display → **the mouse pointer stops moving**.
+
+**Verified empirically (2026-08-17, page-side probe driving the same
+cjTailscale adapter the guest's connect(2) is handed to):** `TCPServerSocket`
+bind+listen succeeds, but a `TCPSocket` connect to `127.0.0.1` times out and
+never completes — exactly the §16.9 accept-path defect, and exactly what
+IDLE's subprocess handshake needs.
+
+**Fix (shipped):** `idle3.10-launcher` now probes the **full loopback round
+trip** — bind+listen, connect a second socket to the listener, accept —
+bounded by Python socket timeouts AND the busybox `timeout` wrapper (an
+external kill, since select()-based timeouts are not guaranteed to fire under
+CheerpX). `-n` is applied unless the complete round trip succeeds:
+- On this runtime the connect can never complete → probe fails (≤8 s) →
+  `-n` → IDLE works in-process, pointer moves (the pre-networking state).
+- On real Linux (Xvfb smoke tests) and any future fixed runtime the round
+  trip completes in milliseconds → subprocess mode retained (no -n).
+- A fully-wedged runtime stalls the launcher exactly as before — no
+  regression beyond the status quo.
+
+**REVISED (2026-08-17, second user report — `make up` WITHOUT the gateway):
+the round-trip probe alone is NOT safe when the tailnet client is up but
+UNREGISTERED.** With the baked page config wiring the tailnet client while no
+gateway/control plane exists, the tun/ipstack sits in a pre-registration state
+where even the PROBE's own connect can wedge the guest display (the pointer
+freeze) before any timeout can fire. Empirically (E2E repro runs): with the
+round-trip probe alone, opening hello.py produced a frozen/static desktop in a
+large fraction of boots. **The launcher therefore gates the probe itself:
+subprocess mode is only attempted when `eth0` has an assigned inet address**
+(the CheerpX NIC exists only once the client CONNECTED — plan §15 defect
+means even the device can be absent). No address → `-n` unconditionally → the
+wedging connect is NEVER attempted. Real Linux (docker/Xvfb) has eth0+DHCP →
+the probe still runs and pins subprocess mode; a registered browser tailnet
+still runs the probe (dead accept → `-n`).
+
+**Regression test:** `tests/e2e/tests/idle-pointer.spec.js` boots the desktop,
+opens hello.py through the real explorer UI (row scan + double-click retries;
+the file-viewer open is detected via its ✕ Close button and skipped), then
+requires the IDLE window to be alive — its shell cursor keeps blinking — and
+the pointer to keep following the mouse. Pre-fix, the launch wedges/freezes
+(observed hard hangs); with the gate, IDLE launches in-process and the test
+passes consistently (3/3). Note the pre-fix freeze is a race that the user's
+long-settled sessions hit deterministically: the launcher's bind-only probe
+picks subprocess mode only when the tun accepts binds, which depends on the
+flapping register-retry state; the test catches it whenever that state is hit
+and the CI webdav phase (registered client) hits it deterministically.
+
+**Verification:** `tests/rootfs/smoke.sh` (real Linux, Xvfb) still asserts the
+launched IDLE has **no `-n` flag** (eth0+DHCP → probe runs → round trip works
+→ subprocess mode), pinning the probe's success path; the browser-side failure
+path was verified by the page-side probe above, the user's original repro and
+the new E2E spec (now `-n` → IDLE launches, pointer moves).
 
 ## 3. E2E implication
 

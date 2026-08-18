@@ -152,6 +152,27 @@ EOF
 	sleep 6
 	if kill -0 "$IDLEPID" 2>/dev/null; then
 		echo "IDLE launched and stayed running"
+		# Loopback TCP works on real Linux, so the launcher round-trip
+		# probe must have succeeded and IDLE must run WITH its shell
+		# subprocess (no -n). Assert the real idle3.10 process cmdline
+		# carries no -n flag — a false -n here means the round-trip probe
+		# regressed (the guest dead-accept workaround, plans/display-bug.md
+		# §2.11). The pgrep pattern is escaped so it cannot match this
+		# script body on pid 1 (which mentions idle3.10).
+		IDLE_MAIN=$(pgrep -f "python3\.10 /usr/bin/idle3\.10" | head -1)
+		if [ -n "$IDLE_MAIN" ] && \
+			tr "\0" " " < "/proc/$IDLE_MAIN/cmdline" 2>/dev/null | grep -q -- " -n "; then
+			echo "FAIL: launcher applied -n although loopback works (round-trip probe false negative)" >&2
+			pkill -f idle3.10 2>/dev/null || true
+			kill "$XPID2" 2>/dev/null || true
+			exit 1
+		fi
+		if [ -z "$IDLE_MAIN" ]; then
+			echo "FAIL: could not find the launched idle3.10 process" >&2
+			pkill -f idle3.10 2>/dev/null || true
+			kill "$XPID2" 2>/dev/null || true
+			exit 1
+		fi
 		pkill -f idle3.10 2>/dev/null || true
 	else
 		echo "FAIL: IDLE exited early (log below)" >&2
