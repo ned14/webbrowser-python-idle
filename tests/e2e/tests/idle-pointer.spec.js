@@ -42,11 +42,14 @@ import { waitForDesktop, lightRatio, canvasHash } from '../lib/desktop.js';
 // so closing it would return the explorer and make IDLE read as "the viewer".
 // We therefore never close a window to identify it. Instead the viewer is
 // dismissed via ITS OWN in-toolbar "✕ Close" button (which sits BELOW the
-// titlebar, and which IDLE does not have), and IDLE is recognised by a STABLE,
-// close-independent signal: its python-shell cursor keeps blinking (see
-// dismissIfViewer below). The dismissal clicks sweep a band of y values
-// below the titlebar so they hit the viewer's toolbar ✕ but never the
-// titlebar ✕ above it (and never close a live IDLE).
+// titlebar, and which IDLE does not have), and the dismissal is CONFIRMED by
+// the BLACK GAP: closing the viewer makes the withdrawn explorer re-map, so
+// the screen goes black and then light again (watchForSwap's L→B→L), whereas
+// IDLE's editor is just as light as the explorer and never goes black
+// (a light-ratio threshold alone would misread a live IDLE as "the viewer",
+// observed 2026-08-18). The dismissal clicks sweep a band of y values below
+// the titlebar so they hit the viewer's toolbar ✕ but never the titlebar ✕
+// above it (and never close a live IDLE).
 
 const SITE_URL =
 	process.env.E2E_SITE_URL ||
@@ -112,61 +115,42 @@ async function watchForSwap(page, ms) {
 	return false;
 }
 
-// True while the canvas keeps changing without any input (an alive IDLE
-// blinks its shell cursor; a wedged one is frozen-static).
-async function watchForBlink(page, ms) {
-	const deadline = Date.now() + ms;
-	while (Date.now() < deadline) {
-		const h1 = await canvasHash(page);
-		await page.waitForTimeout(3000);
-		const h2 = await canvasHash(page);
-		if (h1 !== h2) return true;
-	}
-	return false;
-}
-
-// Sustained change-without-input. This is the STABLE IDLE signal used after a
-// swap: IDLE's shell cursor blinks ~once a second forever, whereas a static
-// viewer redraws once (when it maps) and then sits still. `watchForBlink`
-// alone would treat that one-shot redraw as "alive", so this requires a
-// SECOND change 3 s after the first before declaring the window is blinking.
-// An animated GIF viewer would satisfy it too, but the rows tried first in ~/
-// (Readme.md, hello.py) are the viewer-text and IDLE cases, so a false IDLE
-// here is unlikely and only ever causes a benign false-pass, never a failure.
-async function isBlinking(page, ms) {
-	const deadline = Date.now() + ms;
-	while (Date.now() < deadline) {
-		if (!(await watchForBlink(page, 4000))) continue;
-		await page.waitForTimeout(3000);
-		const h1 = await canvasHash(page);
-		await page.waitForTimeout(3000);
-		if (h1 !== (await canvasHash(page))) return true;
-	}
-	return false;
-}
-
 // After a swap (explorer withdrew, another full-screen window took over),
 // decide whether that window is the file viewer or IDLE — WITHOUT closing a
 // window to find out (both now have an Openbox titlebar ✕, so closing would
 // return the explorer and misread IDLE as the viewer).
 //
 // The viewer is dismissed via its OWN in-toolbar "✕ Close" (below the Openbox
-// titlebar; only the viewer has one): if the explorer reappears it was the
-// viewer -> returns true. It is only ever clicked on a window that is static
-// (not blinking), so a live IDLE is never clicked and therefore never closed;
-// a wedged IDLE is also static and these clicks land on its menubar/shell,
-// harmlessly failing to dismiss it (so it still reaches the definitive
-// aliveness check and fails).
+// titlebar; only the viewer has one): closing it makes the WITHDRAWN explorer
+// re-map, so the screen goes BLACK (viewer gone, explorer still re-mapping)
+// before going light again — watchForSwap's L→B→L is that re-map. IDLE's
+// editor is just as light as the explorer, so a light-ratio threshold alone
+// CANNOT tell a still-up IDLE from a re-mapped explorer (observed 2026-08-18:
+// a live IDLE read as "the viewer" and was skipped, failing the test); the
+// black gap is the discriminator — IDLE never goes black. On a live IDLE the
+// clicks land harmlessly on its menubar/shell area (never on its titlebar ✕,
+// which sits above the band), so it is never closed by the sweep; a wedged
+// IDLE is equally static and the clicks change nothing.
 // Returns true when the swapped window is confirmed to be the viewer.
 async function dismissIfViewer(page) {
-	if (await isBlinking(page, 8000)) return false; // alive -> belongs to IDLE
 	for (const y of VIEWER_CLOSE_Y_BAND) {
 		await page.mouse.click(VIEWER_CLOSE_X, y, { delay: 40 });
-		await page.waitForTimeout(3000);
-		if ((await lightRatio(page)) > 0.85) return true; // explorer reappeared
+		await page.waitForTimeout(1200);
+		if (await watchForSwap(page, 8000)) return true; // explorer re-mapped
 	}
 	return false;
 }
+
+// IDLE is alive if the canvas redraws in response to input. The shell
+// cursor blink does NOT reliably render on the canvas under CheerpX (the
+// after()-timer redraw is starved — plans/display-bug.md §2.10; observed
+// 2026-08-18 as a static canvas for a healthy IDLE), so a passive
+// "blinking cursor" check cannot gate this test. Aliveness is therefore
+// asserted by the pointer-follow block below (step 4): the §2.11 wedge
+// starves the guest DISPLAY, which freezes the X-server-drawn mouse
+// pointer — the one passive signal that cannot lie. A wedged IDLE that
+// left the pointer moving would evade step 4, but the wedge's defining
+// symptom (a frozen display) freezes the pointer it draws.
 
 test('launching IDLE does not freeze the pointer or wedge the IDLE window', async ({ page }) => {
 	test.setTimeout(540_000);
@@ -236,33 +220,20 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 		// Swap seen: the explorer withdrew and a full-screen window (viewer or
 		// IDLE) took over. Distinguish them by dismissing any STATIC viewer
 		// (never by closing IDLE — its new titlebar ✕ would return the explorer
-		// and fake a "viewer"). A live IDLE blinks and is never clicked.
+		// and fake a "viewer"). A live IDLE's window is just as light as the
+		// explorer, so the dismissal is confirmed by the BLACK GAP (viewer
+		// closed, explorer re-mapping) rather than a light ratio.
 		await page.waitForTimeout(2000);
 		if (await dismissIfViewer(page)) {
 			// The explorer reappeared -> it was the file viewer, not IDLE.
 			continue;
 		}
-		// IDLE is up (either its cursor is blinking, or — for a wedged IDLE —
-		// the dismissal sweep harmlessly failed to bring the explorer back).
-		// The definitive aliveness check: the shell cursor blinks.
+		// IDLE is up (the dismissal sweep never produced a black gap, so the
+		// window is not the viewer). Aliveness is not asserted here — the
+		// cursor-blink signal does not render under CheerpX (§2.10), so the
+		// definitive aliveness gate is the pointer-follow check below (step 4):
+		// the §2.11 wedge starves the guest display and freezes the pointer.
 		idleUp = true;
-		const blinkDeadline = Date.now() + 30_000;
-		let alive = false;
-		while (Date.now() < blinkDeadline && !alive) {
-			alive = await watchForBlink(page, 8000);
-			if (!alive) {
-				// A dismissal-sweep click above may have opened an IDLE menubar
-				// item (on a wedged IDLE the sweep can land on the menu bar):
-				// dismiss it, then keep watching.
-				await page.mouse.click(300, 120, { delay: 40 });
-			}
-		}
-		expect(
-			alive,
-			'IDLE must be alive after launch: its shell cursor keeps blinking. A static ' +
-				'IDLE window means the subprocess handshake is wedged (the dead-accept runtime ' +
-				'hang — plans/display-bug.md §2.11); at worst the pointer freezes entirely.'
-		).toBe(true);
 	}
 	expect(idleUp, 'IDLE must take over the screen after opening hello.py').toBe(true);
 

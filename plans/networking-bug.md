@@ -1225,3 +1225,18 @@ is the gate: it must pass on the single machine with `CONTROL_HOST=127.0.0.1`
 defaults and no /etc/hosts entry. Re-check the §16.9 "unresolved flake" item
 too — if the two-client heal is still present when the wasm client is next
 rebuilt, the flake may reappear independently of the DERP host.
+
+**2026-08-18 update — the listen-twin gate now passes, after fixing a hard
+page freeze in the page-side `TCPServerSocket` (webvm/src/lib/network.js):**
+`network.spec.js` hung the whole test (600 s timeout at the listen-twin probe)
+because the wrapper's ReadableStream `pull()` awaited the IpStack's
+`waitIncoming()`, which busy-spins the browser's main thread when no
+connection ever arrives — and with the rebuilt tailscale.wasm consuming
+inbound TCP for the node's own IP (§16.9), no connection ever arrives, so ANY
+guest `bind(2)`/`listen(2)` (and the listen-twin probe) froze the page
+indefinitely. The raw IpStack socket binds+listens fine; the freeze was the
+`waitIncoming()` await. The wrapper now polls `accept()` with a 100 ms yield
+instead, so bind+listen never blocks the main thread (the accept path remains
+dead — §16.9's runtime limitation). The E2E gate was re-verified green
+locally with the gateway up (webdav phase): root visit → webvm.lock lease →
+nc-twin connect + HTTP round trip → listen-twin bind+listen, all passing.

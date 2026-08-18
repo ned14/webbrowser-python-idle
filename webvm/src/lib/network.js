@@ -467,31 +467,32 @@ export const networkInterface = {
 				const readable = new ReadableStream({
 					async pull(controller) {
 						for (;;) {
-						let acc;
-						try { acc = sock.accept(); }
-						catch (e) {
-							controller.error(e);
-							try { sock.close(); } catch (x) {}
-							resolveClosed();
-							return;
-						}
-						if (acc) {
-							const remoteAddress = tunExports.dumpIP(acc.addr);
-							// Accepted sockets are already connected:
-							// hand them out as ready-made wrappers.
-							controller.enqueue(connectedTcpSocket(acc.socket, remoteAddress, acc.port, localPort));
-							return;
-						}
-						try { await sock.waitIncoming(); } // EAGAIN — pending connect
-						catch (e) {
-							// Tun torn down while a guest holds a bound
-							// socket: error the stream AND resolve `closed`
-							// (the invariant — see connectedTcpSocket).
-							controller.error(e);
-							try { sock.close(); } catch (x) {}
-							resolveClosed();
-							return;
-						}
+							let acc;
+							try { acc = sock.accept(); }
+							catch (e) {
+								controller.error(e);
+								try { sock.close(); } catch (x) {}
+								resolveClosed();
+								return;
+							}
+							if (acc) {
+								const remoteAddress = tunExports.dumpIP(acc.addr);
+								// Accepted sockets are already connected:
+								// hand them out as ready-made wrappers.
+								controller.enqueue(connectedTcpSocket(acc.socket, remoteAddress, acc.port, localPort));
+								return;
+							}
+							// EAGAIN — a connect is pending but not yet
+							// established. NOTE: `sock.waitIncoming()` must
+							// NOT be awaited here — the IpStack's
+							// waitIncoming busy-spins the browser's main
+							// thread when no connection ever arrives (the
+							// rebuilt tailscale.wasm consumes inbound TCP for
+							// the node's own IP, so the tun never delivers —
+							// plans/networking-bug.md §16.9; observed 2026-08-18
+							// as a hard page freeze on ANY bind+listen). Yield
+							// to the event loop and re-poll accept() instead.
+							await new Promise((res) => setTimeout(res, 100));
 						}
 					},
 					cancel() { try { sock.close(); } catch (e) {} resolveClosed(); },
