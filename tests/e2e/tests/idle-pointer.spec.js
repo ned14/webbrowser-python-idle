@@ -102,15 +102,29 @@ async function rowBands(page) {
 	);
 }
 
-// Watch for the explorer→app swap: light explorer -> black (withdrawn) -> light again.
+// Watch for the explorer→app swap: the explorer withdraws (screen goes
+// BLACK — the Openbox root) and the launched window maps (LIGHT again).
+// Detects the BLACK→LIGHT transition itself rather than the L+B+L+ pattern:
+// on a slow machine the withdraw can complete before the first sample, and
+// an in-process IDLE (-n, the browser-phase path) can keep the screen black
+// for 20-40 s while idlelib boots — a fixed window starting after the
+// double-click would expire mid-black and miss the swap entirely (observed
+// 2026-08-18 in CI). Returns false quickly if the screen never goes black
+// (nothing launched).
 async function watchForSwap(page, ms) {
-	const seq = [];
-	const deadline = Date.now() + ms;
+	const start = Date.now();
+	const blackDeadline = start + 8000; // a launch withdraws within seconds or not at all
+	const deadline = start + ms;
+	let sawBlack = false;
 	while (Date.now() < deadline) {
 		const ratio = await lightRatio(page);
-		seq.push(ratio > 0.3 ? 'L' : 'B');
-		if (/L+B+L+/.test(seq.join(''))) return true;
+		if (ratio > 0.3) {
+			if (sawBlack) return true; // black -> light: the app mapped
+		} else {
+			sawBlack = true; // explorer withdrew; app still mapping
+		}
 		await page.waitForTimeout(200);
+		if (!sawBlack && Date.now() > blackDeadline) return false;
 	}
 	return false;
 }
@@ -187,11 +201,11 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 	// --- 3. Open hello.py in IDLE. Try every row band; for each, double-click
 	// with retries until a swap appears. Classify the swapped app:
 	//   - the file viewer (non-Python opener): dismissed via its in-toolbar ✕
-	//     Close (below the Openbox titlebar) — the explorer then reappears, so
-	//     skip to the next row;
-	//   - IDLE: recognised by its blinking shell cursor (stable, close-
-	//     independent — IDLE now has a titlebar ✕ too, so it can no longer be
-	//     told apart by "does a close click return the explorer").
+	//     Close (below the Openbox titlebar) — the explorer then reappears
+	//     (the black gap), so skip to the next row;
+	//   - IDLE: the dismissal sweep never produces a black gap (its editor is
+	//     light, and its titlebar ✕ is above the sweep band), so it is never
+	//     closed — the row is classified as IDLE.
 	let bands = await rowBands(page);
 	for (let i = 0; i < 10 && bands.length === 0; i++) {
 		await page.waitForTimeout(5000);
@@ -205,7 +219,19 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 		let swapped = false;
 		for (let r = 0; r < 3 && !swapped; r++) {
 			await page.mouse.dblclick(120, rowY, { delay: 60 });
-			swapped = await watchForSwap(page, 15_000);
+			// Generous window: a browser-phase IDLE runs in-process (-n) and
+			// can sit black for 20-40 s while idlelib boots before its window
+			// maps (CI 2026-08-18). watchForSwap's early-return keeps the
+			// nothing-launched case fast.
+			swapped = await watchForSwap(page, 60_000);
+			console.log('idle-diag row', rowY, 'attempt', r, 'swap:', swapped);
+			if (!swapped && (await lightRatio(page)) <= 0.3) {
+				// The screen is black: a launch IS in progress (the explorer
+				// withdrew and the app is still mapping). Wait for it to map
+				// rather than clicking — recovery clicks would corrupt state.
+				swapped = await watchForSwap(page, 60_000);
+				console.log('idle-diag row', rowY, 'black-gap recovery swap:', swapped);
+			}
 			if (!swapped) {
 				await page.mouse.click(DARK_MARGIN.x, DARK_MARGIN.y, { delay: 40 }); // dismiss any menu
 				await page.waitForTimeout(1200);

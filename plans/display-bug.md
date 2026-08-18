@@ -651,6 +651,24 @@ picks subprocess mode only when the tun accepts binds, which depends on the
 flapping register-retry state; the test catches it whenever that state is hit
 and the CI webdav phase (registered client) hits it deterministically.
 
+**2026-08-18 CI hardening of the E2E spec:** two CheerpX behaviours forced
+mechanism changes (the spec was failing CI in the browser phase — no IDLE
+swap ever classified):
+1. **The shell cursor blink does NOT render on the canvas** — the
+   after()-timer redraw is starved (§2.10), so a healthy IDLE is as static on
+   the canvas as a wedged one. The blink-based aliveness assertion was
+   removed; the pointer-follow block is now the aliveness gate (the §2.11
+   wedge starves the guest display and freezes the X-server-drawn pointer).
+2. **The explorer→IDLE swap can keep the screen black for 20-40 s** — a
+   browser-phase IDLE runs in-process (`-n`) and idlelib boots slowly, so the
+   old L+B+L+ swap detector (fixed 15 s window) expired mid-black and the
+   test's recovery clicks corrupted the state. The detector now watches for
+   the BLACK→LIGHT transition itself with a generous window (and a black-gap
+   recovery that waits for the app to map instead of clicking). The
+   viewer-vs-IDLE classification is confirmed by the black gap left when the
+   viewer is closed (the withdrawn explorer re-maps) — a light-ratio
+   threshold alone misreads a live IDLE's light editor as "the viewer".
+
 **Verification:** `tests/rootfs/smoke.sh` (real Linux, Xvfb) still asserts the
 launched IDLE has **no `-n` flag** (eth0+DHCP → probe runs → round trip works
 → subprocess mode), pinning the probe's success path; the browser-side failure
