@@ -1,4 +1,4 @@
-# WebVM guest image: minimal i386 Alpine 3.17 with stdlib-only Python + IDLE
+# WebVM guest image: minimal i386 Alpine 3.24 with stdlib-only Python + IDLE
 # (launched from the file explorer — a stdlib-only Tk app that autostarts at
 # desktop boot and is replaced on screen by IDLE while IDLE runs),
 # the Tk file viewer (images via py3-pillow, text/Markdown via py3-mistune),
@@ -15,7 +15,18 @@
 # Build args default to placeholders so CI and offline builds succeed; deploy-
 # time values are passed by build.sh from .env.
 
-FROM docker.io/i386/alpine:3.17
+FROM docker.io/i386/alpine:3.24
+
+# CheerpX guest fix shims, built in a scratch stage (no compiler in the
+# final image). faccessat-fix.so guards the *at() family against dfd=-1,
+# which CheerpX's faccessat traps on and openrc 0.60+ calls by design
+# (plans/update-to-latest.md Tier B §9.2; see diskimage/faccessat-fix.c).
+FROM docker.io/i386/alpine:3.24 AS shimbuild
+RUN apk add --no-cache gcc musl-dev
+COPY faccessat-fix.c /tmp/faccessat-fix.c
+RUN gcc -O2 -shared -fPIC -o /tmp/faccessat-fix.so /tmp/faccessat-fix.c
+
+FROM docker.io/i386/alpine:3.24
 
 ARG STORAGE_BACKEND=browser
 ARG SYNC_URL=http://100.64.0.1:8082/webdav/
@@ -26,22 +37,38 @@ ARG SAMBA_SHARE=share
 ARG SAMBA_USER=user
 ARG SAMBA_PASS=changeme
 
-# v3.17 is EOL: rewrite BOTH repositories (don't append) so the community repo
-# is enabled and the exact EOL pins are used. dl-cdn.alpinelinux.org is the
-# resolving mirror (still serving v3.17 at pin time); if it ever stops serving
-# EOL versions, switch to https://archive.alpinelinux.org/alpine/v3.17/.
+# v3.24 (supported to 2028-06): rewrite BOTH repositories (don't append) so
+# the community repo is enabled and the exact pins are used. dl-cdn.alpine-
+# linux.org is the resolving mirror; if it ever stops serving v3.24, switch
+# to https://archive.alpinelinux.org/alpine/v3.24/.
 RUN cat > /etc/apk/repositories <<'EOF'
-https://dl-cdn.alpinelinux.org/alpine/v3.17/main
-https://dl-cdn.alpinelinux.org/alpine/v3.17/community
+https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+https://dl-cdn.alpinelinux.org/alpine/v3.24/community
 EOF
 
+# CheerpX guest fix shims (Tier B): faccessat-fix.so guards the *at() family
+# against dfd=-1, which CheerpX's faccessat traps on (openrc 0.60+ calls
+# faccessat(-1, ...) on every service state check). It also implements
+# sigprocmask(SIG_UNBLOCK) via the SIG_SETMASK path that works under
+# CheerpX. It is loaded through LD_PRELOAD — set for the boot chain by
+# rc-preload (inittab) and kept in the exec'd init scripts' env via
+# rc_env_allow="LD_PRELOAD" (/etc/rc.conf, because openrc's env_filter()
+# would otherwise scrub it — the exec'd openrc-run then crashes on
+# faccessat(-1); diagnosed 2026-08-20). See diskimage/faccessat-fix.c.
+COPY --from=shimbuild /tmp/faccessat-fix.so /usr/local/lib/faccessat-fix.so
 # Desktop + tooling. python3-tkinter and the idlelib extraction come from
 # community; everything else from main. xvfb is installed for the
 # in-guest GUI test run (tests/rootfs/smoke.sh runs the file-explorer test
 # suite under Xvfb) — it is not used by the desktop itself.
 # py3-pillow + py3-mistune are the Tk file viewer's image/Markdown engines
 # (see plans/future-feature-ideas.md): Pillow ships PIL.ImageTk + _imagingtk
-# on this arch; both come from the v3.17 community repo, nothing pip.
+# on this arch; both come from the v3.24 community repo, nothing pip.
+# Versions (verified 2026-08-18, v3.24 x86): python3 3.14.7-r1,
+# python3-tkinter 3.14.7-r0, py3-pillow 12.2.0-r0, py3-mistune 3.2.1-r0,
+# tcl/tk 8.6.17-r1, xorg-server/xvfb 21.1.24-r0, openbox 3.6.1-r8,
+# git 2.54.0-r0, openssh-client-default 10.3_p1-r0, busybox-extras
+# 1.37.0-r31, dbus 1.16.2-r2, eudev 3.2.14-r6, font-dejavu 2.37-r6,
+# xterm 410-r0, py3-pip 26.1.2-r0.
 RUN apk add --no-cache \
 	alpine-base \
 	udev-init-scripts \
@@ -51,6 +78,7 @@ RUN apk add --no-cache \
 	xvfb \
 	xinit \
 	xf86-input-libinput \
+	xf86-input-evdev \
 	xrandr \
 	setxkbmap \
 	openbox \
@@ -70,20 +98,24 @@ RUN apk add --no-cache \
 
 # IDLE without the 85 MiB python3-tests dependency: `python3-idle` (community)
 # hard-depends on python3-tests, so extract just the binary + idlelib from the
-# package instead of installing it. The package ships /usr/bin/idle3.10 only —
-# there is no `idle3`.
+# package instead of installing it (verified the same packaging on v3.24:
+# 3.14.7-r0 ships /usr/bin/idle3.14 only — there is no `idle3`).
 RUN apk fetch --no-cache python3-idle && \
 	mkdir -p /tmp/idle && \
 	tar -xzf python3-idle-*.apk -C /tmp/idle && \
-	cp -a /tmp/idle/usr/bin/idle3.10 /usr/bin/ && \
-	cp -a /tmp/idle/usr/lib/python3.10/idlelib /usr/lib/python3.10/ && \
+	cp -a /tmp/idle/usr/bin/idle3.14 /usr/bin/ && \
+	cp -a /tmp/idle/usr/lib/python3.14/idlelib /usr/lib/python3.14/ && \
 	rm -rf /tmp/idle python3-idle-*.apk
 
 # Tcl/Tk workaround (plans/display-bug.md §2.8): override the apk libtcl8.6.so
-# with a locally-built copy from third_party/tcl-8.6.12 + alpine/*.patch. The
-# fix makes the Unix notifier honour select()'s return value (CheerpX leaves
-# stale fd sets populated on a 0 return), so Tcl_DoOneEvent(TCL_DONT_WAIT)
-# drains and tkinter's window.update() terminates.
+# with a locally-built copy from third_party/tcl-8.6.17 + the
+# tcl-notifier-stale-fdset.patch. The override MUST be built from the exact
+# apk version (the apk init.tcl demands `package require -exact Tcl 8.6.17`;
+# the earlier 8.6.18-built lib aborted tkinter — plans/update-to-latest.md
+# §9.2.1; see third_party/README.md). The fix makes the Unix notifier honour
+# select()'s return value (CheerpX leaves stale fd sets populated on a 0
+# return), so Tcl_DoOneEvent(TCL_DONT_WAIT) drains and tkinter's
+# window.update() terminates.
 COPY trace/libtcl8.6.so.patched /tmp/libtcl8.6.so.patched
 RUN cp -f /tmp/libtcl8.6.so.patched /usr/lib/libtcl8.6.so && rm /tmp/libtcl8.6.so.patched
 
@@ -100,7 +132,7 @@ COPY sync/sync-home.sh /usr/local/bin/sync-home.sh
 RUN if [ "$STORAGE_BACKEND" = "samba" ] || [ "$STORAGE_BACKEND" = "webdav" ]; then \
 		chmod +x /usr/local/bin/sync-home.sh && \
 		if [ "$STORAGE_BACKEND" = "samba" ]; then \
-			pip3 install --no-cache-dir pysmb==1.2.10; \
+			pip3 install --no-cache-dir --break-system-packages pysmb==1.2.15; \
 		fi; \
 	else \
 		rm -f /usr/local/lib/webvm-sync/sync.py /usr/local/bin/sync-home.sh; \
@@ -134,6 +166,24 @@ RUN if [ "$STORAGE_BACKEND" = "samba" ]; then \
 # ed25519 keypair is generated at FIRST BOOT (desktop.start) — never baked
 # into the image, which is served unauthenticated to browsers.
 COPY rootfs/home/user/.gitconfig /home/user/.gitconfig
+# /run dirs for OpenRC 0.63 (plans/update-to-latest.md Tier B): openrc's
+# rc_dirfd(open("/run/openrc")) crashes when the dir is absent (the 0.60s
+# svcdir move from /var/run to /run), and the emulated guest cannot mount a
+# tmpfs on /run (init.sh is patched — it no longer exits when the mount
+# fails). Keep /run as a plain directory with the subdirs openrc needs.
+# IMPORTANT: ALL state dirs must pre-exist — openrc's rc_dirfd falls back to
+# mkdirat+openat for a missing dir, and under CheerpX that retry path can
+# leave dirfds[] == -1, after which faccessat(-1) hangs the emulator forever
+# (diagnosed 2026-08-19: the boot stalled at the deptree state scan).
+RUN mkdir -p /run/openrc /run/openrc/starting /run/openrc/started \
+		/run/openrc/stopping /run/openrc/inactive /run/openrc/wasinactive \
+		/run/openrc/failed /run/openrc/hotplugged /run/openrc/daemons \
+		/run/openrc/options /run/openrc/exclusive /run/openrc/scheduled \
+		/run/openrc/init.d /run/openrc/tmp \
+		/run/lock /run/secrets && \
+	chmod 0750 /run/openrc && \
+	chmod 0770 /run/lock
+
 RUN mkdir -p /home/user/.ssh && \
 	chmod 700 /home/user/.ssh && \
 	printf 'Host *\n\tStrictHostKeyChecking accept-new\n' > /home/user/.ssh/config && \
@@ -154,7 +204,7 @@ RUN chmod +x /home/user/.xinitrc && \
 # File explorer (the desktop client): a stdlib-only Tk app autostarted by
 # Openbox on
 # the user's home directory. "Open with IDLE" / double-clicking a .py launches
-# IDLE via /usr/local/bin/idle3.10-launcher and REPLACES the explorer on screen
+# IDLE via /usr/local/bin/idle3.14-launcher and REPLACES the explorer on screen
 # until IDLE exits. The keep-alive daemon relaunches it whenever the last
 # window closes. The tests are installed alongside so the rootfs smoke suite
 # can run them in-guest under Xvfb.
@@ -206,9 +256,32 @@ COPY rootfs/etc/inittab /etc/inittab
 COPY rootfs/etc/network/interfaces /etc/network/interfaces
 COPY rootfs/etc/local.d/desktop.start /etc/local.d/desktop.start
 RUN chmod +x /etc/local.d/desktop.start
-COPY rootfs/usr/local/bin/idle3.10-launcher /usr/local/bin/idle3.10-launcher
-RUN chmod +x /usr/local/bin/idle3.10-launcher
+COPY rootfs/usr/local/bin/idle3.14-launcher /usr/local/bin/idle3.14-launcher
+RUN chmod +x /usr/local/bin/idle3.14-launcher
+# LD_PRELOAD bootstrap for the openrc boot chain (inittab sysinit/boot/
+# default lines run through this wrapper — busybox init cannot set env)
+COPY rootfs/usr/local/sbin/rc-preload /usr/local/sbin/rc-preload
+RUN chmod 0755 /usr/local/sbin/rc-preload
+# rc_env_allow: openrc's env_filter() strips LD_PRELOAD from the exec'd
+# init scripts' environment, which made them crash on faccessat(-1) under
+# CheerpX (no shim loaded). Keep it through (Tier B; see faccessat-fix.c).
+RUN cat >> /etc/rc.conf <<'EOF'
+
+# Tier B (CheerpX guest): keep LD_PRELOAD through openrc env_filter() so the
+# exec'd init scripts inherit the faccessat/sigprocmask fix shim
+# (diskimage/faccessat-fix.c, plans/update-to-latest.md Tier B 9.2).
+rc_env_allow="LD_PRELOAD"
+EOF
+# OpenRC 0.63 bootstrap with the /run tmpfs-mount failure made non-fatal
+# (plans/update-to-latest.md Tier B; see the file header for the diff)
+COPY rootfs/usr/libexec/rc/sh/init.sh /usr/libexec/rc/sh/init.sh
+RUN chmod 0755 /usr/libexec/rc/sh/init.sh
 COPY rootfs/etc/X11/xorg.conf.d/10-cheerpx.conf /etc/X11/xorg.conf.d/10-cheerpx.conf
+# Static input device config (Tier B): the udev input backend finds nothing
+# under CheerpX (shallow emulated sysfs), so the emulated PS/2 mouse and
+# keyboard are attached via explicit evdev InputDevice sections
+# (plans/update-to-latest.md Tier B §9.2).
+COPY rootfs/etc/X11/xorg.conf /etc/X11/xorg.conf
 # Fontconfig aliases for common missing font families (consolas, arial, ...)
 # -> the installed DejaVu families (deterministic Tk/Xft font resolution).
 COPY rootfs/etc/fonts/conf.d/99-webvm-aliases.conf /etc/fonts/conf.d/99-webvm-aliases.conf
@@ -227,15 +300,43 @@ RUN rm -f /.dockerenv /.dockerinit
 RUN echo "$STORAGE_BACKEND" > /etc/webvm-backend
 
 # OpenRC services: udev for the emulated DRM/input devices, dbus for the
-# session bus, the 'local' service so /etc/local.d/*.start runs, and networking.
+# session bus, and the 'local' service so /etc/local.d/*.start runs.
+# NOTE (Tier B): udev-trigger/udev-settle are deliberately NOT added, and
+# `networking` is removed from the boot runlevel:
+#   * Under CheerpX the device nodes already exist (the runtime creates
+#     /dev/input/event* itself); the trigger+settle uevent re-processing
+#     makes udevd churn the emulated event stream (its "Validate module
+#     index" loop never settles) and `udevadm settle` hangs the boot at
+#     "Waiting for uevents".
+#   * `networking` WANTs dev-settle (pulling the hang back in) and its
+#     ioctl-based ifup cannot work under CheerpX anyway ("ip: ioctl
+#     SIOCSIFFLAGS failed"). The guest NIC is configured by
+#     /etc/local.d/desktop.start's eth0 retry loop + udhcpc — the
+#     established data-path mechanism (plans/networking-bug.md).
+#   * udevd itself stays up (sysinit) so Xorg's udev monitor finds the
+#     input devices (verified 2026-08-20).
 RUN rc-update add bootmisc boot && \
 	rc-update add udev sysinit && \
-	rc-update add udev-trigger sysinit && \
-	rc-update add udev-settle sysinit && \
 	rc-update add udev-postmount default && \
 	rc-update add dbus default && \
-	rc-update add local default && \
-	rc-update add networking boot
+	rc-update add local default
+
+# Bake the dependency cache (plans/update-to-latest.md Tier B): openrc
+# regenerates the deptree on the first boot under CheerpX, and that path
+# (deep_mtime_check + utimensat to a bogus future mtime from the skew
+# handling) leaves the runtime in a state where the first service spawn
+# crashes CheerpX's execve emulation (wasm "function signature mismatch",
+# Fault addr==ip==0xffff9fa7; diagnosed 2026-08-20). Running sysinit HERE
+# (under docker, where everything works) writes /run/openrc/deptree with a
+# sane mtime; the exported image then ships it, the guest's deptree is
+# newer than every init script (2026-06-14), and openrc never regenerates
+# or adjusts — the skew path is never taken and the spawn works. sysinit
+# only: running the boot runlevel too would pre-mark its services (incl.
+# networking, which configures eth0 for the tailnet data path) as
+# started/failed and the guest would skip them. Failures here are expected
+# (mount/proc cannot work in the build container) and harmless; the cache
+# + state dirs are what we keep.
+RUN /sbin/openrc sysinit; true
 
 # /etc/resolv.conf: Docker's container-managed bind mount cannot be written or
 # removed at build time, but `docker export` produces an EMPTY resolv.conf in

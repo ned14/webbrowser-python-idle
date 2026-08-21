@@ -721,7 +721,7 @@ class SingleTab(ttk.Frame):
         # The guest image has no xdg-utils, so fall back to per-type openers.
         ext = os.path.splitext(path)[1].lower()
         if ext == ".py":
-            launcher = "/usr/local/bin/idle3.10-launcher"
+            launcher = "/usr/local/bin/idle3.14-launcher"
             if os.path.exists(launcher):
                 subprocess.Popen([launcher, path])
                 return True
@@ -875,14 +875,14 @@ class SingleTab(ttk.Frame):
         anything IDLE created/edited/saved shows up.
 
         "IDLE is gone" is decided by the WINDOW tree, not the process: under
-        CheerpX closing IDLE can leave the idle3.10 process alive (it waits on
+        CheerpX closing IDLE can leave the idle3.14 process alive (it waits on
         its Python-shell subprocess, which a running program like the snake game
         keeps busy), so waiting on the process would never return. See
         _wait_for_idle."""
         procs = []
         for path in paths:
             try:
-                procs.append(subprocess.Popen(["/usr/local/bin/idle3.10-launcher", path],
+                procs.append(subprocess.Popen(["/usr/local/bin/idle3.14-launcher", path],
                                               start_new_session=True))
             except Exception as e:
                 messagebox.showerror("Error", str(e))

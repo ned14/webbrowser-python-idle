@@ -3,7 +3,7 @@
 // The pinned `@leaningtech/cheerpx` npm package is only a thin wrapper that
 // dynamic-imports its core from https://cxrtnc.leaningtech.com/<version>/ by
 // default — an EXTERNAL request the site must not make. This module loads the
-// SAME pinned 1.3.7 runtime from our own origin instead (webvm/cheerpx/, copied
+// SAME pinned 1.3.8 runtime from our own origin instead (webvm/cheerpx/, copied
 // into the served build by viteStaticCopy). The runtime's own modules resolve
 // relatively against the loaded cx.esm.js, so everything stays same-origin.
 //
@@ -13,7 +13,7 @@
 // SvelteKit /_app/ asset dir) rather than a root-absolute path. The dynamic
 // import goes through `new Function` so the bundler never rewrites the URL
 // (the browser resolves the final string against the page origin).
-const VERSION = "1.3.7";
+const VERSION = "1.3.8";
 const dynImport = new Function("x", "return import(x)");
 const appDir = import.meta.url.indexOf("/_app/");
 const siteBase = appDir === -1 ? "" : import.meta.url.slice(0, appDir);

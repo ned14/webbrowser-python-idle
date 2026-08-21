@@ -107,7 +107,7 @@ docker rm -f webvm-guest-export >/dev/null
 # --- 3. Build the ext2 helper image (e2fsprogs, cached) --------------------
 echo "==> Preparing ext2 helper"
 docker build -t "$HELPER_TAG" - >/dev/null <<'EOF'
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs && rm -rf /var/lib/apt/lists/*
 EOF
 
@@ -184,6 +184,11 @@ fi
 # cacheId of a byte-identical ext2).
 FINGERPRINT_INPUT=$( \
 	cat diskimage/Dockerfile; \
+	# The CheerpX fix shim source is COPY'd into the image via the Dockerfile
+	# build stage — its content must churn the cacheId like any other image
+	# input (a changed shim with an unchanged Dockerfile would otherwise let
+	# stale IndexedDB overlays serve the old guest).
+	cat diskimage/faccessat-fix.c 2>/dev/null; \
 	find diskimage/rootfs diskimage/config diskimage/scripts diskimage/sync \
 		diskimage/python-examples \
 		-type f -not -path '*/.git/*' -not -name '*.pyc' -not -path '*/__pycache__/*' \

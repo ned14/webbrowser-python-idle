@@ -6,6 +6,51 @@ Docker Hub tag APIs, GitHub releases APIs, the CheerpX CDN
 release feeds. Versions below were verified live on 2026-08-16; re-verify
 anything marked [verify at implementation] when the pin changes.
 
+> **Implementation status (2026-08-21):** **Tier A COMPLETE AND Tier B
+> COMPLETE.** All A1–A7 shipped and re-validated; Tier B (guest on Alpine
+> 3.24, Python 3.14, Tcl/Tk 8.6.17, Pillow 12, mistune 3, openbox) is DONE:
+> the openrc 0.63/CheerpX boot blockers were root-caused to five
+> syscall-emulation defects and fixed in one LD_PRELOAD shim +
+> image changes (see §9.5.1), and the final gate ran green on 2026-08-21 —
+> unit ×92, rootfs smoke ×4 backends, server integration (incl.
+> join-test-client), Playwright browser phase **9/9** + webdav phase
+> **12/12** (the handoff's "webdav data path" failure was an artifact of
+> running webdav-phase specs against a browser-mode guest — §12/21(34) in
+> `plans/webvm_implementation.md` records the resolution), shellcheck +
+> yamllint. Debug artifacts removed. Tier C remains outstanding
+> (deferred by design; frontend framework majors).
+
+> **SESSION HANDOFF — 2026-08-19 20:06 (Tier B in progress, E2E blocked)**
+> Work state is saved here so a fresh session can resume without re-deriving
+> the diagnosis. See §5 "Tier B implementation status + openrc/CheerpX
+> diagnosis" at the end of this file for the full record, and §5.4 for the
+> exact resume checklist.
+
+> **SESSION HANDOFF — 2026-08-20 20:25 (Tier B boot BLOCKER SOLVED; browser
+> E2E 9/9 GREEN; webdav-phase data path REMAINS the only failure)**
+> The openrc/CheerpX boot blocker from the 2026-08-19 handoff is FIXED —
+> root-caused to FIVE distinct CheerpX syscall-emulation defects, all
+> worked around in one LD_PRELOAD shim (diskimage/faccessat-fix.c) + three
+> image changes. The browser-phase Playwright suite passes 9/9; the webdav
+> phase (network.spec + sync.spec) still fails because the guest data path
+> does not reach the gateway despite the page-side tailnet client reaching
+> Running. §9.5 is the full resumption record: what was fixed and how,
+> what is still open, the exact rebuild/test loop, and every debug artifact
+> that must be reverted before the Tier B gate.
+>
+> **RESOLUTION — 2026-08-21 (Tier B COMPLETE):** §9.5.3's "webdav data
+> path" failure is RESOLVED and the whole Tier B gate is green. The
+> failure was an artifact of the debug loop: the webdav-phase specs were
+> being run against a BROWSER-mode guest build, whose `/etc/webvm-backend`
+> is `browser` — `desktop.start` then never starts the sync agent, so
+> `webvm.lock` can never land on the backend, no matter how healthy the
+> tailnet is. Rebuilding the guest with `./build.sh webdav` (matching the
+> .env deployment) makes network.spec + sync.spec pass end to end. Final
+> results: browser phase 9/9, webdav phase 12/12, unit 92/92, rootfs smoke
+> ×4, integration.sh PASS, shellcheck/yamllint clean, all §9.5.5 debug
+> artifacts removed. Full record in `plans/webvm_implementation.md`
+> §12/21(34).
+
 Non-negotiable repo rules still apply: HTTPS only; HOSTNAMES ARE BANNED
 (`tests/unit/test_scripts.py::test_control_host_defaults_consistent` must stay
 green); no secrets committed; no `#authKey` without a matching `controlUrl`;
@@ -329,3 +374,446 @@ lowest-urgency tier. Do NOT mix with Tier A/B. If/when executed:
 - Unverified-at-write-time (verify when changing): GitHub Actions latest
   majors; headscale 0.29.3 `config-example.yaml` exact keys; `python3-idle`
   3.14.7 package layout; tcl 8.6.18 patch application on Alpine 3.24's 8.6.17.
+## 9. Tier B implementation status + openrc/CheerpX diagnosis (SESSION HANDOFF 2026-08-19 20:06)
+
+Work was paused mid-Tier-B with the browser E2E still blocked on a guest boot
+hang. Everything below is the current truth of the working tree (git status:
+all Tier A files + the Tier B files listed in §9.1; debug artifacts listed in
+§9.3 must be reverted before finishing).
+
+### 9.1 Completed Tier B work — VERIFIED GREEN (docker-side)
+
+- **B1**: `diskimage/Dockerfile` base `i386/alpine:3.17` → `i386/alpine:3.24`
+  (3.24.1), repos block rewritten to v3.24 main+community.
+- **B2**: package versions auto-moved (verified 2026-08-18 on v3.24 x86):
+  python3 3.14.7-r1, python3-tkinter 3.14.7-r0, python3-idle 3.14.7-r0,
+  py3-pillow 12.2.0-r0, py3-mistune 3.2.1-r0, py3-pip 26.1.2-r0,
+  tcl/tk 8.6.17-r1, xorg-server/xvfb 21.1.24-r0, openbox 3.6.1-r8,
+  git 2.54.0-r0, openssh-client-default 10.3_p1-r0, busybox-extras
+  1.37.0-r31, dbus 1.16.2-r2, eudev 3.2.14-r6, font-dejavu 2.37-r6,
+  xterm 410-r0. `python3-idle` still hard-depends on `python3-tests` → the
+  apk-fetch+tar trick stays (package ships only `/usr/bin/idle3.14` + `idlelib`).
+- **B3a**: `idle3.10` → `idle3.14` repo-wide (launcher renamed, file-explorer.py,
+  keep-file-explorer.sh, smoke.sh, CI debugfs path, idle-pointer.spec, README).
+- **B3b**: third_party fork moved to **tcl-8.6.17 + tk-8.6.17** (NOT 8.6.18 —
+  see §9.2 item 1), `libtcl8.6.so.patched` rebuilt from 8.6.17 sources with
+  ONLY the `tcl-notifier-stale-fdset.patch` applied (the other three aports
+  patches are upstreamed in 8.6.17/8.6.18 — verified in source), committed to
+  `diskimage/trace/libtcl8.6.so.patched`; APKBUILDs updated to 3.24-stable +
+  8.6.17 sha512sums; `third_party/README.md` rewritten.
+- **B3c**: `diskimage/scripts/file-viewer.py` mistune 2→3 adapter — mistune
+  3.2.1 has NO `AstRenderer`; the walker now reads both token shapes
+  (`raw` vs `text`, `attrs` dicts, `blank_line`/`linebreak`, image alt in
+  first child). Viewer suite PASS ALL under Xvfb in the guest.
+- **B3d**: pysmb install now `pip3 install --break-system-packages` (PEP 668 on
+  Alpine 3.24).
+- **B3e/f**: `rootfs smoke PASS` for ALL FOUR backends (browser, samba, webdav,
+  none) on the 3.24 guest, incl. real-IDLE launch + keep-alive relaunch; unit
+  suite 92/92 on python:3.14-alpine; webdav server integration PASS.
+- Guest-side fixes baked into `diskimage/` for the 3.24 boot (see §9.2):
+  `/run` state dirs + patched `init.sh`.
+
+### 9.2 The openrc 0.63.2/CheerpX boot diagnosis (chronological findings)
+
+The Alpine 3.24 guest boots fine under docker but the CheerpX E2E boot
+(browser + webdav phases) fails. Three distinct blockers were found and fixed;
+one remains:
+
+1. **Tcl fork must be 8.6.17, not 8.6.18**: the first attempt built the
+   patched lib from 8.6.18 sources; the guest aborts tkinter with
+   `package require -exact Tcl 8.6.17` version conflict (the apk init.tcl
+   demands an exact match). The override library must be built from the
+   exact apk version → 8.6.17. (Plan's "8.6.18" note is superseded.)
+2. **openrc 0.63 crashes when `/run/openrc` is missing**: 0.60s moved the
+   svcdir from /var/run/openrc to /run/openrc; `rc_dirfd()` caches dirfds and
+   the missing dir left `dirfds[] = -1`, then `faccessat(-1)` **hangs the
+   CheerpX emulator forever**. FIX: `diskimage/Dockerfile` bakes
+   `/run/openrc/{starting,started,stopping,inactive,wasinactive,failed,
+   hotplugged,daemons,options,exclusive,scheduled,init.d,tmp}` + `/run/lock`
+   + `/run/secrets` (ALL state dirs — see item 4).
+3. **openrc 0.63's `init.sh` aborts sysinit** when it cannot mount a tmpfs on
+   /run (`mount(2)` = ENOSYS under CheerpX; "Can't continue." + exit 1).
+   FIX: `diskimage/rootfs/usr/libexec/rc/sh/init.sh` (NEW file) patches the
+   abort to a warning + `eend 0`; the Dockerfile COPYs it over the apk file
+   and chmods 0755 (the file header documents the diff).
+ 4. **SUPERSEDED — was "openrc boot spins in librc `rm_dir()`"** (see §9.5:
+    the 2026-08-20 session SOLVED this — the true cause was five CheerpX
+    syscall-emulation defects, root-caused with the rebuilt trace shim:
+    faccessat(-1) wild-call, sigprocmask(SIG_UNBLOCK) wild-call,
+    ppoll always-fails, setsockopt(SO_PASSCRED) busy-loop, and openrc's
+    env_filter() scrubbing LD_PRELOAD. All fixed in
+    `diskimage/faccessat-fix.c` + rc_env_allow + rc-preload/inittab. The
+    history below is kept for reference; do NOT re-derive it.)
+   (librc.c:139) right after "Caching service dependencies ... [ ok ]":
+   - Symptom: with udev removed from sysinit, `openrc sysinit` COMPLETES
+     (S=0); `openrc boot` hangs even with an EMPTY boot runlevel (bootmisc +
+     networking removed too). The trap reports
+     `Fault addr affdf000, ip afffee10, proc /sbin/openrc`
+     (both spontaneous crashes and after `kill -SEGV` of the spinning pid —
+     the reported ip is the spin location). addr2line of the candidate
+     offsets resolves the spin to **`rm_dir` (librc.c:139, recursive dir
+     remover)**; the wild read at base-0x1000 and the recursion pattern
+     point at a `readdir`/getdents loop (CheerpX returning a stale/looping
+     dirent on one of the /run/openrc state dirs) or unbounded recursion.
+     The last traced syscall before the spin was
+     `openat(svcdirfd, "started", O_RDONLY|O_DIRECTORY|O_CLOEXEC)`.
+   - Diagnostic tooling that WORKED in the guest shell (boot cmd=/bin/sh):
+     LD_PRELOAD syscall-trace shims (open/openat/faccessat/mount/poll/
+     read/fstat/mkdirat/close wrappers + dl_iterate_phdr module dump +
+     `_Unwind_Backtrace` on matching paths — `diskimage/segv-shim.c`, built
+     in a scratch i386 container via `/tmp/shim.Dockerfile`, COPY'd into the
+     debug image); `kill -SEGV` on the spinning process to extract its eip
+     via the trap report; dl_iterate_phdr to get module bases;
+     openrc-dbg/musl-dbg packages + addr2line (bases: openrc 0x55555000,
+     musl 0x55560000, librc 0xaffee000, libeinfo 0xaffe8000).
+   - Tooling that does NOT work under CheerpX: gdb (ptrace unimplemented),
+     strace (same), busybox `timeout` kill (setitimer/SIGALRM never fires —
+     a timed-out child is never killed; the wrapper only returns when the
+     child exits on its own), `setitimer` ticks in the shim (never fire),
+     guest SIGSEGV handlers (CheerpX converts the fault to the wasm trap and
+     never delivers the signal), `/proc/self/maps` (only `[stack]`),
+     `/proc/<pid>/wchan`, `/proc/<pid>/stat` details.
+   - Also observed (benign, not boot-relevant): python3 fails at startup with
+     "Fatal Python error: error evaluating path" when the process's initial
+     cwd is the CheerpX bootstrap cwd (unresolvable — `pwd` prints nothing);
+     `cd /` fixes it. Every real desktop process starts from a valid cwd, so
+     the boot is unaffected — but the page's first process (the boot cmd)
+     sees the broken cwd. NOTE: the LAST shim experiment (readdir/fstatat/
+     unlinkat wrappers) produced an EMPTY `/tmp/shim.log` — the shim did not
+     load or its constructor failed (needs a check before trusting it; the
+     earlier open/openat/faccessat wrapper version DID produce logs).
+   - Untested leads for the remaining blocker (in order of cost):
+     a. Wrap `readdir`/`fdopendir`/`closedir` (musl exports real functions)
+        again but verify the shim actually loads (check `/tmp/shim.log`
+        exists + `[SHIM] started` line, run `LD_PRELOAD=... ls /run/openrc`
+        as a self-test first). If readdir loops on a specific dir, pin which
+        (started? scheduled? options?) and either pre-create a marker entry
+        or remove the dir from the image.
+     b. If it is a recursion issue in rm_dir: check whether `rm_dir` spins on
+        `/run/openrc/options/<svc>` or `daemons/<svc>` (librc.c:965-966,
+        called from `rc_service_mark(STOPPED)`) — those dirs are created at
+        runtime; consider baking them too.
+     c. Pragmatic fallback (plan-sanctioned spirit): pin openrc from an older
+        Alpine branch (e.g. v3.22 openrc 0.59.x) into the 3.24 image via an
+        extra repo + `apk add openrc=0.59...` (component pin, base stays
+        3.24). v3.23 ALSO ships openrc 0.63.2, so dropping the base to 3.23
+        does NOT help (verified).
+     d. If openrc 0.63 is unfixable under CheerpX, fall back to pinning
+        openrc 0.44.x-era behavior is NOT viable via the base OS; the
+        component pin (c) is the right lever.
+
+### 9.3 CURRENT WORKING-TREE STATE (debug artifacts — revert before finishing)
+
+- `webvm/config_public_alpine.js` — currently `cmd = "/sbin/init"`
+  (CORRECT; the debug overrides `/bin/sh` / `boot-diag.sh` were reverted
+  as part of the 2026-08-20 fixes — if it is ever seen otherwise, restore
+  it before any E2E run).
+- `diskimage/Dockerfile` — contains a `# DEBUG-ONLY shim (temporary)`
+  `COPY segv-shim.so /usr/local/lib/segv-shim.so` block (remove) and
+  `strace` was removed already (verify with `grep -n "segv\|strace"`).
+- `diskimage/segv-shim.c` + `diskimage/segv-shim.so` — untracked debug
+  artifacts (delete; source of truth for the shim is in git history if
+  needed).
+- `tests/e2e/tests/diag.spec.js` (untracked) — debug Playwright spec
+  (delete before finishing).
+- Server stack currently serves the DEBUG build (cmd=/bin/sh guest). The
+  `.env` is the webdav deployment with the old headscale keys (volume
+  migrated to 0.29.3 in Tier A — still healthy).
+- The rebuild loop used (each edit → this):
+  `./build.sh browser && cd webvm && WEBVM_MODE=browser
+  WEBVM_IMAGE_BUILD=$(cat ../webvm/custom-disk-images/image-build.txt)
+  npm run build && cd .. && docker compose --profile tailnet build server &&
+  docker compose up -d server --wait --wait-timeout 120`
+
+### 9.4 RESUME CHECKLIST
+
+1. Rebuild the readdir-trace shim self-test first (§9.2 item 5a) OR jump to
+   the openrc component pin (c) — time-box the readdir hunt to ~30 min.
+2. Once `openrc boot`/`default` complete under CheerpX (the terminal should
+   show `* Starting udev ...`, `* Starting dbus ...`, `* Starting local ...`),
+   revert the debug state: `git checkout webvm/config_public_alpine.js`,
+   remove the Dockerfile shim block + `diskimage/segv-shim.{c,so}` +
+   `tests/e2e/tests/diag.spec.js`, rebuild guest+frontend+server.
+3. Re-run the FULL gate: `make test-unit`, rootfs smoke ×4,
+   `tests/server/integration.sh` (webdav), Playwright E2E browser phase
+   (boot/desktop/error-overlay/idle-pointer/no-egress — expect 9) then webdav
+   phase (network.spec + sync.spec — expect 11).
+4. Update docs: README "Pinned versions" (add Alpine 3.24 + the guest
+   package set), `plans/webvm_implementation.md` §12/21 add the Tier B
+   entry (mirror §12/21(33) style), this file's status banner.
+5. Tier B remaining scope from the original plan §3/B3 that is NOT yet done:
+   verify the desktop boot re-validation items once the boot works (Xorg
+   root launch, inittab, xinitrc, openbox autostart, desktop.start
+   wait-for-tailnet, the §12/22-25 stack) — the smoke tests cover the
+   docker side; the E2E covers the CheerpX side. Tier C (frontend majors)
+   is untouched.
+
+### 9.5 RESUMPTION HANDOFF — 2026-08-20 20:25 (boot fixed; webdav data path open)
+
+**Status banner: the openrc boot blocker is SOLVED and the browser-phase E2E
+is fully green (9/9). The only remaining Tier B failure is the webdav-phase
+guest data path (network.spec + sync.spec).** Everything below is current
+truth (working tree at this timestamp; uncommitted changes include all of
+Tier A + Tier B work + the debug artifacts listed in §9.3/§9.5.5).
+
+#### 9.5.1 ROOT CAUSE — five CheerpX syscall-emulation defects (all FIXED)
+
+The 2026-08-19 handoff's "rm_dir readdir spin" was a red herring: the trace
+shim (rebuilt as `segv-shim.c` v4 — constructor-free, lazy raw-syscall
+`/tmp/shim.log`, mirrored to `/dev/console` so the page xterm shows it even
+when the guest wedges) revealed the boot actually CRASHED at
+`faccessat(-1, "devfs", F_OK, 0)` — a wild call in the child. The full causal
+chain, each fixed:
+
+1. **`faccessat(-1)` traps CheerpX** (wasm "function signature mismatch",
+   `Fault addr==ip==0xffff9fa7`). openrc 0.60+ calls `faccessat(-1, ...)` BY
+   DESIGN: the service state table (`src/shared/misc.h`) maps
+   RC_SERVICE_STOPPED and RC_SERVICE_CRASHED to RC_DIR_INVALID, and
+   `rc_dirfd(RC_DIR_INVALID)` returns -1; `rc_service_state()` then calls
+   `faccessat(-1, <svc>, F_OK, 0)` for EVERY service on every runlevel
+   change. The old 3.17 guest's openrc 0.55.1 used path-based `exists()`
+   (no faccessat) — which is why this only appeared with the 3.24 upgrade.
+   FIX: shim short-circuits the whole `*at()` family to errno=EBADF for
+   `dfd < 0 && dfd != AT_FDCWD` (exactly the kernel's answer).
+2. **`sigprocmask(SIG_UNBLOCK)` traps CheerpX** (same wild-call signature,
+   in openrc's `exec_service()` child right before exec: it unblocks the
+   full mask with `SIG_UNBLOCK` after the fork). FIX: implement SIG_UNBLOCK
+   via the working SIG_SETMASK branch — read the current mask with
+   `sigprocmask(SIG_SETMASK, NULL, &cur)`, clear the requested bits, write
+   back. (A naive "SIG_UNBLOCK → no-op" left all signals blocked in the
+   child and the exec'd init scripts misbehaved; the faithful conversion is
+   what works.)
+3. **`ppoll` returns -1/errno=0 (never waits, never reports ready)** while
+   `poll` works. GLib's `g_poll` uses ppoll, so openbox/dbus main loops
+   spun with an endless "poll(2) failed due to: Function not implemented"
+   flood and windows never mapped. FIX: shim converts `ppoll` → `poll`
+   (timespec → ms, infinite when NULL, sigmask ignored).
+4. **`setsockopt(SOL_SOCKET, SO_PASSCRED)` returns EPROTONOSUPPORT** and
+   CheerpX logs an endless "TODO: SYS_SETSOCKOPT" retry loop — udevd's
+   netlink setup busy-spun and wedged the whole emulator (the shell froze
+   seconds after starting udevd). FIX: shim fakes success (returns 0) for
+   exactly `SOL_SOCKET/SO_PASSCRED`; nothing in the guest depends on real
+   credential passing.
+5. **openrc's `env_filter()` scrubs LD_PRELOAD** from exec'd init scripts'
+   environments — so even with the shim set for `/sbin/openrc`, the
+   exec'd `/etc/init.d/*` (openrc-run) ran WITHOUT it and crashed on
+   faccessat(-1) again (this was the last "mystery": the child died with
+   no traced syscalls because the shim wasn't loaded). FIX: `/etc/rc.conf`
+   gains `rc_env_allow="LD_PRELOAD"` so the shim survives into the init
+   scripts. (Tried `/etc/ld.so.preload` first — it loaded into EVERY
+   process and broke the openrc parent itself under CheerpX; reverted.)
+
+**Image/infra changes that were also required (each independently verified):**
+
+6. **udev-trigger/udev-settle removed from the boot, `networking` removed
+   from the boot runlevel.** Under CheerpX the device nodes already exist
+   (the runtime creates `/dev/input/event*` itself); `udevadm trigger`
+   re-processing makes udevd churn an endless "Validate module index" loop
+   and `udevadm settle` hangs the boot at "Waiting for uevents to be
+   processed" forever. `networking` WANTs dev-settle (pulling the hang
+   back in) and its ioctl-based ifup can't work under CheerpX anyway — the
+   guest NIC is configured by `/etc/local.d/desktop.start`'s eth0 retry
+   loop + udhcpc (the established mechanism). udevd itself stays up
+   (sysinit) for Xorg's udev monitor. Dockerfile rc-update block is now:
+   `bootmisc boot; udev sysinit; udev-postmount default; dbus default;
+   local default`.
+7. **Xorg's udev input backend finds NO devices under CheerpX** (shallow
+   emulated sysfs — no `/sys/devices/...` paths, no `device/name`
+   attributes), so no pointer/keyboard attached and the explorer's
+   double-click never dispatched. FIX: `xf86-input-evdev` added +
+   `diskimage/rootfs/etc/X11/xorg.conf` (NEW, static): `AutoAddDevices
+   false` + explicit `InputDevice` sections — event0 = CheerpXMouse
+   (emulated i8042 PS/2 mouse), event1 = CheerpXKeyboard, both `Driver
+   "evdev"` with raw device paths, wired via ServerLayout. (First attempt
+   referenced a nonexistent Screen section → "Data incomplete in file
+   /etc/X11/xorg.conf"; the layout now has only the two InputDevice
+   entries.) Verified: Xorg log shows both devices attached; canvas
+   pointer moves; desktop + idle-pointer specs pass.
+8. **`build.sh` fingerprint did NOT include `diskimage/faccessat-fix.c`**
+   — a changed shim with an unchanged Dockerfile produced the same cacheId
+   and stale IndexedDB overlays served the OLD guest (this made the
+   setsockopt fix "not take" until the fingerprint was fixed). FIX:
+   `cat diskimage/faccessat-fix.c` added to FINGERPRINT_INPUT in build.sh.
+9. **Baked deptree**: `RUN /sbin/openrc sysinit; true` added in the
+   Dockerfile AFTER the rc-update block so `/run/openrc/deptree` ships in
+   the image (sysinit only — NOT boot, which would pre-mark networking as
+   started/failed). This is now mostly cosmetic: the guest still
+   regenerates due to the clock-skew path (`Adjusting mtime of
+   '/run/openrc/deptree' to ... 2695` — CheerpX `clock_gettime(REALTIME)`
+   returns year 2695; `date` is correct, so it's a gettimeofday-vs-clock
+   quirk; benign, boot proceeds). Keep the bake (saves a regen) but don't
+   chase the 2695 — it is cosmetic.
+
+**The fix shim today (`diskimage/faccessat-fix.c`, built in the Dockerfile
+`shimbuild` stage, installed as `/usr/local/lib/faccessat-fix.so`):**
+`bad_dfd→EBADF` for faccessat/unlinkat/fstatat/mkdirat/openat/renameat/
+symlinkat/readlinkat/utimensat; faithful SIG_UNBLOCK→SETMASK conversion;
+ppoll→poll; setsockopt(SO_PASSCRED)→0. Loaded via
+`/usr/local/sbin/rc-preload` (inittab sysinit/boot/default lines run through
+it — busybox init can't set env) + `rc_env_allow="LD_PRELOAD"` in rc.conf.
+Debug-only `segv-shim.so` (trace shim) is ALSO in the image but is only
+activated by explicitly setting LD_PRELOAD to it (the inittab wrapper does
+not include it) — the boot runs shim-only.
+
+#### 9.5.2 VERIFIED GREEN (current stack)
+
+- Browser-phase Playwright: **9/9 PASS** (boot.spec 3, desktop.spec 1,
+  error-overlay.spec 1, idle-pointer.spec 1, persistence.spec 2, no-egress
+  in boot.spec). Run with the stack as described in §9.5.4.
+- The full boot chain under CheerpX: `/sbin/init` → openrc sysinit/boot/
+  default → udevd up → dbus → local → desktop.start → Xorg (KMS FB
+  1344x900x32, both static input devices) → openbox → file explorer (light
+  window fills the canvas) → double-click a .py row → explorer withdraws →
+  IDLE maps (in-process `-n` mode via idle3.14-launcher).
+- Guest docker-side: `openrc sysinit`/`boot` run fine in the image; udevd
+  runs under the shim (verified manually with `rc-service udev start`).
+
+#### 9.5.3 RESOLVED — webdav-phase guest data path (was "the ONLY remaining failure")
+
+> **RESOLVED 2026-08-21:** see the banner above — the failure was the
+> browser-mode guest build (no sync agent), not a data-path defect. With a
+> webdav-built guest, network.spec + sync.spec pass. The diagnosis below
+> is kept as the record of the investigation (its page-side observations
+> remain valid documentation of the tun/driver behavior).
+
+Symptom (original): `network.spec` (root visit → baked config auto-wires
+tailnet → desktop up → delete webvm.lock → poll for it to reappear via the
+guest sync agent) times out after 240 s: the lock NEVER reappears; same for
+`sync.spec`. Everything page-side works:
+
+- Tailnet client reaches **Running**: two `up: starting backend` lines
+  (driver autoConf+up AND the cheerpOSNetInit heal — both start, both reach
+  `Switching ipn state Starting -> Running`; headscale shows the node
+  online at 100.64.x.x).
+- `window.cjTailscaleSocket`/`parseIp`/`adapter` are all present.
+- Host-side backend is fine: `curl -u webdav:webdavpass
+  http://127.0.0.1:8082/webdav/webvm.lock` → 404 (fast); rapid polls fine;
+  Playwright `request.get` to 8082 works standalone.
+- BUT the guest never gets eth0: the guest console shows NO udhcpc/eth0
+  activity, and the guest's connect(2) data path never completes — the
+  sync agent's `wait_for_tailnet` never succeeds, so no lock PUT.
+
+Notes from the debug session:
+- The gateway 443/8082/8443 socat relays are correct (443→server:443,
+  8082→server:8082, 8443→server:8443; gateway reaches the control plane at
+  GATEWAY_CONTROL_IP=172.28.0.10). The 8082 relay was flaky once (stale
+  socat; `docker compose --profile tailnet up -d --force-recreate gateway`
+  fixed it — if Playwright reports "socket hang up" on 8082, recreate the
+  gateway first).
+- headscale node table has ~909 stale nodes (ephemeral cleanup lag) —
+  cosmetic; the current session registers fine.
+- The networking-bug.md §16.8 "heal" (second autoConf+up via
+  cheerpOSNetInit) IS running (2 clients) but does NOT heal the guest data
+  path in this session — different from the 2026-08-16 observations. This
+  is the exact behavior to investigate next.
+- The page-side `nc` twin probe in network.spec (drive cjTailscaleSocket
+  directly: bind, connect(parseIp('100.64.0.1'), 8082), waitOutgoing) has
+  NOT yet been run manually in this session — run it first to bisect
+  page-side driver vs guest-side tun glue:
+  ```
+  const sock = new window.cjTailscaleSocket();
+  sock.bind(0);
+  sock.connect(window.cjTailscaleParseIp('100.64.0.1'), 8082);
+  sock.waitOutgoing().then(() => console.log('SYN-OK'));
+  ```
+- Also untested this session: `nc -z 100.64.0.1 8082` INSIDE the guest
+  (the boot diag shell) to see whether the guest connect hangs or errors.
+
+Next-step leads (in order of cost):
+a. Manual page-side socket probe (above) — if SYN-OK, the driver/tun is
+   fine and the problem is the guest's eth0/tun glue (runtime creates the
+   NIC only when...? investigate the tun init after the two autoConf+up
+   calls); if it hangs, the driver's netstack is the problem.
+b. Guest-side `nc -z 100.64.0.1 8082` (busybox nc) in the boot shell with
+   the shim set — confirm where the guest connect stops.
+c. Compare against the 2026-08-16 state: what made the heal work then
+   (2/2 runs) vs now (0/2)? Diff: the guest image changed massively
+   (openrc fix shims, static Xorg input, udev-trigger removal) — but the
+   page-side driver path is unchanged; the browser runtime is the same
+   1.3.8. Possibly the guest's earlier socket attempts now behave
+   differently because udevd holds a netlink socket, or the removed
+   `networking` service changed something.
+d. Check whether `window.cjTailscaleSocket` from the HEALED (second) client
+   is what the core hands the guest; the network.js comment says the core's
+   own cheerpOSNetInit sets the globals used by guest connect(2).
+
+#### 9.5.4 THE REBUILD / TEST LOOP (exact commands)
+
+- Build guest + ext2 (browser mode overrides .env's STORAGE_BACKEND=webdav):
+  `./build.sh browser`
+- Fingerprint: `cat webvm/custom-disk-images/image-build.txt` (current:
+  `40bd8b569d69`; it CHANGES when faccessat-fix.c or the Dockerfile/rootfs
+  change — always read it fresh).
+- Frontend: `cd webvm && WEBVM_MODE=browser WEBVM_IMAGE_BUILD=$(cat custom-disk-images/image-build.txt) npm run build`
+- Server: `docker compose build server && docker compose up -d server --wait --wait-timeout 120`
+- Gateway (for webdav phase): `docker compose --profile tailnet up -d gateway` (add `--force-recreate` if the 8082 relay flakes).
+- Browser E2E: `cd tests/e2e && npx playwright test tests/boot.spec.js tests/desktop.spec.js tests/error-overlay.spec.js tests/idle-pointer.spec.js tests/persistence.spec.js --reporter=line --timeout=240000`
+- Webdav E2E (from repo root, with real secrets — do not commit):
+  ```
+  AK=$(grep '^HEADSCALE_PREAUTHKEY=' .env | cut -d= -f2)
+  WEBDAV_URL="https://127.0.0.1:8081/alpine.html#authKey=${AK}&controlUrl=https://127.0.0.1:8443&syncUrl=http://100.64.0.1:8082/webdav/&syncUser=webdav&syncPass=webdavpass"
+  cd tests/e2e && E2E_WEBDAV_URL="$WEBDAV_URL" E2E_GATEWAY_IP=100.64.0.1 \
+    E2E_WEBDAV_BASE="http://127.0.0.1:8082/webdav/" E2E_WEBDAV_USER=webdav E2E_WEBDAV_PASS=webdavpass \
+    npx playwright test tests/network.spec.js tests/sync.spec.js --reporter=line --timeout=300000
+  ```
+- The guest image build needs the shim compile stages; if a standalone
+  shim edit is needed, build it in a minimal context dir (the full
+  `diskimage/` context FAILS on macOS with an xattr error):
+  `cp diskimage/faccessat-fix.c /var/folders/5s/4zr1hh3j76bbmmhx3gl_5wn40000gn/T/kilo/fixctx/ && docker build --platform=linux/i386 -t fix-build /var/folders/5s/4zr1hh3j76bbmmhx3gl_5wn40000gn/T/kilo/fixctx` (that dir has a Dockerfile that gcc's the .c; the Dockerfile's own `shimbuild` stage does the same in-image).
+
+#### 9.5.5 DEBUG ARTIFACTS TO REVERT BEFORE THE TIER B GATE
+
+- `webvm/config_public_alpine.js` — currently `cmd = "/sbin/init"` (the
+  CORRECT production value; do not revert this one — but during debugging
+  it was switched to `/bin/sh` and `/usr/local/bin/boot-diag.sh`; if it is
+  ever seen not-`/sbin/init`, restore it).
+- `diskimage/segv-shim.c` + `diskimage/segv-shim.so` — untracked trace
+  shim; Dockerfile has a `# DEBUG-ONLY shim (temporary)` COPY block for it
+  and `rootfs/usr/local/bin/boot-diag.sh` (also debug; COPY'd + chmod in
+  Dockerfile). Remove all three before the gate.
+- `tests/e2e/tests/diag.spec.js` — untracked debug spec (delete).
+- `diskimage/rootfs/etc/local.d/desktop.start` — contains a DEBUG-ONLY
+  `grep -i "config/udev|Adding input|..." /var/log/xorg.log` block after
+  the xorg log tail (marked DEBUG-ONLY in a comment; remove).
+- `librc.so.1`, `/tmp/*.dis`, `/tmp/diag*.txt`, `/tmp/*.tgz`,
+  `/var/folders/.../T/kilo/{librc-0.63.2.c,openrc-0.63.2/,openrc-0.62.6/,
+  openrc-0.55.1/,shimctx/,fixctx/,o0626.tgz,o0551.tgz,APKINDEX,v322-*}` —
+  scratch diagnosis files outside the repo (safe to delete).
+- `gui-vm/`, `info` (a PNG — the first trap screenshot), `test-results/`
+  (Playwright artifacts), `webvm/custom-disk-images/webvm-custom-disk.ext2`
+  (build output; regenerated by build.sh) — untracked/ignored.
+- The long-lived headscale volume has ~909 stale nodes — optional
+  `headscale nodes expire --all` style cleanup before final acceptance.
+
+#### 9.5.6 ENVIRONMENT QUIRKS LEARNED (save debugging time)
+
+- The CheerpX page xterm mirrors `/dev/console`; a guest process can write
+  its debug trace there and the page xterm shows it even when the guest is
+  wedged. To capture the FULL stream (not just the viewport), monkey-patch
+  the xterm `write()` via `page.addInitScript` polling for
+  `window.__webvmTerm` and appending every write to
+  `window.__consoleCapture` (the pattern in `tests/e2e/capture-trace.mjs`
+  and the debug diag spec). The Playwright page 'console' events do NOT
+  carry /dev/console writes (only wasm trap reports like "Fault ..." and
+  "TODO: SYS_SETSOCKOPT").
+- CheerpX trap signature to recognize: `RuntimeError: function signature
+  mismatch` + `log: [pid:pid] Fault addr <a>, ip <a>, proc <path>` — a wild
+  call. `Fault addr 0, ip 0` = null call. Both kill the WHOLE emulator
+  (all processes), so the shell wedges too — run probes as the VM's first
+  process (boot cmd) or read the captured console, never wait for the
+  shell afterwards.
+- `poll` works; `ppoll` returns -1/errno=0; `select` reports ready on an
+  EMPTY pipe (the stale-fdset quirk the tcl notifier patch works around);
+  `epoll_create1/ctl/wait` work.
+- python3 as the VM's first process fails ("Fatal Python error: error
+  evaluating path") unless it `cd /`s first; every real desktop process
+  starts from a valid cwd so only probes are affected.
+- Guest clock: `date` is correct, but `clock_gettime(REALTIME)` returns
+  year 2695 → openrc's deptree skew messages are cosmetic noise; don't
+  chase them.
+- busybox `timeout`, `setitimer`, SIGALRM, SIGSEGV handlers, gdb, strace
+  and `/proc/self/maps` are all unusable under CheerpX (see §9.2 item 4
+  "Tooling that does NOT work").
+- Docker build with `diskimage/` as the build context fails on macOS
+  ("failed to xattr ... permission denied") — use minimal contexts in
+  /var/folders/.../T/kilo/ for standalone shim builds.

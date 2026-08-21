@@ -1,0 +1,3 @@
+#define TDBC_VERSION_UUID \
+cedaf7c54ca605e467bed4a31b5cc8740527894aefe16a8b8a161f8b654a6f91
+

@@ -1,0 +1,13 @@
+#!/bin/sh
+# LD_PRELOAD bootstrap for the OpenRC boot chain (Tier B, CheerpX guest).
+#
+# /sbin/init (busybox) execs the inittab sysinit/boot/default lines directly
+# with no environment injection, so each openrc invocation gets the guest's
+# CheerpX shims through this wrapper. See faccessat-fix.c for why the shim is
+# required (CheerpX traps on faccessat(-1), which openrc 0.60+ calls on every
+# service state check). The variable is exported so every child of openrc
+# inherits it too — openrc's env_filter() keeps it because /etc/rc.conf sets
+# rc_env_allow="LD_PRELOAD" (without that, the exec'd init scripts would run
+# without the shim and crash on the same faccessat(-1)).
+export LD_PRELOAD=/usr/local/lib/faccessat-fix.so${LD_PRELOAD:+:$LD_PRELOAD}
+exec "$@"

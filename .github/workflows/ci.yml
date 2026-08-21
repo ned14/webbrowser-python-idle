@@ -14,25 +14,25 @@ jobs:
       matrix:
         backend: [browser, samba, webdav, none]
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       # Optional belt-and-braces: i386 runs natively on the amd64 runner
       # (x86-64 hardware compat mode), so QEMU is not required.
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
       - name: Build guest + ext2
         run: ./build.sh ${{ matrix.backend }}
       - name: Verify ext2 (ownership + key paths)
         run: |
           docker run --rm -v "$PWD":/work webvm-ext2-helper sh -c '
             debugfs -R "stat /sbin/init" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
-            debugfs -R "stat /usr/bin/idle3.10" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
+            debugfs -R "stat /usr/bin/idle3.14" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
             debugfs -R "stat /home/user/.config/openbox/rc.xml" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
             debugfs -R "stat /home/user" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 2>/dev/null | grep -Eq "User:[[:space:]]+1000" || exit 1
           '
       - name: Rootfs smoke
         run: tests/rootfs/smoke.sh ${{ matrix.backend }}
       - name: Upload ext2 + fingerprint
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: guest-${{ matrix.backend }}
           path: webvm/custom-disk-images/
@@ -46,14 +46,14 @@ jobs:
       matrix:
         backend: [browser, samba, webdav, none]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: webvm/package-lock.json
       - name: Download guest fingerprint
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: guest-${{ matrix.backend }}
           path: guest-artifact
@@ -61,7 +61,7 @@ jobs:
         # The download step placed the artifact at guest-artifact/ in the
         # workspace root; this step runs there too, so the path is relative.
         run: echo "WEBVM_IMAGE_BUILD=$(cat guest-artifact/image-build.txt)" >> "$GITHUB_ENV"
-      - name: npm ci (committed lockfile, pinned cheerpx 1.3.7)
+      - name: npm ci (committed lockfile, pinned cheerpx 1.3.8)
         working-directory: webvm
         run: npm ci --no-audit --no-fund
       - name: Build frontend with matching cacheId fingerprint
@@ -70,7 +70,7 @@ jobs:
           WEBVM_MODE: ${{ matrix.backend }}
         run: npm run build
       - name: Upload frontend build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: frontend-${{ matrix.backend }}
           path: webvm/build/
@@ -79,10 +79,10 @@ jobs:
     name: Unit tests (pytest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run the pytest unit suite
         # No host Python needed: the `test-unit` compose service runs pytest
-        # in a python:3.11-alpine image with the repo mounted.
+        # in a python:3.14-alpine image with the repo mounted.
         run: docker compose --profile test run --rm test-unit
 
   server:
@@ -90,10 +90,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [guest-image, frontend]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: tests/e2e/package-lock.json
 
@@ -109,17 +109,17 @@ jobs:
       # --- Phase 1: browser-mode E2E (no tailnet, no secrets) ----------------
       # The browser matrix case must boot a REAL browser-mode build (nginx-only
       # server, no sync agent, no controlUrl) — plan §9.4 matrix [browser, webdav].
-      # Start each phase from a clean tree: download-artifact@v4 MERGES into the
+      # Start each phase from a clean tree: download-artifact@v8 MERGES into the
       # destination, and the server Dockerfile COPYs the whole dirs — leftover
       # browser files would otherwise be baked into the webdav image.
       - name: Clean phase artifact dirs
         run: rm -rf webvm/build webvm/custom-disk-images
       - name: Download browser guest ext2 + frontend
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: guest-browser
           path: webvm/custom-disk-images/
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: frontend-browser
           path: webvm/build/
@@ -151,16 +151,16 @@ jobs:
         run: docker compose --profile tailnet down
 
       # --- Phase 2: webdav stack (control plane + sync) ----------------------
-      # Isolate from phase 1: download-artifact@v4 merges, and the server
+      # Isolate from phase 1: download-artifact@v8 merges, and the server
       # Dockerfile COPYs the whole dirs into the webdav image.
       - name: Clean phase artifact dirs
         run: rm -rf webvm/build webvm/custom-disk-images
       - name: Download webdav guest ext2 + frontend
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: guest-webdav
           path: webvm/custom-disk-images/
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: frontend-webdav
           path: webvm/build/
@@ -200,7 +200,7 @@ jobs:
             echo "FAIL: headscale never became ready to create preauth keys" >&2
             exit 1
           }
-          # The pinned headscale (0.28.x): --user takes the NUMERIC user id
+          # The pinned headscale (0.29.x): --user takes the NUMERIC user id
           # (headscale users list); the entrypoint creates the 'headscale'
           # namespace first (id 1). The BROWSER key is --ephemeral (closed
           # tabs stop accumulating stale nodes — headscale reaps disconnected
@@ -269,7 +269,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         run: |
           docker run --rm -v "$PWD":/work -w /work koalaman/shellcheck:stable -S warning \

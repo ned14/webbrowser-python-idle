@@ -1,8 +1,16 @@
 # /etc/inittab
+#
+# openrc runs through rc-preload so the CheerpX shims (LD_PRELOAD) are set
+# for the whole boot chain — busybox init cannot inject environment
+# variables. openrc 0.60+ calls faccessat(-1, ...) on every service state
+# check, which traps the CheerpX emulator without the fix
+# (diskimage/faccessat-fix.c, plans/update-to-latest.md Tier B §9.2).
+# rc_env_allow="LD_PRELOAD" in /etc/rc.conf keeps the variable in the
+# exec'd init scripts' environment.
 
-::sysinit:/sbin/openrc sysinit
-::sysinit:/sbin/openrc boot
-::wait:/sbin/openrc default
+::sysinit:/usr/local/sbin/rc-preload /sbin/openrc sysinit
+::sysinit:/usr/local/sbin/rc-preload /sbin/openrc boot
+::wait:/usr/local/sbin/rc-preload /sbin/openrc default
 
 # No gettys: this is a single-user WebVM desktop with implicit autologin — the
 # X session is started by /etc/local.d/desktop.start. Keeping gettys here would

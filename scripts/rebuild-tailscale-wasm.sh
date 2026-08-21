@@ -15,12 +15,12 @@
 # Outputs: webvm/cheerpx/tun/tailscale.wasm  (then run build.sh / npm build)
 #          webvm/cheerpx/tun/wasm_exec.js    (matching Go toolchain glue)
 #
-# Requires Docker (golang:1.26.5 image; no local Go toolchain needed).
-# Pinned: tailscale v1.102.2, Go 1.26.5 (tailscale's go.mod requirement).
+# Requires Docker (golang:1.26.6 image; no local Go toolchain needed).
+# Pinned: tailscale v1.102.2, Go 1.26.6 (tailscale's go.mod requirement).
 set -eu
 
 VERSION="v1.102.2"
-GO_IMAGE="golang:1.26.5"
+GO_IMAGE="golang:1.26.6"
 ENTRY="$(dirname "$0")/tailscale-wasm-entry/wasm_js.go"
 DEST_TUN="webvm/cheerpx/tun"
 BUILD_DIR="$(mktemp -d)"

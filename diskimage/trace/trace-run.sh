@@ -1,6 +1,6 @@
 #!/bin/sh
 # CheerpX trace capture — autostarted by Openbox on the X desktop (replaces the
-# idle3.10 autostart while the Tk/CheerpX hang is being diagnosed).
+# idle3.14 autostart while the Tk/CheerpX hang is being diagnosed).
 #
 # Mode is read from /trace/run-mode (baked at image build time):
 #   syscall -> run ONLY the libc-interposer syscall logger

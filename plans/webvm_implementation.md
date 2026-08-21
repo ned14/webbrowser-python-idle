@@ -2470,6 +2470,131 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `webvm/cheerpx/cxcore.js`, `webvm/cheerpx/cxcore-no-return-call.js`,
     `scripts/fetch-cheerpx-runtime.sh`, `tests/e2e/tests/error-overlay.spec.js`.
 
+33. **Update-to-latest Tier A (2026-08-18, plans/update-to-latest.md §3).**
+    All runtime/infra pins were uplifted and re-validated; the guest base OS
+    (Tier B) and the frontend framework majors (Tier C) are unchanged here.
+    - `@leaningtech/cheerpx` + the self-hosted runtime moved **1.3.7 → 1.3.8**
+      (exact pin in `webvm/package.json` + lock, `webvm/src/lib/cheerpx.js`,
+      `scripts/fetch-cheerpx-runtime.sh`). The fetch re-ran clean: only
+      `cxcore.js`, `cxcore-no-return-call.js`, `cxcore.wasm` differ from
+      1.3.7 — `cx.esm.js`/`cx_esm.js` and the `tun/*` glue are byte-identical,
+      so the rebuilt-wasm pairing surface is untouched. The §12/21(32) trap
+      patch applied to the 1.3.8 cores with NO target adaptation (all three
+      trampoline sites matched; presence guards pass: exactly 3
+      `console.error('Unexpected exit'` sites per file, no `debugger`, no
+      `e()` call). `webvm/WEBVM_COMMIT` refreshed to
+      `8d68d2b18fa04d72ba49bc6c5b8c684a934fc268` (2026-08-13) — of the
+      upstream range `e58fef0c9..8d68d2b18` only the CheerpX 1.3.8 bump was
+      taken; the two `messages.js` promo-text hunks are N/A (this repo's
+      `introMessage` is its own banner-free text; verified used by
+      `WebVM.svelte`). Note: npm now also publishes **1.3.9** (2026-08-18);
+      not taken — the plan pins 1.3.8 (upstream's bump); re-verify the patch
+      + pairing if ever moving past 1.3.8.
+    - **Headscale 0.28.0 → 0.29.3** (`server/Dockerfile`,
+      `server/headscale/config.yaml.template`): the ephemeral reaping key
+      moved to the nested `node.ephemeral.inactivity_timeout` (verified
+      against the v0.29.3 `config-example.yaml`; every other template key
+      exists unchanged). CLI surface re-verified from the v0.29.3 source:
+      `preauthkeys create --user <numeric id>` unchanged;
+      `preauthkeys list` takes no `--user` and MASKS keys with `***` in
+      non-TTY output (entrypoint's prefix-stripping parse still correct);
+      `users list` keeps numeric ID as the first column. **SQLite upgrade
+      path verified in place**: the existing 0.28.0-created
+      `headscale-data` volume (users + preauth keys + gateway node record)
+      came up clean under 0.29.3 — schema migrated at first serve, the
+      entrypoint key-check passed, the gateway rejoined with its recorded
+      tailnet IP. §12/9 item (l): 0.29.3 still has **no fixed-IP
+      reservation mechanism** (re-confirmed against the config schema and
+      CLI — IPs are sequentially allocated and stabilized via the persisted
+      node record only).
+    - `pysmb` **1.2.10 → 1.2.15** (`diskimage/Dockerfile`, samba builds).
+      `GO_IMAGE` in `scripts/rebuild-tailscale-wasm.sh` **1.26.5 → 1.26.6**
+      and the wasm was REBUILT with it (tailscale source still v1.102.2;
+      `wasm_exec.js` byte-identical across the Go patch — unchanged in the
+      repo). Server base **python:3.11-alpine → python:3.14-alpine**
+      (`server/Dockerfile`, `compose.yaml` `test-unit`; wsgidav 4.3.5 +
+      cheroot 11.1.2 verified installing/importing on 3.14). CI **Node 20 →
+      24** and actions majors uplifted (checkout@v7, setup-node@v7,
+      setup-buildx/qemu@v4, upload-artifact@v7, download-artifact@v8,
+      upload-pages-artifact@v5, deploy-pages@v5; verified latest majors on
+      2026-08-18). e2fsprogs helper `ubuntu:24.04 → 26.04` (`build.sh`).
+    **Re-verified gates (all green):** §12/21(c),(d),(e),(g),(i),(32) —
+      boot/desktop E2E (real VM under chromium), error-overlay trap-capture
+      spec (patched 1.3.8 core), no-egress spec, network.spec + sync.spec
+      (rebuilt Go 1.26.6 wasm + 1.3.8 runtime + headscale 0.29.3 control
+      plane, `CONTROL_HOST=127.0.0.1`), integration.sh (incl. the
+      join-test-client against `https://172.28.0.10:8443`), the 92-test
+      pytest unit suite (hostname ban intact), rootfs smoke for all four
+      backends, shellcheck + yamllint.
+
+34. **Update-to-latest Tier B — guest rebuild on Alpine 3.24 (2026-08-20,
+    plans/update-to-latest.md §4/§9).**
+    The guest base moved **i386/alpine:3.17 (EOL 2024-11) → 3.24.1**
+    (supported to 2028-06), taking Python 3.10 → **3.14.7**, tcl/tk →
+    **8.6.17** (patched lib rebuilt from 8.6.17 sources — the 8.6.18-built
+    override conflicted with apk's exact-match `package require -exact Tcl
+    8.6.17`), Pillow 9.3 → **12.2.0**, mistune 2.0.4 → **3.2.1** (viewer
+    now walks both token shapes — mistune 3 has no `AstRenderer`), the WM
+    i3 → **openbox 3.6.1** (draggable windows + close buttons), git 2.54.0,
+    openssh-client-default 10.3_p1, py3-pip 26.1.2 (`--break-system-packages`
+    — PEP 668 on 3.24), idle3.10 → **idle3.14** rename repo-wide
+    (python3-idle still hard-depends on python3-tests → the apk-fetch+tar
+    extraction trick stays), pysmb 1.2.15, third_party fork at
+    tcl/tk-8.6.17 (only the notifier stale-fdset patch applied; the other
+    aports patches are upstreamed in 8.6.17/18).
+    **CheerpX boot blockers (all root-caused + fixed 2026-08-19/20):** the
+    openrc 0.63.2 boot (new in 3.24) failed under CheerpX with five
+    distinct syscall-emulation defects, all worked around in one LD_PRELOAD
+    shim (`diskimage/faccessat-fix.c`, built in a `shimbuild` stage,
+    loaded via `rc-preload` + `rc_env_allow="LD_PRELOAD"` in rc.conf):
+    (1) `faccessat(-1)` wild-call — openrc 0.60+ calls it BY DESIGN on
+    every service state check (STOPPED/CRASHED → RC_DIR_INVALID → dfd -1);
+    shim returns EBADF for `dfd < 0 && != AT_FDCWD` across the whole *at()
+    family; (2) `sigprocmask(SIG_UNBLOCK)` wild-call in exec_service's
+    child — converted to a faithful read-mask/clear/SETMASK; (3) `ppoll`
+    always returns -1/errno=0 while `poll` works (GLib g_poll → openbox/
+    dbus main loops spun) — shim converts ppoll → poll; (4)
+    `setsockopt(SO_PASSCRED)` EPROTONOSUPPORT → endless udevd netlink
+    retry loop that wedged the emulator — shim fakes success for exactly
+    SOL_SOCKET/SO_PASSCRED; (5) openrc's `env_filter()` scrubbed
+    LD_PRELOAD from the exec'd init scripts (they then crashed on
+    faccessat(-1) with the shim never loaded) — `rc_env_allow="LD_PRELOAD"`.
+    Image changes: `/run/openrc/{starting,started,stopping,inactive,
+    wasinactive,failed,hotplugged,daemons,options,exclusive,scheduled,
+    init.d,tmp}` + `/run/lock`/`/run/secrets` baked (openrc 0.63's svcdir
+    moved to /run and a missing dir left `dirfds[] = -1` → the hang);
+    patched `usr/libexec/rc/sh/init.sh` (the /run tmpfs mount failure —
+    mount(2) ENOSYS under CheerpX — is a warning, not an abort);
+    udev-trigger/udev-settle NOT added + `networking` removed from the
+    boot runlevel (trigger/settle churn udevd forever; networking WANTs
+    dev-settle and its ioctl ifup cannot work — the eth0 retry loop +
+    udhcpc in desktop.start is the established mechanism); static
+    `/etc/X11/xorg.conf` evdev InputDevice sections (the udev input
+    backend finds nothing in CheerpX's shallow sysfs — without them no
+    pointer/keyboard attaches and double-clicks never dispatch);
+    `build.sh` fingerprint now includes `faccessat-fix.c` (a changed shim
+    with an unchanged Dockerfile produced the same cacheId and stale IDB
+    overlays served the OLD guest); baked deptree via `RUN /sbin/openrc
+    sysinit; true` (the guest's deptree regeneration path crashed the
+    first service spawn under CheerpX — skew mtime adjustments to year
+    2695 are cosmetic, don't chase them). Tcl/Tk remains at the apk
+    version 8.6.17 with ONLY the CheerpX notifier fix (the plan's 8.6.18
+    note is superseded). Sync agent audited on 3.14 (urllib WebDAV path,
+    lazy pysmb connect + reset-on-failure).
+    **Re-verified gates (all green):** browser-phase Playwright **9/9**
+    (boot/desktop/error-overlay/idle-pointer/persistence/no-egress) and
+    the webdav-phase suite **12/12** (incl. network.spec — root-visit
+    tailnet + guest data path + nc twin probes — and sync.spec lease/
+    snapshot/pull) on 1.3.8 + headscale 0.29.3; unit suite **92/92**;
+    rootfs smoke (explorer 98-check + viewer suites under Xvfb, real-IDLE
+    launch, viewer launch, openbox managed window, keep-alive relaunch)
+    **×4 backends**; server integration PASS (incl. join-test-client);
+    shellcheck + yamllint clean. NOTE on the 2026-08-20 handoff's "webdav
+    data path" failure: it was an artifact of running the webdav-phase
+    specs against a BROWSER-mode guest (desktop.start never starts the
+    sync agent) — with a correctly-backend-built guest the data path works
+    end to end (verified 2026-08-21).
+
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path
 semantics) is a lookup-and-record step, not a design decision — and the §12/21

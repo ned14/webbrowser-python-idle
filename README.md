@@ -4,7 +4,7 @@
 
 A personal Linux desktop that runs entirely in the browser via
 [WebVM/CheerpX](https://webvm.io): a minimal **i386 Alpine** guest with
-**stdlib-only Python and IDLE** (`idle3.10`), an Xorg/Openbox desktop, **LAN-only
+**stdlib-only Python and IDLE** (`idle3.14`), an Xorg/Openbox desktop, **LAN-only
 networking**, and **configurable persistent storage** — browser IndexedDB by
 default, or Samba / container WebDAV through a guest sync agent. **IDEAL**
 for learning Python in environments with only a locked down web browser e.g.
@@ -135,7 +135,7 @@ defaults — `CONTROL_HOST=127.0.0.1`, **zero configuration**.
   external tags (plausible, Google Fonts, service worker, blog posts, Claude/AI
   tab) are removed, the **CheerpX runtime is self-hosted** (the pinned
   `@leaningtech/cheerpx` npm package normally CDN-loads its core from
-  `cxrtnc.leaningtech.com`; the pinned 1.3.7 runtime lives in `webvm/cheerpx/`
+  `cxrtnc.leaningtech.com`; the pinned 1.3.8 runtime lives in `webvm/cheerpx/`
   and is served same-origin — see `scripts/fetch-cheerpx-runtime.sh`), and the
   compiled-in Tailscale logtail fetch is blocked by a CSP `connect-src`
   (`'self'` + the control host only).
@@ -148,8 +148,8 @@ defaults — `CONTROL_HOST=127.0.0.1`, **zero configuration**.
 ## Repository layout
 
 ```
-diskimage/    i386 Alpine guest (Dockerfile, X/i3 configs, sync agent, rootfs)
-webvm/        webvm frontend @ pinned commit (e58fef0) + persistence wiring
+diskimage/    i386 Alpine guest (Dockerfile, X/openbox configs, sync agent, rootfs)
+webvm/        webvm frontend @ pinned commit (8d68d2b) + persistence wiring
 server/       nginx + headscale + wsgidav container, entrypoint, templates
 gateway/      tailscaled (userspace) + socat relays
 compose.yaml  services `server`, `gateway` (profile tailnet), `test-unit`
@@ -159,10 +159,14 @@ tests/        unit / rootfs / server / e2e (see tests/README.md)
 .github/      CI workflow (guest matrix, frontend, server integration + E2E, lint)
 ```
 
-Pinned versions: webvm commit `e58fef0c9a1c815617e57c6704eaaf7c79c3de1c`,
-`@leaningtech/cheerpx` 1.3.7 (exact), `headscale/headscale:0.28.0`,
-`tailscale/tailscale:v1.102.2` — see `webvm/WEBVM_COMMIT` and
-`plans/webvm_implementation.md` §12/21.
+Pinned versions (2026-08-20, plans/update-to-latest.md): webvm commit
+`8d68d2b18fa04d72ba49bc6c5b8c684a934fc268`, `@leaningtech/cheerpx` 1.3.8
+(exact), `headscale/headscale:0.29.3`, `tailscale/tailscale:v1.102.2`,
+server base `python:3.14-alpine`, guest base **`i386/alpine:3.24`** with
+python3 3.14.7, python3-tkinter 3.14.7, python3-idle 3.14.7, tcl/tk 8.6.17,
+py3-pillow 12.2.0, py3-mistune 3.2.1, openbox 3.6.1, xorg-server 21.1.24,
+git 2.54.0, openssh-client-default 10.3_p1, pysmb 1.2.15 — see
+`webvm/WEBVM_COMMIT` and `plans/webvm_implementation.md` §12/21.
 
 ## Tests
 

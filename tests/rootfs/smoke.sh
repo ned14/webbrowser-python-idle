@@ -14,7 +14,7 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 
 	# Python + IDLE (display-free checks only; E2E covers a real launch)
 	python3 -c "import tkinter, idlelib"
-	[ -x /usr/bin/idle3.10 ] || { echo "FAIL: /usr/bin/idle3.10 missing" >&2; exit 1; }
+	[ -x /usr/bin/idle3.14 ] || { echo "FAIL: /usr/bin/idle3.14 missing" >&2; exit 1; }
 
 	# Tk file viewer deps: Pillow (with the Tk bridge _imagingtk) + mistune
 	python3 -c "import PIL, PIL.ImageTk, mistune" || { echo "FAIL: PIL.ImageTk/mistune import failed" >&2; exit 1; }
@@ -53,11 +53,11 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	[ -f /usr/local/bin/file-explorer.py ] || { echo "FAIL: file-explorer.py missing" >&2; exit 1; }
 	[ -f /usr/local/bin/file-explorer-tests.py ] || { echo "FAIL: file-explorer-tests.py missing" >&2; exit 1; }
 	[ -x /usr/local/bin/open-file-explorer.sh ] || { echo "FAIL: open-file-explorer.sh missing" >&2; exit 1; }
-	grep -q "idle3.10-launcher" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not launch IDLE" >&2; exit 1; }
+	grep -q "idle3.14-launcher" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not launch IDLE" >&2; exit 1; }
 	grep -q "root.withdraw()" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not yield the screen to IDLE" >&2; exit 1; }
 	grep -q "root.deiconify()" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not reappear after IDLE" >&2; exit 1; }
 	grep -q "load_folder(self.current_path)" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not refresh after IDLE" >&2; exit 1; }
-	[ -x /usr/local/bin/idle3.10-launcher ] || { echo "FAIL: idle3.10-launcher missing" >&2; exit 1; }
+	[ -x /usr/local/bin/idle3.14-launcher ] || { echo "FAIL: idle3.14-launcher missing" >&2; exit 1; }
 	# Tk file viewer integration: the explorer routes non-Python files to the
 	# viewer and swaps screens with it; the keep-alive daemon guards it.
 	[ -f /usr/local/bin/file-viewer.py ] || { echo "FAIL: file-viewer.py missing" >&2; exit 1; }
@@ -153,7 +153,7 @@ EOF
 	Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb2.log 2>&1 &
 	XPID2=$!
 	sleep 1
-	timeout 60 env DISPLAY=:99 /usr/local/bin/idle3.10-launcher /home/user/hello.py \
+	timeout 60 env DISPLAY=:99 /usr/local/bin/idle3.14-launcher /home/user/hello.py \
 		>/tmp/idle.log 2>&1 &
 	IDLEPID=$!
 	sleep 6
@@ -161,26 +161,29 @@ EOF
 		echo "IDLE launched and stayed running"
 		# Loopback TCP works on real Linux, so the launcher round-trip
 		# probe must have succeeded and IDLE must run WITH its shell
-		# subprocess (no -n). Assert the real idle3.10 process cmdline
+		# subprocess (no -n). Assert the real idle3.14 process cmdline
 		# carries no -n flag — a false -n here means the round-trip probe
 		# regressed (the guest dead-accept workaround, plans/display-bug.md
 		# §2.11). The pgrep pattern is escaped so it cannot match this
-		# script body on pid 1 (which mentions idle3.10).
-		IDLE_MAIN=$(pgrep -f "python3\.10 /usr/bin/idle3\.10" | head -1)
+		# script body on pid 1 (which mentions idle3.14). The middle
+		# /usr/bin/python3.14 arg is optional: macOS Docker qemu-i386
+		# emulation doubles the interpreter argv (python3.14 python3.14
+		# idle3.14 ...), real x86 CI does not.
+		IDLE_MAIN=$(pgrep -f "python3\.14 (/usr/bin/python3\.14 )?/usr/bin/idle3\.14" | head -1)
 		if [ -n "$IDLE_MAIN" ] && \
 			tr "\0" " " < "/proc/$IDLE_MAIN/cmdline" 2>/dev/null | grep -q -- " -n "; then
 			echo "FAIL: launcher applied -n although loopback works (round-trip probe false negative)" >&2
-			pkill -f idle3.10 2>/dev/null || true
+			pkill -f idle3.14 2>/dev/null || true
 			kill "$XPID2" 2>/dev/null || true
 			exit 1
 		fi
 		if [ -z "$IDLE_MAIN" ]; then
-			echo "FAIL: could not find the launched idle3.10 process" >&2
-			pkill -f idle3.10 2>/dev/null || true
+			echo "FAIL: could not find the launched idle3.14 process" >&2
+			pkill -f idle3.14 2>/dev/null || true
 			kill "$XPID2" 2>/dev/null || true
 			exit 1
 		fi
-		pkill -f idle3.10 2>/dev/null || true
+		pkill -f idle3.14 2>/dev/null || true
 	else
 		echo "FAIL: IDLE exited early (log below)" >&2
 		cat /tmp/idle.log >&2 || true

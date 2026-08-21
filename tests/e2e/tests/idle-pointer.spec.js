@@ -6,7 +6,7 @@ import { waitForDesktop, lightRatio, canvasHash } from '../lib/desktop.js';
 //
 // Background: IDLE's default mode runs its Python shell in a subprocess over
 // a 127.0.0.1 TCP loopback socket. The explorer launches IDLE through
-// idle3.10-launcher, which probes loopback TCP and applies IDLE's -n
+// idle3.14-launcher, which probes loopback TCP and applies IDLE's -n
 // (in-process) mode unless a COMPLETE loopback round trip works. When the
 // guest's socket layer accepts binds but the inbound accept path is dead
 // (the rebuilt tailscale.wasm consumes inbound SYNs — plans/networking-bug.md

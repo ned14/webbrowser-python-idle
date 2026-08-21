@@ -41,7 +41,7 @@ explorer_running() {
 idle_running() {
 	# IDLE launched from the explorer: while it runs, the explorer is
 	# intentionally windowless (withdrawn), so it must NOT be treated as stuck.
-	pgrep -f "idle3.10" >/dev/null 2>&1
+	pgrep -f "idle3.14" >/dev/null 2>&1
 }
 
 viewer_running() {

@@ -629,7 +629,7 @@ def test_open_externally_fallback(done):
         return None
     def fake_exists(p):
         # The test host has no IDLE launcher; pretend the guest does.
-        if p == "/usr/local/bin/idle3.10-launcher":
+        if p == "/usr/local/bin/idle3.14-launcher":
             return True
         return orig_exists(p)
     shutil.which = fake_which
@@ -645,7 +645,7 @@ def test_open_externally_fallback(done):
         subprocess.Popen = orig_popen
         os.path.exists = orig_exists
     txt_ok = calls[0] == ["/usr/bin/xterm", "-e", "/usr/bin/less", txt]
-    py_ok = calls[1] == ["/usr/local/bin/idle3.10-launcher", py]
+    py_ok = calls[1] == ["/usr/local/bin/idle3.14-launcher", py]
     check("text file falls back to xterm+less", txt_ok, repr(calls))
     check("py file falls back to IDLE launcher", py_ok, repr(calls))
     done()
@@ -1087,7 +1087,7 @@ def test_open_with_idle_replaces_screen(done):
         _ORIG_IDLE([py])
         _steps([
             (100, lambda: check("IDLE launcher invoked for the .py",
-                                calls == [["/usr/local/bin/idle3.10-launcher", py]], repr(calls))),
+                                calls == [["/usr/local/bin/idle3.14-launcher", py]], repr(calls))),
             (100, lambda: check("explorer withdrawn while IDLE runs",
                                 str(root.state()) == "withdrawn", root.state())),
             # The watcher polls for IDLE's exit at 0.5 s cadence: the 0.6 s
@@ -1104,7 +1104,7 @@ def test_open_with_idle_replaces_screen(done):
 
 @test
 def test_idle_window_close_returns_when_process_lingers(done):
-    # Closing IDLE can leave the idle3.10 process alive (it waits on its shell
+    # Closing IDLE can leave the idle3.14 process alive (it waits on its shell
     # subprocess, kept busy by a running game). The explorer must detect the
     # IDLE window disappearing and return to the file manager anyway.
     _make_fixtures()

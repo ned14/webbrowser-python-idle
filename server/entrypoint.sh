@@ -125,9 +125,10 @@ if [ "$need_headscale" = "1" ]; then
 	done
 
 	# Verify the .env preauth keys exist in headscale's DB (fail-closed).
-	# NB the pinned headscale (0.28.x): `preauthkeys list` takes no --user
-	# flag and MASKS keys with ***, so match the configured key against the
-	# listed unmasked prefix.
+	# The pinned headscale (0.29.x): `preauthkeys list` takes no --user flag
+	# and prints keys MASKED as a short prefix + *** when output is not a
+	# TTY (verified 2026-08-18 — same masking behaviour as 0.28.x), so match
+	# the configured key against the listed prefix with the *** stripped.
 	if [ "$HEADSCALE_BOOTSTRAP" != "1" ]; then
 		hs_user_id=$(headscale users list 2>/dev/null \
 			| sed -E 's/\x1b\[[0-9;]*m//g' \

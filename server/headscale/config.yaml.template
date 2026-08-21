@@ -1,5 +1,5 @@
-# Headscale configuration (pinned binary is headscale/headscale:0.28.0 — the
-# Dockerfile explains why the pin is 0.28.0 and NOT the newest 0.29.x.
+# Headscale configuration (pinned binary is headscale/headscale:0.29.3 — the
+# Dockerfile explains why the pin moved from 0.28.0 to 0.29.3.
 # Rendered by entrypoint.sh via envsubst with an explicit variable list).
 #
 # LAN-only control plane:
@@ -17,11 +17,17 @@
 #     self-disable browser-side Tailscale logging; the page CSP also blocks
 #     the logtail endpoint as belt-and-braces)
 #
-# Keys verified against the 0.28.0 binary's config schema: the ephemeral-node
-# reaping key is TOP-LEVEL `ephemeral_node_inactivity_timeout` in 0.28.0 (the
-# nested `node.ephemeral.inactivity_timeout` is the 0.29.x spelling and would
-# be silently ignored by the pinned binary — 0.28.0 has no `node:` config
-# section at all).
+# Keys verified against the 0.29.3 binary's config schema (config-example.yaml
+# @ tag v0.29.3): the ephemeral-node reaping key is NESTED
+# `node.ephemeral.inactivity_timeout` in 0.29.x (the top-level
+# `ephemeral_node_inactivity_timeout` was the 0.28.0 spelling and would be
+# silently ignored by the 0.29.x binary). Every other key used below
+# (server_url, listen_addr, metrics_listen_addr, grpc_*, trusted_proxies,
+# noise.private_key_path, prefixes.*, derp.server.*, derp.urls,
+# auto_update_enabled, update_frequency, disable_check_updates,
+# database.*, log.*, policy.*, dns.*, unix_socket*, logtail.enabled,
+# taildrop.enabled, auto_update.enabled) exists unchanged in the 0.29.3
+# example file.
 
 server_url: "https://${CONTROL_HOST}:${CONTROL_PORT}"
 listen_addr: "127.0.0.1:8080"
@@ -69,13 +75,15 @@ derp:
 # The server itself never checks for updates
 disable_check_updates: true
 
-# Time before an inactive ephemeral node is deleted (TOP-LEVEL key in the
-# pinned 0.28.0 — the nested `node.ephemeral.inactivity_timeout` is 0.29.x and
-# is ignored by the binary). Browser VMs join with an ephemeral preauth key
-# (HEADSCALE_PREAUTHKEY is created with --ephemeral), so closed tabs stop
+# Time before an inactive ephemeral node is deleted (NESTED key, 0.29.x
+# spelling — the top-level `ephemeral_node_inactivity_timeout` was 0.28.0 and
+# is ignored by the pinned binary). Browser VMs join with an ephemeral preauth
+# key (HEADSCALE_PREAUTHKEY is created with --ephemeral), so closed tabs stop
 # accumulating stale nodes after this window; the GATEWAY node is persistent
 # (tailnet-IP stability) and is never reaped.
-ephemeral_node_inactivity_timeout: "30m"
+node:
+  ephemeral:
+    inactivity_timeout: "30m"
 
 database:
   type: sqlite

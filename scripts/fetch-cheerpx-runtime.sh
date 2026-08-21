@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fetch the CheerpX 1.3.7 runtime into webvm/cheerpx/ so the site serves it
+# Fetch the CheerpX 1.3.8 runtime into webvm/cheerpx/ so the site serves it
 # SAME-ORIGIN (zero external requests at page load; the pinned @leaningtech/
 # cheerpx npm package is only a thin wrapper that CDN-loads its core by
 # default).
@@ -10,7 +10,7 @@
 # the version below).
 set -eu
 
-VERSION="1.3.7"
+VERSION="1.3.8"
 BASE="https://cxrtnc.leaningtech.com/${VERSION}"
 DEST="webvm/cheerpx"
 
@@ -19,10 +19,12 @@ workerclock.js cheerpOS.js cxcore.wasm tun/direct.js tun/tailscale_tun_auto.js
 tun/ipstack.wasm tun/ipstack.js tun/tailscale_tun.js"
 
 # tailscale.wasm AND tun/wasm_exec.js are NOT fetched: the repo ships a
-# REBUILT client (tailscale v1.102.2 + its matching Go 1.26.5 wasm_exec.js,
-# scripts/rebuild-tailscale-wasm.sh) — the CDN's Leaning-fork pair is broken
-# in every CheerpX runtime (plans/networking-bug.md §15/§16), and mixing the
-# CDN glue with the rebuilt wasm breaks instantiation.
+# REBUILT client (tailscale v1.102.2 + its matching Go 1.26.6 wasm_exec.js,
+# scripts/rebuild-tailscale-wasm.sh — the Go 1.26.5 and 1.26.6
+# wasm_exec.js are byte-identical, so the committed pair matches either) —
+# the CDN's Leaning-fork pair is broken in every CheerpX runtime
+# (plans/networking-bug.md §15/§16), and mixing the CDN glue with the
+# rebuilt wasm breaks instantiation.
 
 # Files the CDN serves as HTTP 204 (intentional empty placeholders) — commit
 # them as empty files so the runtime's fetches resolve same-origin.
@@ -56,7 +58,7 @@ for f in $EMPTY_FILES; do
 done
 
 # Apply the vendored runtime patch to the two cxcore trampoline files (see
-# plans/webvm_implementation.md §12/21(32)). The pinned 1.3.7 core SWALLOWS
+# plans/webvm_implementation.md §12/21(32)). The pinned 1.3.8 core SWALLOWS
 # guest-side WASM traps at its thread trampolines — it `debugger;`-pauses
 # (freezing the whole tab whenever DevTools is open), `console.log`s
 # "Unexpected exit <err>" and then silently carries on, so a boot-critical

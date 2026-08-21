@@ -10,7 +10,7 @@ file-explorer.py _open_in_viewer / keep-file-explorer.sh).
 
 Tk-only by design (plans/display-bug.md: Tk is the debugged toolkit under the
 patched X stack; GTK is not usable). Pillow (py3-pillow) and mistune
-(py3-mistune) are the only extra guests; both come from the Alpine v3.17 apk
+(py3-mistune) are the only extra guests; both come from the Alpine v3.24 apk
 repos and the viewer degrades gracefully without them (markdown -> plain
 text; image -> error).
 
@@ -35,7 +35,11 @@ except Exception:
 
 try:
     import mistune
-    HAVE_MISTUNE = getattr(mistune, "AstRenderer", None) is not None
+    # mistune 2.x ships AstRenderer; mistune 3.x (3.1+) dropped it — the
+    # token-list output is then `mistune.Markdown(renderer=None)` (parse
+    # returns the parsed tokens when renderer is None). Both are supported.
+    HAVE_MISTUNE = (getattr(mistune, "AstRenderer", None) is not None
+                    or getattr(mistune, "Markdown", None) is not None)
 except Exception:
     HAVE_MISTUNE = False
 
@@ -84,18 +88,47 @@ class MarkdownToTk:
     is parsed to an AST first and walked here: inline leaves are emitted with
     the currently-open tag stack, block containers wrap them in tags.
 
-    Token shapes are those of mistune 2.0.x AstRenderer: heading(children,
-    level), paragraph/strong/emphasis(children), codespan(text), link(link,
-    children, title), image(src, alt, title), list(children, ordered, level,
-    start?), list_item(children, level), block_code(text, info), block_quote/
-    block_text(children), thematic_break, newline, block_html/block_error
-    (text)."""
+    Token shapes accepted are BOTH mistune 2.0.x AstRenderer AND mistune
+    3.x (Markdown(renderer=None)) — the two differ in:
+      * leaf text is `raw` in 3.x vs `text` in 2.x (the _text helper reads
+        either),
+      * heading level, link url and list ordering moved into an `attrs`
+        dict in 3.x (the _attrs/_level/_url/_ordered helpers read either),
+      * image alt lives in the first child's text in 3.x vs `alt` in 2.x,
+      * 3.x emits blank_line block tokens between blocks and linebreak
+        inline tokens (2.x: newline) — both are handled.
+    Shapes (2.x): heading(children, level), paragraph/strong/emphasis
+    (children), codespan(text), link(link, children, title), image(src, alt,
+    title), list(children, ordered, level, start?), list_item(children,
+    level), block_code(text, info), block_quote/block_text(children),
+    thematic_break, newline, block_html/block_error (text)."""
 
     def __init__(self, sink):
         self.sink = sink
         self._pending_text = ""
         self._pending_tags = None
         self._pending_len = 0
+
+    @staticmethod
+    def _attrs(tok):
+        return tok.get("attrs") or {}
+
+    @staticmethod
+    def _text(tok):
+        # mistune 3.x leaves carry `raw`, 2.x carried `text`.
+        return tok.get("raw", tok.get("text", ""))
+
+    @staticmethod
+    def _level(tok):
+        return tok.get("level") or MarkdownToTk._attrs(tok).get("level", 1)
+
+    @staticmethod
+    def _url(tok):
+        return tok.get("link") or MarkdownToTk._attrs(tok).get("url", "")
+
+    @staticmethod
+    def _ordered(tok):
+        return tok.get("ordered", MarkdownToTk._attrs(tok).get("ordered", False))
 
     def render(self, tokens):
         for tok in tokens:
@@ -131,22 +164,29 @@ class MarkdownToTk:
         for tok in tokens:
             t = tok.get("type")
             if t == "text":
-                self._emit(tok.get("text", ""), *tags)
+                self._emit(self._text(tok), *tags)
             elif t == "strong":
                 self._inline_tokens(tok.get("children") or [], tags + ("b",))
             elif t == "emphasis":
                 self._inline_tokens(tok.get("children") or [], tags + ("i",))
             elif t == "codespan":
-                self._emit(tok.get("text", ""), *(tags + ("code",)))
+                self._emit(self._text(tok), *(tags + ("code",)))
             elif t == "link":
                 self._inline_tokens(tok.get("children") or [], tags + ("link",))
             elif t == "image":
                 # No image embedding in v1: show the alt text in link style.
-                self._emit(tok.get("alt") or "", *(tags + ("link",)))
-            elif t == "linebreak":
+                # mistune 3.x carries the alt as the first child's text;
+                # 2.x as the `alt` key.
+                alt = ""
+                if tok.get("children"):
+                    alt = self._text(tok["children"][0])
+                else:
+                    alt = tok.get("alt") or ""
+                self._emit(alt, *(tags + ("link",)))
+            elif t in ("linebreak", "softbreak"):
                 self._emit("\n", *tags)
             elif t == "inline_html":
-                self._emit(tok.get("text", ""), *tags)
+                self._emit(self._text(tok), *tags)
             else:
                 # Unknown inline construct: render its children as plain text.
                 self._inline_tokens(tok.get("children") or [], tags)
@@ -156,7 +196,7 @@ class MarkdownToTk:
         t = tok.get("type")
         if t == "heading":
             self._inline_tokens(tok.get("children") or [],
-                                tags + ("h%d" % min(tok.get("level", 1), 4),))
+                                tags + ("h%d" % min(self._level(tok), 4),))
             self._emit("\n\n", *tags)
         elif t == "paragraph":
             self._inline_tokens(tok.get("children") or [], tags)
@@ -171,7 +211,7 @@ class MarkdownToTk:
             self._emit("\n", *tags)
         elif t == "block_code":
             self._emit("\n", *tags)
-            self._emit((tok.get("text") or "").rstrip("\n"),
+            self._emit(self._text(tok).rstrip("\n"),
                        *(tags + ("codeblock",)))
             self._emit("\n\n", *tags)
         elif t == "block_quote":
@@ -179,20 +219,20 @@ class MarkdownToTk:
                 self._block(child, tags + ("quote",))
         elif t == "thematic_break":
             self._emit("─" * 48 + "\n\n", *(tags + ("hr",)))
-        elif t == "newline":
+        elif t in ("newline", "blank_line"):
             pass
         elif t == "block_html":
-            self._emit(tok.get("text", ""), *tags)
+            self._emit(self._text(tok), *tags)
         elif t == "block_error":
-            self._emit(tok.get("text", ""), *tags)
+            self._emit(self._text(tok), *tags)
         else:
             # Unknown block construct: walk its children with the tag stack.
             for child in tok.get("children") or []:
                 self._block(child, tags)
 
     def _list(self, tok, tags=()):
-        ordered = tok.get("ordered", False)
-        start = tok.get("start") or 1
+        ordered = self._ordered(tok)
+        start = tok.get("start") or self._attrs(tok).get("start") or 1
         for i, item in enumerate(tok.get("children") or [], start=start):
             bullet = ("%d. " % i) if ordered else "• "
             self._emit(bullet, *(tags + ("li",)))
@@ -655,7 +695,14 @@ class FileViewer(tk.Tk):
             token = self._load_token
             def work():
                 try:
-                    md = mistune.create_markdown(renderer=mistune.AstRenderer())
+                    if getattr(mistune, "AstRenderer", None) is not None:
+                        # mistune 2.x
+                        md = mistune.create_markdown(renderer=mistune.AstRenderer())
+                    else:
+                        # mistune 3.x: no AstRenderer — parse with a
+                        # renderer-less Markdown, which returns the token
+                        # list directly (verified against 3.2.1).
+                        md = mistune.Markdown(renderer=None)
                     toks = md(content)
                 except Exception:
                     toks = None
