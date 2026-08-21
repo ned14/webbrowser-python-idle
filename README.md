@@ -34,7 +34,7 @@ The project website **is the VM**: the latest `main` build runs entirely in your
 browser at
 [**https://ned14.github.io/webbrowser-python-idle/alpine.html**](https://ned14.github.io/webbrowser-python-idle/alpine.html)
 — test-drive it there before running it yourself. The first load streams the
-guest image (~230 MB; later visits reuse the browser cache) and needs a
+guest image (~140 MB; later visits reuse the browser cache) and needs a
 standards-compliant browser with SharedArrayBuffer — GitHub Pages cannot set the
 COOP/COEP headers WebVM requires, so the site injects them via a service worker.
 

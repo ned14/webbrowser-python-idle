@@ -384,4 +384,42 @@ RUN /sbin/openrc sysinit; true
 # Size trimming
 RUN rm -rf /usr/share/doc /usr/share/man /usr/share/info /var/cache/apk/*
 
+# Size trimming (round 2, 2026-08-21): components verified unused at runtime.
+#   * Python __pycache__ (.pyc) — regenerated on demand by the interpreter
+#     (the guest FS is writable), so precompiling buys nothing here.
+#   * /usr/share/mime — only libgio's g_content_type_guess reads it; no guest
+#     binary calls that path (openbox menu has no icons, the explorer sniffs
+#     file types itself, xterm less/vi do not need the MIME DB).
+#   * /usr/libexec/glycin-loaders — gdk-pixbuf's on-demand image loaders,
+#     dlopen'd only when an image is actually decoded; openbox's Clearlooks
+#     theme is color-only and the menu has no icons, so nothing decodes.
+#   * DejaVu faces not reachable through 99-webvm-aliases.conf (which maps
+#     only to Sans/Sans Mono/Serif regular+bold+italic): Condensed,
+#     ExtraLight, MathTeX.
+#   * /usr/share/hwdata (pci.ids) — libpciaccess uses it only for device-name
+#     labels; Xorg's modesetting driver works without it.
+#   * /usr/lib/girepository-1.0 typelibs — no pygobject/gjs in the guest.
+#   * libepoxy + libwayland-client — orphaned by the mesa/GL stack removal
+#     (no DT_NEEDED or dlopen users remain, verified 2026-08-21).
+#   * Tcl extras (itcl/thread/tdbc) — optional Tcl packages, tkinter never
+#     loads them.
+#   * imlib2 CLI tools, non-Clearlooks openbox themes, mesa leftovers
+#     (drirc.d) and build-time aclocal macros, fontconfig cache (regenerated
+#     on demand).
+RUN find /usr/lib/python3.14 -type d -name __pycache__ -prune -exec rm -rf {} + && \
+	rm -rf /usr/share/mime /usr/libexec/glycin-loaders /usr/share/hwdata \
+		/usr/lib/girepository-1.0 /usr/share/drirc.d /usr/share/aclocal \
+		/var/cache/fontconfig \
+		/usr/lib/itcl4.3.4 /usr/lib/thread2.8.12 /usr/lib/tdbc1.1.12 \
+		/usr/lib/tdbcmysql1.1.12 /usr/lib/tdbcodbc1.1.12 /usr/lib/tdbcpostgres1.1.12 \
+		/usr/lib/libepoxy.so.0 /usr/lib/libepoxy.so.0.0.0 \
+		/usr/lib/libwayland-client.so.0 /usr/lib/libwayland-client.so.0.25.0 \
+		/usr/bin/imlib2_* \
+		/usr/share/fonts/dejavu/DejaVuMathTeXGyre.ttf \
+		/usr/share/fonts/dejavu/DejaVuSans-ExtraLight.ttf \
+		/usr/share/fonts/dejavu/DejaVuSansCondensed*.ttf \
+		/usr/share/fonts/dejavu/DejaVuSerifCondensed*.ttf && \
+	find /usr/share/themes -mindepth 1 -maxdepth 1 -type d ! -name Clearlooks \
+		-exec rm -rf {} +
+
 CMD ["/sbin/init"]

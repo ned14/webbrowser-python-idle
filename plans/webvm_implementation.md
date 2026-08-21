@@ -176,9 +176,9 @@ the novel parts of this plan.
 
 | Implementation | What it is | Key differences vs this plan |
 |---|---|---|
-| **webvm.io** (Leaning Technologies reference) | The original full-Linux (Debian, ~2 GB) terminal VM, hosted publicly; source of the whole frontend stack this plan pins. | Public HTTPS + **public Tailscale** interactive login (`login.tailscale.com`) — no Headscale/gateway/pinned IP, no LAN-only confinement; the large Debian image is streamed via a **reverse-proxy range+compression hack** on their origin (this plan serves a ~230 MB Alpine ext2 same-origin with plain nginx byte-range — no compression/range ambiguity); persistence is IndexedDB overlay only (no samba/webdav sync); logtail/plausible are **not** blocked; multi-user public service, not a single personal desktop. |
-| **webvm.io/alpine.html** (Alpine Xorg/i3 desktop) | The reference for this plan's desktop: Alpine + Xorg + i3, KMS canvas, autologin via LightDM in the `leaningtech/alpine-image` build. | Image is far larger (adds gcc/nodejs/LightDM/rofi/polybar etc.) — this plan strips to stdlib-only Python + IDLE (~230 MB, no display manager); networking identical to webvm.io (public Tailscale), so no LAN-only path, no Headscale/gateway, no persistence backend, no single-session guard, no sessionStorage secrets handling. |
-| **mini.webvm.io** (Mini.WebVM reference) | Serverless GitHub Pages deployment: Dockerfile→ext2 via a GH Actions workflow; the ext2 is pre-split into 128 KiB chunks (+`.meta`/`index.list`) and streamed via `diskImageType:"github"` (`GitHubDevice`); a **service worker injects COOP/COEP** because Pages cannot set headers. | Fully static — **no server-side component at all** (this plan runs its own nginx container regardless); chunking exists only to work around Pages' lack of byte-range/streaming-miss — this plan needs none (nginx Range is native); public Tailscale interactive login; terminal-only; no persistence backend; 1 GB Pages limit / 2 GB range-limit noted (this plan's image is ~230 MB, under both). |
+| **webvm.io** (Leaning Technologies reference) | The original full-Linux (Debian, ~2 GB) terminal VM, hosted publicly; source of the whole frontend stack this plan pins. | Public HTTPS + **public Tailscale** interactive login (`login.tailscale.com`) — no Headscale/gateway/pinned IP, no LAN-only confinement; the large Debian image is streamed via a **reverse-proxy range+compression hack** on their origin (this plan serves a ~140 MB Alpine ext2 same-origin with plain nginx byte-range — no compression/range ambiguity); persistence is IndexedDB overlay only (no samba/webdav sync); logtail/plausible are **not** blocked; multi-user public service, not a single personal desktop. |
+| **webvm.io/alpine.html** (Alpine Xorg/i3 desktop) | The reference for this plan's desktop: Alpine + Xorg + i3, KMS canvas, autologin via LightDM in the `leaningtech/alpine-image` build. | Image is far larger (adds gcc/nodejs/LightDM/rofi/polybar etc.) — this plan strips to stdlib-only Python + IDLE (~140 MB, no display manager); networking identical to webvm.io (public Tailscale), so no LAN-only path, no Headscale/gateway, no persistence backend, no single-session guard, no sessionStorage secrets handling. |
+| **mini.webvm.io** (Mini.WebVM reference) | Serverless GitHub Pages deployment: Dockerfile→ext2 via a GH Actions workflow; the ext2 is pre-split into 128 KiB chunks (+`.meta`/`index.list`) and streamed via `diskImageType:"github"` (`GitHubDevice`); a **service worker injects COOP/COEP** because Pages cannot set headers. | Fully static — **no server-side component at all** (this plan runs its own nginx container regardless); chunking exists only to work around Pages' lack of byte-range/streaming-miss — this plan needs none (nginx Range is native); public Tailscale interactive login; terminal-only; no persistence backend; 1 GB Pages limit / 2 GB range-limit noted (this plan's image is ~140 MB, under both). |
 | **GitHub Pages fork deployments** (the repo's "Deploy" workflow; third-party forks) | Any fork of `leaningtech/webvm` run through the Pages workflow — effectively mini.webvm.io per fork, at `<user>.github.io`. | Same as mini.webvm.io, plus: unversioned CheerpX per fork and no content control — this plan pins the exact webvm commit + `@leaningtech/cheerpx` version and serves everything from its own private HTTPS origin. |
 | *(adjacent, not WebVM)* **PythonFiddle** (leaningtech) | CheerpX-based in-browser Python REPL, not a full OS. | Not a comparable WebVM; noted only because it informs the CheerpX free-for-personal-use/licensing framing (§1, §12) and in-browser CheerpX UX patterns. |
 
@@ -997,10 +997,14 @@ the dependency closure was resolved over main + community, including
 | **Rootfs** | **≈ 190** |
 | **ext2** (rootfs + ~20% headroom, 4 KiB blocks) | **≈ 230** (rounds to ~240) |
 
-(**Measured at implementation, 2026-08-09:** browser-mode rootfs ≈ 197 MiB and
+(**Measured at implementation:** on 2026-08-09, browser-mode rootfs ≈ 197 MiB and
 the ext2 built at 209–246 MiB depending on the backend/trimming — consistent
-with the estimate. The SSH keypair is **not** part of the image anymore: it is
-generated at first boot by `desktop.start`, so the image has no baked key.)
+with the estimate. After the 2026-08-21 size trims — the Mesa/LLVM GL stack
+replaced by a 176 KiB no-op stub plus the round-2 removal of unused runtime
+components (see §12/21) — the rootfs is ≈ 134.7 MiB and the webdav ext2 builds
+at **137 MiB** (~161 MiB logical; browser/none builds are comparable). The SSH
+keypair is **not** part of the image anymore: it is generated at first boot by
+`desktop.start`, so the image has no baked key.)
 
 Per-package breakdown of the apk closure (installed MiB; the 109 packages
 below 0.5 MiB total ≈ 12.0):
@@ -2104,6 +2108,27 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
      IDLE launches, openbox client list, keep-alive relaunch). `/usr/lib` drops
      365.6 → 119.3 MiB; the webdav ext2 drops 514 → 185 MiB (~219 MiB logical).
      Re-check only if the guest ever needs GL (a GLX-using app).
+     **Round-2 size trim (2026-08-21):** a second `RUN` (after the doc/man/apk
+     trim) removes components verified unused at runtime: all Python
+     `__pycache__`/`.pyc` (regenerated on demand — the guest FS is writable);
+     `/usr/share/mime` (only libgio's `g_content_type_guess` reads it — no
+     guest binary does, openbox menu has no icons and the explorer sniffs file
+     types itself); `/usr/libexec/glycin-loaders` (gdk-pixbuf's dlopen'd
+     loaders — nothing decodes images: openbox's Clearlooks theme is
+     color-only); the DejaVu Condensed/ExtraLight/MathTeX faces (unreachable
+     through `99-webvm-aliases.conf`, which maps only to Sans/Sans Mono/Serif
+     regular+bold+italic — Tk font resolution re-verified in-guest);
+     `/usr/share/hwdata` (libpciaccess device-name labels only);
+     `/usr/lib/girepository-1.0` typelibs (no pygobject/gjs);
+     `libepoxy` + `libwayland-client` (orphaned by the GL removal — no
+     DT_NEEDED or dlopen users); Tcl extras `itcl`/`thread`/`tdbc*` (tkinter
+     never loads them); imlib2 CLI tools; non-Clearlooks openbox themes;
+     mesa leftovers (`drirc.d`) and build-time `aclocal`; the fontconfig cache.
+     Rootfs 182 → 134.7 MiB; webdav ext2 185 → 137 MiB (~161 MiB logical);
+     browser/webdav smoke PASS, 92 unit tests pass. NOT removed (openbox needs
+     them): the librsvg/gdk-pixbuf/glycin/cairo/pango/glib image-decoding chain
+     — `libobrender` statically NEEDs and calls it for titlebar/theme
+     rendering, so unlike GL it cannot be stubbed safely.
 
 22. **X desktop boot (implementation finding, 2026-08-09):** three things
     contradict the Step 2 assumptions; all are corrected in

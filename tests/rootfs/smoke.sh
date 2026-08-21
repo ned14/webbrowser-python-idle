@@ -98,37 +98,69 @@ echo "==> rootfs GUI tests (file explorer, in-image Xvfb)"
 
 docker run --rm --platform=linux/i386 --entrypoint /bin/sh "$IMAGE" -c '
 	set -e
+	# Xvfb lifecycle helpers. Display numbers are reused across checks (the
+	# IDLE and openbox checks both use :99), and a fresh server can collide
+	# on a stale /tmp/.X99-lock left by the previous one still shutting
+	# down — that made openbox fail with "Failed to open the display" on CI.
+	# start_xvfb removes stale lock/socket and polls until the X socket
+	# exists instead of a fixed sleep (Xvfb start is slow under qemu/CI
+	# load); stop_xvfb waits for the server to fully exit so a reuse of the
+	# same display number is always clean.
+	_XVPID=""
+	start_xvfb() {
+		_disp="$1"
+		rm -f "/tmp/.X${_disp}-lock" "/tmp/.X11-unix/X${_disp}"
+		Xvfb ":$_disp" -screen 0 1280x800x24 -nolisten tcp >"/tmp/xvfb-$_disp.log" 2>&1 &
+		_XVPID=$!
+		for _i in 1 2 3 4 5 6 7 8 9 10; do
+			if [ -e "/tmp/.X11-unix/X$_disp" ]; then
+				break
+			fi
+			if ! kill -0 "$_XVPID" 2>/dev/null; then
+				echo "FAIL: Xvfb :$_disp failed to start" >&2
+				cat "/tmp/xvfb-$_disp.log" >&2
+				return 1
+			fi
+			sleep 1
+		done
+		if ! kill -0 "$_XVPID" 2>/dev/null; then
+			echo "FAIL: Xvfb :$_disp died before ready" >&2
+			cat "/tmp/xvfb-$_disp.log" >&2
+			return 1
+		fi
+	}
+	stop_xvfb() {
+		kill "$1" 2>/dev/null || true
+		wait "$1" 2>/dev/null || true
+	}
 	# Run the full file-explorer test suite inside the guest, against an Xvfb
 	# display (the same X/Tk stack the desktop uses, minus the CheerpX canvas).
-	Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
-	XPID=$!
-	sleep 1
+	start_xvfb 99
+	XPID=$_XVPID
 	RESULT=0
 	timeout 600 env DISPLAY=:99 python3 /usr/local/bin/file-explorer-tests.py \
 		>/tmp/fe-tests.log 2>&1 || RESULT=$?
-	kill "$XPID" 2>/dev/null || true
+	stop_xvfb "$XPID"
 	cat /tmp/fe-tests.log
 	[ "$RESULT" = "0" ] || { echo "FAIL: file-explorer tests exited $RESULT" >&2; exit 1; }
 	grep -q "PASS ALL" /tmp/fe-tests.log || { echo "FAIL: file-explorer tests did not report PASS ALL" >&2; exit 1; }
 
 	# Tk file viewer test suite (images via Pillow, text, Markdown via
 	# mistune, Prev/Next navigation) under the same X/Tk stack.
-	Xvfb :98 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb4.log 2>&1 &
-	XPID4=$!
-	sleep 1
+	start_xvfb 98
+	XPID4=$_XVPID
 	RESULT=0
 	timeout 600 env DISPLAY=:98 python3 /usr/local/bin/file-viewer-tests.py \
 		>/tmp/fv-tests.log 2>&1 || RESULT=$?
-	kill "$XPID4" 2>/dev/null || true
+	stop_xvfb "$XPID4"
 	cat /tmp/fv-tests.log
 	[ "$RESULT" = "0" ] || { echo "FAIL: file-viewer tests exited $RESULT" >&2; exit 1; }
 	grep -q "PASS ALL" /tmp/fv-tests.log || { echo "FAIL: file-viewer tests did not report PASS ALL" >&2; exit 1; }
 
 	# A REAL viewer launch works under X: generate a PNG with Pillow, open it
 	# in the viewer, and verify the process stays running.
-	Xvfb :97 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb5.log 2>&1 &
-	XPID5=$!
-	sleep 1
+	start_xvfb 97
+	XPID5=$_XVPID
 	python3 - <<'EOF'
 from PIL import Image
 Image.new("RGB", (320, 200), (60, 120, 200)).save("/tmp/viewer-test.png")
@@ -146,13 +178,12 @@ EOF
 		kill "$XPID5" 2>/dev/null || true
 		exit 1
 	fi
-	kill "$XPID5" 2>/dev/null || true
+	stop_xvfb "$XPID5"
 
 	# A REAL IDLE launch (the explorer Popen target) works under X: start
 	# the launcher on hello.py and verify the IDLE process stays running.
-	Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb2.log 2>&1 &
-	XPID2=$!
-	sleep 1
+	start_xvfb 99
+	XPID2=$_XVPID
 	timeout 60 env DISPLAY=:99 /usr/local/bin/idle3.14-launcher /home/user/hello.py \
 		>/tmp/idle.log 2>&1 &
 	IDLEPID=$!
@@ -190,15 +221,16 @@ EOF
 		kill "$XPID2" 2>/dev/null || true
 		exit 1
 	fi
-	kill "$XPID2" 2>/dev/null || true
+	stop_xvfb "$XPID2"
 
 	# The keep-alive daemon relaunches the explorer when it dies: run
 	# openbox-session with the real config + autostart (which starts the
 	# explorer + keep-alive), kill the explorer process, and verify the
-	# keep-alive brings it back.
-	Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb3.log 2>&1 &
-	XPID3=$!
-	sleep 1
+	# keep-alive brings it back. Reuses display :99 right after the IDLE
+	# check above — the stale-lock cleanup + readiness poll in start_xvfb
+	# are exactly what keep this from racing the previous server.
+	start_xvfb 99
+	XPID3=$_XVPID
 	export DISPLAY=:99
 	export HOME=/home/user
 	openbox-session >/tmp/openbox.log 2>&1 &
@@ -236,7 +268,7 @@ EOF
 	[ "$ALIVE" = "1" ] || { echo "FAIL: keep-alive did not relaunch the explorer" >&2; exit 1; }
 	echo "keep-alive relaunched the explorer"
 	kill "$OBPID" 2>/dev/null || true
-	kill "$XPID3" 2>/dev/null || true
+	stop_xvfb "$XPID3"
 '
 
 if [ "$BACKEND" = "samba" ] || [ "$BACKEND" = "webdav" ]; then

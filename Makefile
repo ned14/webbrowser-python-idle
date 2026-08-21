@@ -31,6 +31,12 @@ build:
 	./build.sh $(STORAGE_BACKEND)
 	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/custom-disk-images/image-build.txt 2>/dev/null || echo dev) npm run build
 	docker compose build
+	@echo ""
+	@echo "==> Built image sizes:"
+	@echo "   guest ext2:      webvm/custom-disk-images/webvm-custom-disk.ext2 ($$(du -h webvm/custom-disk-images/webvm-custom-disk.ext2 | cut -f1))"
+	@echo "                     The only Linux image served to browsers (same-origin byte-range, /custom-disk-images/)."
+	@echo "   guest docker:    webvm-guest ($$(docker image inspect webvm-guest --format '{{.Size}}' | awk '{printf "%.0f MiB\n", $$1/1048576}'))"
+	@echo "                     Docker build artifact only — never served (includes multi-stage shimbuild + layer history)."
 
 ## Fail unless the built guest image matches the deployment mode (.env). A
 ## mismatch silently disables the mode's guest-side features (e.g. the sync
