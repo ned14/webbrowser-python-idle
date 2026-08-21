@@ -96,6 +96,44 @@ RUN apk add --no-cache \
 	py3-pillow \
 	py3-mistune
 
+# Mesa's GL stack (libGL/libEGL + libgallium + llvm22-libs, ~246 MiB) is the
+# single biggest cost in the image and is NEVER used by this guest:
+#   * Xorg runs with ShadowFB + AccelMethod none (pure software blits, see
+#     10-cheerpx.conf) — no GLX, no glamor, no DRI.
+#   * Tk/xterm/openbox render through X11 core requests, never GL.
+#   * The only load-time GL references are Xvfb and the glx extension module,
+#     which carry ~310 static gl*/glX* entry points into libGL but only ever
+#     call them for actual GLX rendering — which no guest app does.
+# So replace libGL.so.1 with a 176 KiB no-op stub exporting the same gl*/glX*
+# symbol names, delete the rest of the mesa/llvm stack (and the GLX/glamor
+# modules so Xorg never initializes GL), and keep libgbm + libdrm core (the
+# modesetting driver links libgbm at load). Install-time apk deps are
+# satisfied BEFORE the removal; the apk database afterwards is stale for the
+# removed packages, which is harmless (nothing in the guest runs apk).
+# Verified 2026-08-21: Xvfb, the in-guest file-explorer and file-viewer suites
+# (PASS ALL), real viewer/IDLE launches and the openbox keep-alive all work
+# with the stub; /usr/lib drops from 365.6 MiB to 119.3 MiB.
+RUN apk add --no-cache gcc musl-dev binutils && \
+	nm -D --defined-only /usr/lib/libGL.so.1.2.0 | awk '{print $3}' | grep -E '^gl' | sort -u > /tmp/glsyms.txt && \
+	{ printf '#include <stddef.h>\ntypedef void (*glstub_t)(void);\nglstub_t glXGetProcAddress(const char *name) { return NULL; }\nglstub_t glXGetProcAddressARB(const char *name) { return NULL; }\n'; \
+	  grep -v '^glXGetProcAddress' /tmp/glsyms.txt | sed 's/^/void /; s/$/(void) {}  /'; } > /tmp/genstub.c && \
+	gcc -O2 -shared -fPIC -o /tmp/libGL-stub.so.1 /tmp/genstub.c && \
+	rm -f /usr/lib/libGL.so.1 /usr/lib/libGL.so.1.2.0 \
+		/usr/lib/libGLESv1_CM.so.1 /usr/lib/libGLESv1_CM.so.1.1.0 \
+		/usr/lib/libGLESv2.so.2 /usr/lib/libGLESv2.so.2.0.0 \
+		/usr/lib/libEGL.so.1 /usr/lib/libEGL.so.1.0.0 \
+		/usr/lib/libgallium-*.so /usr/lib/libLLVM.so.22.1 /usr/lib/libLLVM-22.so \
+		/usr/lib/libSPIRV-*.so /usr/lib/libelf.so.1 /usr/lib/libelf-0.195.so \
+		/usr/lib/libdrm_amdgpu* /usr/lib/libdrm_intel* /usr/lib/libdrm_etnaviv* \
+		/usr/lib/libdrm_exynos* /usr/lib/libdrm_freedreno* /usr/lib/libdrm_nouveau* \
+		/usr/lib/libdrm_omap* /usr/lib/libdrm_radeon* /usr/lib/libdrm_tegra* \
+		/usr/lib/xorg/modules/extensions/libglx.so \
+		/usr/lib/xorg/modules/libglamoregl.so && \
+	install -m 755 /tmp/libGL-stub.so.1 /usr/lib/libGL.so.1 && \
+	apk del gcc musl-dev binutils >/dev/null && \
+	rm -f /tmp/genstub.c /tmp/libGL-stub.so.1 /tmp/glsyms.txt && \
+	rm -rf /usr/lib/llvm22
+
 # IDLE without the 85 MiB python3-tests dependency: `python3-idle` (community)
 # hard-depends on python3-tests, so extract just the binary + idlelib from the
 # package instead of installing it (verified the same packaging on v3.24:

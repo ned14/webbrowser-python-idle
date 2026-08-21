@@ -2087,6 +2087,23 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
      main loop" under bare `update()` pumping); Pillow `draft()`+`thumbnail()`
      keep multi-megapixel JPEGs displayable on the emulated i386. Rootfs smoke
      passes on `browser` and `none` backends (`==> rootfs smoke PASS`).
+     **Mesa/LLVM GL stack removed (2026-08-21):** the ~246 MiB GL stack that
+     `xorg-server`/`xvfb` pull in (`mesa-egl` → `mesa` → `llvm22-libs` 195 MiB
+     + `libgallium` 45 MiB) is unused by this guest — Xorg runs with
+     `ShadowFB`/`AccelMethod none` (pure software), Tk/xterm/openbox render
+     via X11 core, and the only load-time GL references (Xvfb + the glx
+     module, ~310 static `gl*`/`glX*` symbols into libGL) are never invoked.
+     `diskimage/Dockerfile` now replaces `libGL.so.1` with a 176 KiB no-op stub
+     generated at build time (same exported symbol names, `glXGetProcAddress*`
+     returning NULL), deletes `libgallium`/`libLLVM`/`libEGL`/`libGLES`/
+     `libelf`/`libdrm_*`/`libSPIRV-*` and the GLX + glamor modules, and keeps
+     `libgbm` + `libdrm` core (the modesetting driver links libgbm). The apk
+     database stays stale for the removed packages (nothing in the guest runs
+     apk). Verified in-guest: `tests/rootfs/smoke.sh` PASS on `browser` and
+     `webdav` (file-explorer + file-viewer suites `PASS ALL`, real viewer and
+     IDLE launches, openbox client list, keep-alive relaunch). `/usr/lib` drops
+     365.6 → 119.3 MiB; the webdav ext2 drops 514 → 185 MiB (~219 MiB logical).
+     Re-check only if the guest ever needs GL (a GLX-using app).
 
 22. **X desktop boot (implementation finding, 2026-08-09):** three things
     contradict the Step 2 assumptions; all are corrected in

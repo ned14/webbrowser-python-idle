@@ -369,7 +369,9 @@ def main():
     tree_shadow()
     screen.update()                     # show environment, then the tree
     canopy_mass()
+    screen.update()
     branch(TREE_X, TREE_Y, 89, 95, 26, MAX_DEPTH)
+    screen.update()
     trunk_texture()
     screen.update()
     screen.mainloop()

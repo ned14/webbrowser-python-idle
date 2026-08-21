@@ -6,12 +6,27 @@ A personal Linux desktop that runs entirely in the browser via
 [WebVM/CheerpX](https://webvm.io): a minimal **i386 Alpine** guest with
 **stdlib-only Python and IDLE** (`idle3.14`), an Xorg/Openbox desktop, **LAN-only
 networking**, and **configurable persistent storage** — browser IndexedDB by
-default, or Samba / container WebDAV through a guest sync agent. **IDEAL**
-for learning Python in environments with only a locked down web browser e.g.
+default, or Samba / container WebDAV through a guest sync agent.
+
+**IDEAL** for learning Python in environments with only a locked down web browser e.g.
 Google Chromebooks. Packaged as a docker compose for easy installation on your
 home server.
 
 ![Screenshot of the WebVM desktop running the file explorer and IDLE](screenshot.png)
+
+Due to the live JIT emulation of i386 in WebAssembly, performance is not blazing
+fast -- it'll remind you of running Windows 95 on a 486 -- but it's acceptable.
+
+The only really annoying thing missing is copy & paste integration, and as the
+CheerpX runtime doesn't implement `/dev/clipboard`, the best we can do is allow
+'paste as if typed by keyboard'.
+
+Todo items:
+
+- I think the guest runs much slower than before the upgrade - the guest
+CPU seems to spend more time running.
+- Implement paste as if typed by keyboard.
+- Networking icon in left bar should be crossed out and disabled if networking disabled.
 
 ## Try it live
 
