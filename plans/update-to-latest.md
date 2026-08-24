@@ -926,6 +926,43 @@ chain, each fixed:
     falsifies (daemon stalls between scans = degraded latency, lease
     takeover recovers), pivot per review plan to gateway-round-trip pacing
     or the Tier 2 poll() shim.
+22. **REGRESSION: lazy imports hang the VM under CheerpX — REVERTED to
+    eager imports (2026-08-24, evening).** After pushing item 16–21, the
+    GitHub Pages deployment
+    (ned14.github.io/webbrowser-python-idle/alpine.html, commit 045892c)
+    hung shortly after the desktop appeared. Diagnosis chain: headless
+    Playwright probes against the LIVE site reproduced it 3/3 — desktop
+    paints (~80 s), then a CheerpX core fault kills a python3 process
+    ("Fault addr 0/4/e9b10cf0, proc /usr/bin/python3", runtime "Fault from
+    Inode" ids differing per run — an internal handle, not a stable file)
+    and the session wedges. CI independently failed the SAME commit in the
+    E2E browser-mode boot phase while unit/lint/image builds passed.
+    Native rootfs smoke could never catch this class (it does not run
+    CheerpX). Root cause (by elimination + timing signature): item 19's
+    LAZY imports moved stdlib import-machinery filesystem walks out of
+    quiet module-init into the live Tk event loop, where they interleave
+    with X11 socket traffic and trip an intermittent CheerpX
+    inode-handling race; on Pages the chunked-disk (GitHubDevice) network
+    timing made it fire ~25 s after first paint every time. Two local
+    repro subtleties worth recording for future bisection work: (a) the
+    fault is NOT layout-deterministic — one local run faulted in xkbcomp
+    during X init, an identical-content rebuild then booted clean twice;
+    (b) artificial host load (saturated `yes` loops) makes EVEN HEALTHY
+    builds wedge with "RuntimeError: memory access out of bounds" and a
+    frozen framebuffer — saturated-host probes are invalid as bisect
+    signals (the docs' "busy-waits starve the guest clock"/wedge-under-
+    -load findings apply to the HOST side too). FIX: explorer and viewer
+    restored to EAGER imports (accessor shims kept — they now resolve
+    instantly from globals, call sites untouched; viewer resolvers invoked
+    once at module bottom). Perf cost reinstated vs the reverted idea:
+    ~70 ms/launch explorer, ~0.42 s/viewer open (native image numbers) —
+    accepted until the core inode race is fixed upstream; the lazy-import
+    optimization is dead under this CheerpX generation. Verified after
+    fix: py_compile both apps; unit suite 106 passed; webdav ext2 rebuilt
+    (f85a00004684); tests/rootfs/smoke.sh full PASS incl. keep-alive
+    relaunch; frontend + server images rebuilt. Pages redeploy requires
+    push; CI's browser-mode E2E phase is the authoritative regression gate
+    for exactly this class and must be green before trusting any deploy.
 
 **The fix shim today (`diskimage/faccessat-fix.c`, built in the Dockerfile
 `shimbuild` stage, installed as `/usr/local/lib/faccessat-fix.so`):**

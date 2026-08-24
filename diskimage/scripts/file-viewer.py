@@ -69,6 +69,16 @@ def _ensure_mistune():
     return HAVE_MISTUNE
 
 
+# EAGER resolution (regression finding 2026-08-24): the lazy variants of
+# these resolvers moved Pillow/mistune's import-machinery filesystem walks
+# into the live Tk event loop, which trips a CheerpX inode-handling race —
+# guest-wide python3 core faults ("Fault addr …, Fault from Inode N") seen
+# on the GitHub Pages deployment; see plans/update-to-latest.md item 22.
+# Cost restored: ~0.42 s per viewer launch on the native image.
+_ensure_pillow()
+_ensure_mistune()
+
+
 def looks_like_text(path):
     """True when the first bytes look like plain text (no control chars).
     Local helper: the explorer's _is_text_file has different semantics

@@ -6,6 +6,20 @@ import time
 import tkinter as tk
 from tkinter import font, ttk, simpledialog, filedialog, messagebox
 
+# EAGER stdlib imports (regression finding 2026-08-24): deferring these
+# moved their import-machinery filesystem walks out of quiet module-init
+# into the live Tk event loop, where they interleave with X11 traffic and
+# trip a CheerpX inode-handling race — guest-wide python3 core faults
+# ("Fault addr …, Fault from Inode N") reproduced 3/3 on the GitHub Pages
+# deployment and failing CI's browser-mode E2E boot phase; see
+# plans/update-to-latest.md item 22. Cost kept: ~70 ms per launch on the
+# native image (acceptable until the core defect is fixed upstream). These
+# populate the same globals the accessors below read, so call sites,
+# semantics, and the test suite's subprocess patching are unchanged.
+import subprocess
+import threading
+import zipfile
+
 # Tk file viewer (diskimage/scripts/file-viewer.py): "Open" launches it for
 # every non-Python file — images (Pillow), text and Markdown (mistune).
 # The image/text extension contract lives in file_types.py (shared with the
