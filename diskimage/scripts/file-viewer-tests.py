@@ -35,7 +35,9 @@ _ns = {"__name__": "file_viewer", "__file__": APP}
 exec(compile(src, APP, "exec"), _ns)
 
 FileViewer = _ns["FileViewer"]
-HAVE_PILLOW = _ns["HAVE_PILLOW"]
+# Pillow loads lazily in the viewer now; resolve it for real so the image
+# tests run exactly when the shipped viewer would use Pillow.
+HAVE_PILLOW = _ns["_ensure_pillow"]()
 if HAVE_PILLOW:
     from PIL import Image
 

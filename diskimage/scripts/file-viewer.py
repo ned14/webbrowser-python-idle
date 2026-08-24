@@ -27,21 +27,46 @@ from tkinter import font, messagebox, ttk
 
 from file_types import IMAGE_EXTS, MARKDOWN_EXTS, TEXT_EXTS
 
-try:
-    from PIL import Image, ImageOps, ImageSequence, ImageTk
-    HAVE_PILLOW = True
-except Exception:
-    HAVE_PILLOW = False
+# Pillow and mistune load LAZILY (see _ensure_pillow / _ensure_mistune): a
+# text-file open would otherwise pay their bytecode reads + import machinery
+# off the overlay on every launch for engines it never uses. Both flags stay
+# None until the first resolver call, then hold a real bool forever. On
+# success the module (and Pillow's names) are published into module globals,
+# so every existing bare-name use site keeps working unchanged.
+HAVE_PILLOW = None
+HAVE_MISTUNE = None
 
-try:
-    import mistune
-    # mistune 2.x ships AstRenderer; mistune 3.x (3.1+) dropped it — the
-    # token-list output is then `mistune.Markdown(renderer=None)` (parse
-    # returns the parsed tokens when renderer is None). Both are supported.
-    HAVE_MISTUNE = (getattr(mistune, "AstRenderer", None) is not None
-                    or getattr(mistune, "Markdown", None) is not None)
-except Exception:
-    HAVE_MISTUNE = False
+
+def _ensure_pillow():
+    """Import Pillow on first image use; returns True when usable."""
+    global HAVE_PILLOW
+    if HAVE_PILLOW is None:
+        try:
+            from PIL import Image, ImageOps, ImageSequence, ImageTk
+            globals().update(Image=Image, ImageOps=ImageOps,
+                             ImageSequence=ImageSequence, ImageTk=ImageTk)
+            HAVE_PILLOW = True
+        except Exception:
+            HAVE_PILLOW = False
+    return HAVE_PILLOW
+
+
+def _ensure_mistune():
+    """Import mistune on first markdown use; returns True when usable."""
+    global HAVE_MISTUNE
+    if HAVE_MISTUNE is None:
+        try:
+            import mistune
+            # mistune 2.x ships AstRenderer; mistune 3.x (3.1+) dropped it —
+            # the token-list output is then `mistune.Markdown(renderer=None)`
+            # (parse returns the parsed tokens when renderer is None). Both
+            # are supported.
+            globals()["mistune"] = mistune
+            HAVE_MISTUNE = (getattr(mistune, "AstRenderer", None) is not None
+                            or getattr(mistune, "Markdown", None) is not None)
+        except Exception:
+            HAVE_MISTUNE = False
+    return HAVE_MISTUNE
 
 
 def looks_like_text(path):
@@ -260,7 +285,9 @@ class FileViewer(tk.Tk):
         self._pan = None           # active B1 drag state (image panning)
         self._canvas = None
         self._text = None
-        self._imagetk_ok = HAVE_PILLOW
+        # Tri-state: None = Pillow availability not yet resolved (resolved on
+        # first image use, never at viewer startup); True/False after that.
+        self._imagetk_ok = None
 
         self.title((f"{os.path.basename(paths[0])} — Viewer") if paths
                    else "File Viewer")
@@ -381,7 +408,7 @@ class FileViewer(tk.Tk):
     def _kind(path):
         ext = os.path.splitext(path)[1].lower()
         if ext in IMAGE_EXTS:
-            return "image" if HAVE_PILLOW else "unknown"
+            return "image" if _ensure_pillow() else "unknown"
         if ext in MARKDOWN_EXTS:
             return "markdown"
         if ext in TEXT_EXTS:
@@ -502,7 +529,7 @@ class FileViewer(tk.Tk):
         """ImageTk with a PNG-bytes fallback (I3 contingency: if the
         _imagingtk extension misbehaves under the patched Tcl, feed raw PNG
         bytes to tk.PhotoImage — no C extension involved)."""
-        if self._imagetk_ok:
+        if self._imagetk_ok is not False:
             try:
                 return ImageTk.PhotoImage(img)
             except Exception:
@@ -684,7 +711,7 @@ class FileViewer(tk.Tk):
         except UnicodeDecodeError:
             content = data.decode("latin-1")
 
-        if markdown and HAVE_MISTUNE:
+        if markdown and _ensure_mistune():
             # Parse OFF the main thread: mistune on a large document blocks
             # the Tk mainloop for a long time on the emulated CPU (the window
             # sits blank). The walker still runs on the main thread (Tk

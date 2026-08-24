@@ -35,7 +35,12 @@ FROM python:3.14-alpine
 ARG STORAGE_BACKEND=browser
 ARG WEBDAV_ROOT=/data/webdav
 
-RUN apk add --no-cache nginx apache2-utils gettext && \
+# nginx-mod-http-brotli: the brotli static/filter modules as Alpine subpackage
+# (version-matched to nginx by apk). The STATIC module is loaded in
+# nginx.conf.template to serve the pre-generated .br siblings produced by
+# scripts/precompress-static.sh; it must stay in lockstep with the installed
+# nginx version, which installing both from the same repo at once guarantees.
+RUN apk add --no-cache nginx nginx-mod-http-brotli apache2-utils gettext && \
 	pip3 install --no-cache-dir --break-system-packages wsgidav==4.3.5 cheroot==11.1.2 && \
 	ln -sf /usr/bin/pip3 /usr/bin/pip
 

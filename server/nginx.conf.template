@@ -7,6 +7,11 @@
 #   CONTROL_PORT (8443) Headscale control + embedded DERP (WSS)
 # Exposure to the host is restricted by compose port bindings (LAN_IP only).
 
+# brotli_static module (Alpine subpackage nginx-mod-http-brotli, version-matched
+# to the installed nginx by apk): serves pre-generated .br siblings produced by
+# scripts/precompress-static.sh at frontend build time.
+load_module /usr/lib/nginx/modules/ngx_http_brotli_static_module.so;
+
 user nginx;
 worker_processes auto;
 error_log /var/log/nginx/error.log warn;
@@ -27,6 +32,21 @@ http {
 	gzip_types text/plain text/css application/javascript application/json application/wasm image/svg+xml;
 	gzip_min_length 1024;
 
+	# Precompressed statics: serve the .br siblings generated once at
+	# frontend build time (scripts/precompress-static.sh) instead of
+	# compressing per request. This removes per-response CPU (the 31 MB
+	# tailscale.wasm is by far the heaviest) and keeps the strongest setting
+	# (brotli q11) without latency. Deliberately NO `gzip_static on` here:
+	# both modules register PRECONTENT-phase handlers and the built-in
+	# gzip_static runs first, so with .gz siblings present it would shadow
+	# brotli_static for every gzip-capable client (i.e. all browsers) and the
+	# smaller br representation would never be served. Clients without br
+	# support — and files shipped without a sibling, e.g. /webvm-config.js,
+	# rendered at container start — fall through to runtime gzip below. The
+	# ext2 location explicitly turns BOTH static filters off: byte-range
+	# serving cannot use a compressed representation.
+	brotli_static on;
+
 	map $http_upgrade $connection_upgrade {
 		default upgrade;
 		''      close;
@@ -37,6 +57,15 @@ http {
 	# ----------------------------------------------------------------------
 	server {
 		listen ${SITE_PORT} ssl;
+		# HTTP/2 for the SITE listener: boot issues many small byte-range GETs
+		# against the ext2 plus the runtime assets, which HTTP/1.1 serializes
+		# across at most ~6 connections per origin — h2 multiplexes them over
+		# one TLS connection. Directive form (nginx >= 1.25.1; the image ships
+		# 1.30.x). The CONTROL/WSS listeners stay deliberately h1-only: their
+		# traffic is long-lived WebSocket upgrades (/ts2021, /derp), and nginx
+		# has no RFC 8441 WS-over-h2 — offering ALPN h2 there buys nothing and
+		# only adds a protocol branch to the control path.
+		http2 on;
 		server_name _;
 
 		ssl_certificate     /certs/server.crt;
@@ -93,7 +122,14 @@ http {
 		# to nginx; gzip is off for the image.
 		location /custom-disk-images/ {
 			alias /srv/webvm/custom-disk-images/;
+			# Byte-range serving requires the RAW body: disable the runtime
+			# compressor AND the static-sibling filters (both inherit from
+			# http{} scope) so a stray .br/.gz beside the ext2 can never
+			# make nginx serve a compressed representation to HttpBytesDevice
+			# range reads.
 			gzip off;
+			brotli_static off;
+			gzip_static off;
 		}
 
 		# Self-hosted CheerpX runtime (versioned by the pinned 1.3.7 in

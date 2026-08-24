@@ -687,25 +687,23 @@ chain, each fixed:
     3.14 startup work), paid by every Python process — the pyc issue
     AMPLIFIES it on first boot but is not the base cause.
 12. **keep-file-explorer.sh self-heal hardening (KEPT).** The stuck-explorer
-    force-kill was disabled whenever `wm-clients.py --count` failed
+    force-kill was disabled whenever `wm-clients.sh --count` failed
     (returned "" — a wedged X server leaves _NET_CLIENT_LIST unreadable).
     It now treats a WM-list failure as "no windows known"; the idle/viewer
     process guards still protect the IDLE/viewer swap, so the self-heal
     can recover a windowless explorer instead of being permanently
-    disabled by the very wedge it exists to fix.
-13. **Desktop-app prewarm — SHIPPED 2026-08-22.** `/usr/local/sbin/
-    prewarm-apps.sh` (run by desktop.start AFTER Xorg is up, BEFORE the
-    user session, bounded + non-fatal) imports the explorer/viewer module
-    set (tkinter, file_types, PIL, mistune), the idlelib set (pyshell,
-    editor, remote), and exercises a withdrawn Tk root against X. This
-    pre-fetches the .pyc blocks and warms the exec/Tk→X path, so later
-    IDLE/viewer/explorer launches are fast (the deptree interpose removed
-    the loop that incidentally warmed the emulator — this replaces that
-    lost warm-up with useful work). Phases measured in-guest: module-set
-    import ~0.6 s, idlelib import ~0.9 s (docker-local; slower under
-    CheerpX, which is the point — those blocks get cached). Boot
-    benchmarking is `tests/e2e/bench-boot-min.mjs` (N fresh-context boots,
-    reports first-pixels / explorer-ready times and stalls).
+    disabled by the very wedge it exists to fix. (The helper it calls is
+    now the shell `wm-clients.sh` — see item 15.)
+13. **Desktop-app prewarm — SHIPPED 2026-08-22, REMOVED 2026-08-24.**
+    `/usr/local/sbin/prewarm-apps.sh` (run by desktop.start AFTER Xorg is
+    up, BEFORE the user session, bounded + non-fatal) imported the
+    explorer/viewer module set (tkinter, file_types, PIL, mistune), the
+    idlelib set (pyshell, editor, remote), and exercised a withdrawn Tk
+    root against X, pre-fetching the .pyc blocks and warming the exec/Tk→X
+    path. The .pyc blocks are now prebaked into the image at build time
+    (item 11), so the import pre-fetch bought little — the two extra
+    Python starts + the Tk→X probe at boot were pure boot latency, so the
+    whole prewarm was removed: faster boot wins.
 14. **The pgrep boot fault (`Fault addr c0100000, ip 555f230d, proc
     /usr/bin/pgrep` / `Fault from Inode 18`) is FIXED — SHIPPED
     2026-08-22.** Root cause (in-guest trace + core wasm analysis): the
@@ -727,6 +725,207 @@ chain, each fixed:
     to the launcher's children). Verified: 3/3 clean boot repro runs,
     browser E2E 9/9 (incl. IDLE swap), rootfs smoke PASS, webdav E2E
     network+sync PASS.
+15. **wm-clients.py → shell + fold the poll into the explorer — SHIPPED
+    2026-08-24.** Every window poll started a fresh Python interpreter:
+    the keep-alive daemon's 3 s count (`wm-clients.py --count`) and the
+    explorer's IDLE/viewer watchers (`wm-clients.py --json`, 0.5–3 s
+    cadence while the app is swapped in). FIX: the helper is now the pure
+    busybox-ash `wm-clients.sh --count` (one `xprop -root
+    _NET_CLIENT_LIST` read; same "" = failure contract), and the explorer
+    reads the property itself, in-process (`file-explorer.py`
+    `_wm_client_windows`, porting wm-clients.py's xprop parsing) so its
+    watchers spawn no interpreter per poll — just the tiny xprop binary.
+    `wm-clients.py`, the Dockerfile COPY and the smoke-test reference are
+    gone; the explorer-tests' FakePopen filters now ignore `xprop`.
+16. **nginx HTTP/2 + brotli-static precompression — SHIPPED 2026-08-24
+    (revised same day after review).** The site listener was HTTP/1.1: boot
+    issues many small ext2 byte-range GETs plus the runtime assets,
+    serialized across at most ~6 connections. FIXES: `http2 on;` on the SITE
+    listener only (directive form, image ships nginx 1.30.x; CONTROL/WSS
+    listeners stay h1-only — their traffic is WebSocket upgrades and nginx
+    has no RFC 8441 WS-over-h2); `brotli_static on;` in the http{} context
+    with .br siblings generated ONCE at frontend build time by the new
+    `scripts/precompress-static.sh` (wired into webvm/package.json "build",
+    so make build / ci.yml / pages.yml all produce them; a missing brotli
+    CLI degrades to runtime-gzip-only with a notice and exit 0).
+    Deliberately NO `.gz` siblings and NO `gzip_static on`: both modules
+    register PRECONTENT-phase handlers and built-in gzip_static runs first,
+    so with .gz present it shadows brotli_static for every gzip-capable
+    client (i.e. all browsers) and the smaller br body would never be
+    served — tailscale.wasm: 31 MB raw / 7.1 MB gz / 5.0 MB br; non-br
+    clients fall through to runtime gzip. The brotli STATIC module ships as
+    the Alpine subpackage `nginx-mod-http-brotli` (added to
+    server/Dockerfile; apk version-matches it to nginx) loaded via
+    `load_module` in the template (the entrypoint renders its own
+    nginx.conf, so the packaged modules include does not apply). The ext2
+    location turns `gzip off`, `brotli_static off` AND `gzip_static off`
+    explicitly, so byte-range serving is structurally immune to any sibling
+    appearing beside the image.
+17. **Parallelised boot-resource fetch in the page — SHIPPED 2026-08-24.**
+    WebVM.svelte's chain was strictly sequential: hydration → xterm import/
+    terminal setup → dynamic import of the CheerpX runtime (~2.5 MB JS/WASM)
+    → HttpBytesDevice.create (first ext2 range GETs) → IDBDevice → Linux.
+    create. FIX (`startEarlyBootFetch`, called first thing in onMount): the
+    runtime import AND both device creations start at mount time,
+    concurrently with terminal setup; initCheerpX awaits the promises where
+    the old inline code awaited the calls. Every early promise gets a no-op
+    catch at creation (an early rejection must not fire the global
+    unhandledrejection → premature trap-overlay path) while still
+    propagating at the await site — error routing is byte-for-byte the old
+    behavior (boot failures still land in showFatal("boot")).
+18. **Keep-alive: 3 s xprop poll → event-driven `xprop -spy` — SHIPPED
+    2026-08-24 (revised same day after review).** keep-file-explorer.sh
+    spawned one xprop binary per poll forever (item 15 made it shell, but
+    each execve is still expensive under emulation) and reacted up to
+    POLL_SECONDS late to every window change. FIX: a `xprop -spy -root
+    _NET_CLIENT_LIST` session — it prints the current value on attach and
+    one line per WM update, so a closed explorer triggers the relaunch
+    decision within milliseconds. Two review findings reshaped the session
+    model from the first cut (per-session pipeline-subshell state + read -t
+    stall timeout): (a) WINDOWLESS_SINCE lived in the subshell, so every
+    session restarted the timer at zero and the STUCK_SECONDS force-kill —
+    which only ever sees ONE line per session for a stuck explorer — was
+    unreachable; (b) timing out the reader does not kill the writer, so an
+    idle desktop respawned a spy every ~15 s and abandoned each previous one
+    (SIGPIPE only fires on its next write, which never comes when idle).
+    FINAL MODEL: sessions are hard-bounded with busybox `timeout
+    SESSION_SECONDS` (60 s — the spy self-exits, so no orphans and ~1
+    spawn/min steady state vs the old poller's ~20/min); the windowless
+    timestamp persists in /tmp/.keep-alive-windowless across sessions (the
+    decision logic runs in the per-session subshell), so the force-kill
+    still accumulates to STUCK_SECONDS even at one line per session; the
+    force-kill path now launches explicitly (a killed windowless explorer
+    emits no property update, so the desktop would otherwise wait up to a
+    full session for the next attach line). Contract preserved: unparsable
+    lines are skipped (never read as a zero-window desktop), the idle/viewer
+    (file-viewer.py) PID-file guards still protect the swap, the 3 s grace
+    delay before each session's first evaluation keeps desktop-start from
+    stacking a second explorer, elapsed time via date +%s with the NOW==0
+    glitch guard (subshells have disjoint $SECONDS epochs). Worst-case
+    stuck-desktop heal ≈ STUCK+SESSION+BACKOFF ≈ 92 s (was ~33 s under the
+    old poller) in exchange for ~20× less process churn.
+    wm-clients.sh --count remains for the rootfs smoke suite.
+    **REGRESSION FIX + UNIT TESTS (2026-08-24, same day):** the first spy
+    revision shipped three defects that together could stop close→relaunch:
+    (a) xprop's missing-atom error is printed ALL-LOWERCASE ("no such atom
+    on any window") while the filter matched only title-case "No such atom"
+    and "not found", so at desktop start — before Openbox creates the atom —
+    the attach line was parsed as ZERO windows instead of "unreadable";
+    (b) launch()/kill() ran inside the spy pipeline's subshell, the exact
+    blocked-subshell-spawn pattern desktop.start documents as unreliable
+    under CheerpX; (c) a timing portability bug found BY the new unit tests:
+    $SECONDS is not auto-incremented by every busybox build in play
+    (python:3.14-alpine treats it as a plain variable), so with `set -u` one
+    environment aborted the daemon outright ("parameter not set") and the
+    other silently froze every timer at 0 — wall-clock date +%s with the
+    NOW==0 glitch guard is the only portable source. FINAL ARCHITECTURE:
+    the spy session's reader subshell is dumb — it parses lines and writes
+    only the resulting count to /tmp/.keep-alive-count (failure lines are
+    never published); the MAIN shell polls it every POLL_SECONDS with
+    builtin-only reads (no per-tick exec chains), applies all decisions
+    itself, and owns launch()/kill() from a stable process. Locked by the
+    new behavioral suite tests/unit/test_keepalive.py (sandboxed daemon +
+    scripted fake xprop, 5 cases: close→relaunch regression guard,
+    unreadable-line skip incl. both atom-error spellings, IDLE-swap withdraw
+    protection, stuck force-kill + explicit relaunch, healthy-desktop
+    no-op). Verified: unit suite 98 passed; guest ext2 rebuilt;
+    tests/rootfs/smoke.sh full PASS incl. real close→relaunch under
+    Xvfb/Openbox; live-guest repro relaunches in ~2 s with exactly one
+    explorer afterwards.
+19. **Lazy non-UI imports in the desktop apps — SHIPPED 2026-08-24.**
+    Every app launch re-paid module bytecode reads + import machinery off
+    the overlay before the first window painted. Measured on the guest
+    image (native i386 docker; multiply by CheerpX's interpreter slowdown
+    in-browser): bare python 0.19 s → +tkinter 0.28 s (UI floor, cannot
+    defer) → +subprocess/threading/zipfile 0.35 s → +PIL.Image/ImageTk +
+    mistune 0.77 s. FIXES: file-viewer.py resolves Pillow and mistune
+    lazily (`_ensure_pillow` / `_ensure_mistune`) — availability flags stay
+    None until first use, then hold real bools and the imported names are
+    published into module globals so every existing bare-name call site is
+    untouched; a text-file open no longer imports PIL/mistune at all
+    (~0.42 s native per open). `_kind` gates image routing through the
+    resolver; `_to_photo`'s ImageTk fallback became tri-state (None =
+    unresolved) since the flag can no longer be known at window
+    construction. file-explorer.py defers subprocess/threading/zipfile via
+    tiny globals-caching accessors (`_sp`/`_th`/`_zf`, `return mod` — an
+    earlier draft's `return <module>` after `import <module>` hit Python's
+    local-binding rule and died as UnboundLocalError on the cached path,
+    caught immediately by the in-guest suite) (~70 ms/launch). Test-suite
+    contracts preserved: file-explorer-tests.py executes the app source with
+    an injected harness in ONE namespace and patches `subprocess.Popen`
+    through that shared global, so the harness now imports the three modules
+    itself (same sys.modules singletons); file-viewer-tests.py snapshotted
+    `_ns["HAVE_PILLOW"]` at exec time and now calls `_ns["_ensure_pillow"]()`
+    so image tests still run exactly when the shipped viewer would use
+    Pillow. Verified: py_compile all five files; guest ext2 rebuilt;
+    tests/rootfs/smoke.sh full PASS (both in-guest suites incl. real
+    Pillow/mistune render paths under Xvfb); frontend + server images
+    rebuilt with fingerprint dbb06b8c159d.
+20. **IDLE launch: per-boot loopback-verdict cache — SHIPPED 2026-08-24.**
+    IDLE's startup budget (measured on the guest image, native i386): bare
+    python 0.31 s + tkinter 0.15 s + idlelib.pyshell chain 0.95 s (pyc
+    prebaked — inherent to IDLE). On top of that, idle3.14-launcher re-ran
+    its bind→connect→select→accept loopback probe on EVERY launch whenever
+    eth0 had an address — and on the rebuilt tailscale.wasm the dead accept
+    path made each probe burn its select/accept timeouts (~2-8 s of
+    blank-screen swap per IDLE open on tailnet deployments). The verdict is
+    a static runtime property (dead-accept does not heal mid-session) and
+    -n works everywhere, so it is now computed ONCE per boot: new
+    `idle-loopback-cache` (probe extracted verbatim from the launcher +
+    verdict file /tmp/.idle-loopback), run backgrounded at desktop.start
+    right after the eth0/DHCP settle loop; idle3.14-launcher shrank to a
+    pidfile write + cache consult + exec (cache miss = undecided boot →
+    inline probe fallback, identical to the old behavior; first open after
+    boot pays at most what it always paid). Measured in-guest: repeat calls
+    0.36 s → 0.03 s on the success path; browser mode unchanged (no eth0 →
+    instant "no"). Not pursued: trimming the idlelib import chain (= forking
+    IDLE) and -S/frozen-modules tricks (<100 ms, breakage risk).
+    Verified: shellcheck/sh -n clean (both scripts added to CI shellcheck +
+    unit script lists); unit suite 100 passed; guest ext2 rebuilt
+    (4214532246cf); tests/rootfs/smoke.sh full PASS (IDLE still launches,
+    subprocess mode on real Linux via cached "ok"); frontend + server images
+    rebuilt.
+21. **Guest-wide `time.sleep` patch via sitecustomize — SHIPPED 2026-08-24.**
+    Root cause of the constant ~33% engine gauge (and periodic desktop
+    stutter) on tailnet deployments: sync.py's `_sleep()` degraded to a
+    busy-wait spin (§16 item 5 — no native wait primitive works), pinning
+    the single guest vCPU 5 s per poll cycle while Xorg/Tk/keep-alive
+    starved between forced preemptions. Fix at the PLATFORM level instead
+    of per-caller: new
+    `diskimage/rootfs/usr/lib/python3.14/site-packages/sitecustomize.py`
+    (loaded by CPython's site module in EVERY guest interpreter — sync
+    agent, explorer, viewer, IDLE `-n` user code, student scripts)
+    replaces `time.sleep` with a select()-timeout wait. Mechanism:
+    select's timeout arm is the one guest timer proven to fire under
+    CheerpX — Tcl's notifier implements every Tk after() as select(timeout),
+    and display-bug.md §2.8 traces its only defect (stale fd sets on a
+    0-return), which Python's select.select is immune to (returns empty
+    tuples). select is bound once at patch-install (no per-call import);
+    non-positive/None delegate to the native call preserving edge
+    semantics; select failure falls back to it too. Deliberate scope
+    limits: thread-primitive timeouts (pthread condvars) and C-level
+    sleepers (busybox sleep; would need an nanosleep→poll LD_PRELOAD shim,
+    Tier 2) are NOT covered; single-call shape (no deadline-retry loop — a
+    spurious-wakeup retry would be a hot spin); KeyboardInterrupt surfaces
+    immediately. sync.py `_sleep()` collapsed to `time.sleep(seconds)` —
+    the workaround deleted because the platform got fixed. Tests: new
+    tests/unit/test_sitecustomize.py execs the file against FAKE time and
+    select modules in sys.modules (the pytest interpreter is never patched;
+    an earlier draft learned that function-local `import select` re-imports
+    at CALL time — after the test restored real modules, so select is now
+    bound at install): patch installs, positive durations consume wall time
+    VIA SELECT (spy asserts no fallback), select failure falls back to the
+    original, zero/negative/None delegate unchanged, sync._sleep delegates
+    to time.sleep. Verified: unit suite 106 passed; guest ext2 rebuilt
+    (0c041e66ba0f); in-guest checks — `time.sleep.__name__ ==
+    "_cheerpx_sleep"`, sleep(1) consumes 1.00 s, webdav import path OK;
+    tests/rootfs/smoke.sh full PASS; frontend + server images rebuilt.
+    OPEN GATE: the select-timeout-fires-under-CheerpX assumption is proven
+    for Tcl but not yet bare-Python in-browser — CI's webdav E2E phase
+    (sync spec across many poll cycles) is the authoritative check; if it
+    falsifies (daemon stalls between scans = degraded latency, lease
+    takeover recovers), pivot per review plan to gateway-round-trip pacing
+    or the Tier 2 poll() shim.
 
 **The fix shim today (`diskimage/faccessat-fix.c`, built in the Dockerfile
 `shimbuild` stage, installed as `/usr/local/lib/faccessat-fix.so`):**

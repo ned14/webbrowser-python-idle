@@ -922,8 +922,10 @@ needs the package installed.)
    `setxkbmap` in `.xinitrc`. (The WM was switched 2026-08-18 from i3 to Openbox
    so each window gets a real titlebar ✕ Close button — i3 renders no close
    button. Openbox has no `i3-msg -t get_tree` tree IPC, so window enumeration
-   is via `wm-clients.py` reading the EWMH `_NET_CLIENT_LIST` root property the
-   WM maintains. The sync agent is a **single process started by
+   is via xprop reading the EWMH `_NET_CLIENT_LIST` root property the WM
+   maintains (the keep-alive counts it with the shell `wm-clients.sh`; the
+   file explorer reads it in-process via `_wm_client_windows`). The sync
+   agent is a **single process started by
    `desktop.start`** — not an Openbox autostart — so the boot pull and the push loop
    cannot race, §4.)
 - X bootstrap without a seat manager: rely on udev + group membership
@@ -2202,7 +2204,9 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     window** — the whole screen is IDLE's. A watcher thread decides when IDLE
     is gone by watching the **window manager's client list** (not the
     process): the WM (Openbox) maintains the EWMH `_NET_CLIENT_LIST` root
-    property, read by `/usr/local/bin/wm-clients.py` — under CheerpX
+    property, read in-process by the explorer (`_wm_client_windows`, via
+    xprop — no per-poll interpreter spawn; the keep-alive counts the same
+    property via the shell `wm-clients.sh`) — under CheerpX
     closing IDLE can leave the `idle3.10` process alive (it waits on its
     Python-shell subprocess, which a running program such as the snake game
     keeps busy), so waiting on the process would never return. The watcher

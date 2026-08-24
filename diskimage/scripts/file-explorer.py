@@ -1,11 +1,8 @@
-import json
 import os
+import re
 import shutil
 import signal
-import subprocess
-import threading
 import time
-import zipfile
 import tkinter as tk
 from tkinter import font, ttk, simpledialog, filedialog, messagebox
 
@@ -14,6 +11,38 @@ from tkinter import font, ttk, simpledialog, filedialog, messagebox
 # The image/text extension contract lives in file_types.py (shared with the
 # viewer) so routing and rendering cannot drift apart.
 from file_types import ALL_TEXT_EXTS, IMAGE_EXTS
+
+# subprocess / threading / zipfile load LAZILY via the accessors below: every
+# launch otherwise pays their bytecode reads + import machinery off the
+# overlay before the first window paints. First use publishes the module into
+# module globals, so all existing bare-name use sites keep working unchanged
+# (and the test suite's subprocess patching keeps operating on the shared
+# module object).
+def _sp():
+    mod = globals().get("subprocess")
+    if mod is None:
+        import subprocess
+        mod = subprocess
+        globals()["subprocess"] = subprocess
+    return mod
+
+
+def _th():
+    mod = globals().get("threading")
+    if mod is None:
+        import threading
+        mod = threading
+        globals()["threading"] = threading
+    return mod
+
+
+def _zf():
+    mod = globals().get("zipfile")
+    if mod is None:
+        import zipfile
+        mod = zipfile
+        globals()["zipfile"] = zipfile
+    return mod
 
 VIEWER = "/usr/local/bin/file-viewer.py"
 
@@ -29,6 +58,122 @@ try:
         f.write(str(os.getpid()))
 except OSError:
     pass
+
+# =========================
+# WM client-list polling
+# =========================
+# Openbox is an EWMH-compliant window manager but (unlike the old i3) has no
+# tree IPC; the WM's client windows are enumerated from the EWMH
+# `_NET_CLIENT_LIST` root property. The old `/usr/local/bin/wm-clients.py`
+# helper started a FRESH Python interpreter on every poll just to run one
+# xprop read; this already-running process reads the property directly
+# (xprop is the smallest X tool on the guest), so the watcher threads below
+# poll with no per-poll interpreter spawn. The keep-alive daemon counts the
+# same property via the shell `/usr/local/bin/wm-clients.sh`.
+
+def _xprop(*args):
+    """Run xprop and return its stdout text, or None on failure."""
+    try:
+        return _sp().check_output(["xprop", *args],
+                                  stderr=_sp().DEVNULL).decode(
+                                      "utf-8", "replace")
+    except Exception:
+        return None
+
+def _parse_atoms(text):
+    """Parse xprop -id output into {ATOM: raw-value} dict.
+
+    Each line looks like one of:
+        ATOM(STRING) = "value"
+        ATOM(UTF8_STRING) = "value"
+        ATOM(WINDOW) = 0x2a00001
+        ATOM(CARDINAL) = 12345
+
+    The value after the '=' is kept RAW (quotes intact), because WM_CLASS
+    carries TWO quoted tokens ("instance", "class") that a single generic
+    unquoter would mangle. Callers unquote/parse the specific atoms they need.
+    A UTF8 title that xprop wraps across two lines is joined here (the
+    continuation line has no 'ATOM(TYPE) =' prefix, so it is appended to the
+    previous value).
+    """
+    result = {}
+    if not text:
+        return result
+    last_atom = None
+    for line in text.splitlines():
+        line = line.strip()
+        m = re.match(r"([A-Za-z_0-9]+)\(([^)]*)\)\s*=\s*(.*)$", line)
+        if m:
+            last_atom = m.group(1)
+            result[last_atom] = m.group(3).strip()
+        elif last_atom is not None and line:
+            # Continuation of a multi-line UTF8 string value.
+            result[last_atom] = result.get(last_atom, "") + "\n" + line
+    return result
+
+def _unquote(value):
+    """Strip one pair of surrounding double quotes from an xprop value."""
+    value = value.strip()
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        return value[1:-1]
+    return value
+
+def _parse_class(value):
+    """Extract (instance, class) from an xprop WM_CLASS value.
+
+    Handles "instance", "class" and instance,class (unquoted) forms.
+    """
+    value = value.strip()
+    m = re.match(r'\s*"([^"]*)"\s*,\s*"([^"]*)"', value)
+    if m:
+        return m.group(1), m.group(2)
+    m = re.match(r"\s*([^,\s]+)\s*,\s*([^,\s]+)", value)
+    if m:
+        return m.group(1), m.group(2)
+    return "", ""
+
+def _wm_client_list():
+    """The WM's managed window IDs (ints), or None when the list cannot be read.
+
+    Mirrors the old wm-clients.py contract: when the WM is NOT running (the
+    `_NET_CLIENT_LIST` root property is absent — xprop reports "not found"),
+    None is returned so callers treat it as "cannot read the tree" rather
+    than as a legitimate empty desktop. A present-but-empty list (a WM with
+    no clients) still yields [].
+    """
+    text = _xprop("-root", "_NET_CLIENT_LIST")
+    if text is None:
+        return None
+    low = text.lower()
+    if "not found" in low or "no such atom" in low or not text.strip():
+        return None
+    ids = []
+    for m in re.finditer(r"0x[0-9a-fA-F]+", text):
+        try:
+            ids.append(int(m.group(0), 16))
+        except ValueError:
+            continue
+    return ids
+
+def _wm_client_windows():
+    """[{id, instance, class, name}] for every managed window, or None.
+
+    Reads the EWMH `_NET_CLIENT_LIST` via xprop directly from this process —
+    no per-poll interpreter spawn (the wm-clients.py helper is gone). Returns
+    None (not []) when the list cannot be read, so callers can treat a read
+    failure as "keep assuming the app is open".
+    """
+    ids = _wm_client_list()
+    if ids is None:
+        return None
+    windows = []
+    for wid in ids:
+        info = _parse_atoms(_xprop("-id", "0x%x" % wid) or "")
+        name = _unquote(info.get("_NET_WM_NAME") or info.get("WM_NAME") or "") or ""
+        instance, cls = _parse_class(info.get("WM_CLASS", ""))
+        windows.append({"id": wid, "instance": instance,
+                        "class": cls, "name": name})
+    return windows
 
 # =========================
 # App Setup
@@ -64,7 +209,7 @@ def set_status(msg):
         except Exception:
             pass
         status_clear_timer = None
-    if threading.current_thread() is threading.main_thread():
+    if _th().current_thread() is _th().main_thread():
         def _clear():
             global status_clear_timer
             status_clear_timer = None
@@ -488,7 +633,7 @@ class SingleTab(ttk.Frame):
         items = self.get_selected_items()
         n = len(items)
         has_py = any(p.endswith(".py") for p in items)
-        has_zip = any(zipfile.is_zipfile(p) for p in items)
+        has_zip = any(_zf().is_zipfile(p) for p in items)
         return [
             ("Open", self.open_selected, n > 0),
             ("Open with IDLE", self.open_with_idle, has_py),
@@ -577,7 +722,7 @@ class SingleTab(ttk.Frame):
         self._load_gen += 1
         gen = self._load_gen
         set_status(f"Loading {path}...")
-        threading.Thread(target=self._thread_load_folder, args=(gen,), daemon=True).start()
+        _th().Thread(target=self._thread_load_folder, args=(gen,), daemon=True).start()
 
     def _thread_load_folder(self, gen):
         try:
@@ -602,7 +747,7 @@ class SingleTab(ttk.Frame):
             # compute folder sizes asynchronously
             for e in entries:
                 if e["is_dir"]:
-                    threading.Thread(target=self.compute_folder_size, args=(e["path"],), daemon=True).start()
+                    _th().Thread(target=self.compute_folder_size, args=(e["path"],), daemon=True).start()
         except OSError as err:
             root.after(0, lambda: messagebox.showerror("Error", str(err)))
 
@@ -714,7 +859,7 @@ class SingleTab(ttk.Frame):
             set_status("xterm is not available")
             return
         try:
-            subprocess.Popen([xterm], cwd=self.current_path)
+            _sp().Popen([xterm], cwd=self.current_path)
             set_status("Terminal opened")
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -729,19 +874,19 @@ class SingleTab(ttk.Frame):
             return True
         opener = shutil.which("xdg-open")
         if opener:
-            subprocess.Popen([opener, path])
+            _sp().Popen([opener, path])
             return True
         # The guest image has no xdg-utils, so fall back to per-type openers.
         ext = os.path.splitext(path)[1].lower()
         if ext == ".py":
             launcher = "/usr/local/bin/idle3.14-launcher"
             if os.path.exists(launcher):
-                subprocess.Popen([launcher, path])
+                _sp().Popen([launcher, path])
                 return True
         xterm = shutil.which("xterm")
         if xterm and self._is_text_file(path):
             viewer = shutil.which("less") or shutil.which("vi") or "more"
-            subprocess.Popen([xterm, "-e", viewer, path])
+            _sp().Popen([xterm, "-e", viewer, path])
             return True
         return False
 
@@ -807,14 +952,14 @@ class SingleTab(ttk.Frame):
         window check doubles as the process check and is robust to a lingering
         process)."""
         try:
-            proc = subprocess.Popen([VIEWER] + list(paths),
+            proc = _sp().Popen([VIEWER] + list(paths),
                                     start_new_session=True)
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
         set_status(f"Opened {len(paths)} file(s) in viewer")
         root.withdraw()
-        threading.Thread(target=self._wait_for_viewer, args=(proc,),
+        _th().Thread(target=self._wait_for_viewer, args=(proc,),
                          daemon=True).start()
 
     def _wait_for_viewer(self, proc):
@@ -837,9 +982,11 @@ class SingleTab(ttk.Frame):
             time.sleep(0.5)
         # Phase 2: watch for the user closing the viewer window. The 0.5 s
         # cadence of phase 1 is only needed for window-mapping; here a slow
-        # poll avoids ~7200 wm-clients.py spawns/hour (subprocess + xprop +
-        # JSON parse each) competing with the viewer's rendering — a couple of
-        # seconds of delay before the explorer reappears is imperceptible.
+        # poll avoids thousands of xprop spawns/hour competing with the
+        # viewer's rendering — a couple of seconds of delay before the
+        # explorer reappears is imperceptible. Each poll is a single xprop
+        # subprocess read from this process (_wm_client_windows) — no
+        # interpreter spawn per poll.
         while True:
             if self._proc_exited(proc):
                 break
@@ -854,15 +1001,11 @@ class SingleTab(ttk.Frame):
     def _viewer_window_open():
         """True while the viewer's window is present in the WM's client list.
         The viewer sets class 'FileViewer' and a '<name> — Viewer' title. The
-        list comes from /usr/local/bin/wm-clients.py (reads Openbox's EWMH
-        _NET_CLIENT_LIST). On failure, assume still open so a transient error
-        never kills it prematurely."""
-        try:
-            out = subprocess.check_output(
-                ["/usr/local/bin/wm-clients.py", "--json"],
-                stderr=subprocess.DEVNULL)
-            windows = json.loads(out)
-        except Exception:
+        list is read in-process from Openbox's EWMH _NET_CLIENT_LIST via xprop
+        (_wm_client_windows — no per-poll interpreter spawn). On failure,
+        assume still open so a transient error never kills it prematurely."""
+        windows = _wm_client_windows()
+        if windows is None:
             return True
         for w in windows:
             if w.get("class") == "FileViewer":
@@ -895,7 +1038,7 @@ class SingleTab(ttk.Frame):
         procs = []
         for path in paths:
             try:
-                procs.append(subprocess.Popen(["/usr/local/bin/idle3.14-launcher", path],
+                procs.append(_sp().Popen(["/usr/local/bin/idle3.14-launcher", path],
                                               start_new_session=True))
             except Exception as e:
                 messagebox.showerror("Error", str(e))
@@ -904,7 +1047,7 @@ class SingleTab(ttk.Frame):
             return
         set_status(f"Opened {len(procs)} file(s) in IDLE")
         root.withdraw()
-        threading.Thread(target=self._wait_for_idle, args=(procs, list(paths)), daemon=True).start()
+        _th().Thread(target=self._wait_for_idle, args=(procs, list(paths)), daemon=True).start()
 
     def _wait_for_idle(self, procs, paths):
         # Never leave the explorer stuck: whatever happens (including watcher
@@ -954,17 +1097,14 @@ class SingleTab(ttk.Frame):
     @staticmethod
     def _idle_window_open(basenames):
         """True while an IDLE window (editor/shell) is present in the WM's
-        client list (via wm-clients.py). IDLE windows report class 'Toplevel'
-        or a 'Python ... Shell' title, or contain the opened file's name; a
-        program window (e.g. the snake game's plain Tk root, titled 'tk') does
-        not match. On failure, assume still open so a transient error never
-        kills IDLE prematurely."""
-        try:
-            out = subprocess.check_output(
-                ["/usr/local/bin/wm-clients.py", "--json"],
-                stderr=subprocess.DEVNULL)
-            windows = json.loads(out)
-        except Exception:
+        client list (read in-process from Openbox's EWMH _NET_CLIENT_LIST via
+        xprop — _wm_client_windows, no per-poll interpreter spawn). IDLE
+        windows report class 'Toplevel' or a 'Python ... Shell' title, or
+        contain the opened file's name; a program window (e.g. the snake
+        game's plain Tk root, titled 'tk') does not match. On failure, assume
+        still open so a transient error never kills IDLE prematurely."""
+        windows = _wm_client_windows()
+        if windows is None:
             return True
         for w in windows:
             name = w.get("name") or ""
@@ -1030,8 +1170,8 @@ class SingleTab(ttk.Frame):
         if pid:
             for _ in range(3):
                 try:
-                    subprocess.run(["pkill", "-9", "-P", str(pid)],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    _sp().run(["pkill", "-9", "-P", str(pid)],
+                                   stdout=_sp().DEVNULL, stderr=_sp().DEVNULL)
                 except Exception:
                     pass
                 time.sleep(0.15)
@@ -1218,7 +1358,7 @@ class SingleTab(ttk.Frame):
         zip_path = filedialog.asksaveasfilename(defaultextension=".zip")
         if not zip_path:
             return
-        with zipfile.ZipFile(zip_path, "w") as zf:
+        with _zf().ZipFile(zip_path, "w") as zf:
             for item in items:
                 if os.path.isdir(item):
                     for root_dir, dirs, files in os.walk(item):
@@ -1237,10 +1377,10 @@ class SingleTab(ttk.Frame):
             return
         dest_base = os.path.normpath(self.current_path)
         for item in items:
-            if not zipfile.is_zipfile(item):
+            if not _zf().is_zipfile(item):
                 continue
             try:
-                with zipfile.ZipFile(item, "r") as zf:
+                with _zf().ZipFile(item, "r") as zf:
                     for member in zf.infolist():
                         target = os.path.normpath(os.path.join(dest_base, member.filename))
                         if target != dest_base and not target.startswith(dest_base + os.sep):

@@ -243,13 +243,13 @@ EOF
 		exit 1
 	fi
 	# Openbox must be managing the explorer as a decorated client window: the
-	# EWMH root _NET_CLIENT_LIST must list it (wm-clients.py counts it). This
+	# EWMH root _NET_CLIENT_LIST must list it (wm-clients.sh counts it). This
 	# is the Openbox analog of the old i3 "decorated titlebar window" guard —
 	# a WM that never managed the window leaves the list empty. Poll briefly
 	# for the window to map, then refuse if it never appears.
 	CLIENT_OK=0
 	for _c in 1 2 3 4 5 6 7 8 9 10; do
-		COUNT=$(/usr/local/bin/wm-clients.py --count 2>/dev/null || true)
+		COUNT=$(/usr/local/bin/wm-clients.sh --count 2>/dev/null || true)
 		[ "${COUNT:-0}" = "0" ] || [ -z "${COUNT:-}" ] || { CLIENT_OK=1; break; }
 		sleep 1
 	done

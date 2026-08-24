@@ -39,6 +39,10 @@ BACKEND=$(cat /etc/webvm-backend 2>/dev/null || echo browser)
 			sleep 5
 		done
 	fi
+	# Decide IDLE's loopback mode ONCE per boot (idle3.14-launcher consults
+	# this cached verdict instead of re-probing on every launch — the dead-
+	# accept tailscale runtime made each probe burn ~2-8 s per IDLE open).
+	/usr/local/bin/idle-loopback-cache >/dev/null 2>&1 || true
 ) &
 
 # Sync boot-pull before the desktop starts (samba/webdav only; best-effort —
@@ -116,12 +120,6 @@ fi
 # Surface the X server's startup on the console (the guest has no other way
 # to report its details to the page).
 tail -n 8 /var/log/xorg.log >/dev/console 2>/dev/null || true
-# Warm the desktop apps (IDLE, file viewer, file explorer) before the user
-# session: imports read the byte-range block cache once, and the Tk->X
-# connection is exercised, so later launches are fast (replaces the deptree
-# loop's incidental warm-up — see /usr/local/sbin/prewarm-apps.sh). Bounded
-# and non-fatal.
-/usr/local/sbin/prewarm-apps.sh
 # The session is backgrounded; its output is redirected to /dev/console so
 # openbox/dbus failures stay visible on the page's console (the boot log screen
 # would otherwise hide them).

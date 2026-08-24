@@ -27,6 +27,7 @@ Standard library only (Python 3.6+). On Linux you may need:
 
 import math
 import random
+import time
 import turtle
 
 # ------------------------------------------------------------ canvas setup
@@ -272,6 +273,7 @@ def leaf_cluster(x, y, L):
     if random.random() < 0.5:
         fill_circle(x + R * 0.42, y + R * 0.46, R * 0.32,
                     mix(light, (172, 208, 112), 0.5), 12)
+    screen.update()                 # reveal this tip as it's drawn
 
 
 def branch(x, y, ang, length, width, depth):
@@ -279,6 +281,7 @@ def branch(x, y, ang, length, width, depth):
     color = branch_color(depth)
     w1 = width * 0.62                           # width at the tip
     tapered_part(x, y, ang, length, width, w1, -1, 1, -1, 1, color)
+    screen.update()                     # show each section as it's drawn
 
     if depth <= 3:                              # cylindrical shading
         shadow_c = mix(color, (26, 17, 10), 0.55)

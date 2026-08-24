@@ -20,6 +20,7 @@ SHELL_SCRIPTS = [
     ROOT / "scripts" / "print-url.sh",
     ROOT / "scripts" / "acceptance.sh",
     ROOT / "scripts" / "fetch-cheerpx-runtime.sh",
+    ROOT / "scripts" / "precompress-static.sh",
     ROOT / "server" / "entrypoint.sh",
     ROOT / "gateway" / "entrypoint.sh",
     ROOT / "diskimage" / "sync" / "sync-home.sh",
@@ -27,6 +28,9 @@ SHELL_SCRIPTS = [
     ROOT / "diskimage" / "scripts" / "99-screen-resize.sh",
     ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "open-file-explorer.sh",
     ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "keep-file-explorer.sh",
+    ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "idle3.14-launcher",
+    ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "idle-loopback-cache",
+    ROOT / "diskimage" / "scripts" / "wm-clients.sh",
     ROOT / "tests" / "rootfs" / "smoke.sh",
     ROOT / "tests" / "server" / "integration.sh",
     ROOT / "tests" / "server" / "join-test-client.sh",
@@ -39,9 +43,11 @@ PYTHON_SOURCES = [
     ROOT / "diskimage" / "scripts" / "file_types.py",
     ROOT / "diskimage" / "scripts" / "file-viewer.py",
     ROOT / "diskimage" / "scripts" / "file-viewer-tests.py",
-    ROOT / "diskimage" / "scripts" / "wm-clients.py",
     ROOT / "server" / "render-webvm-config.py",
     ROOT / "tests" / "fixtures" / "fake_webdav.py",
+    # The guest-wide time.sleep patch (loaded by CPython's site module).
+    ROOT / "diskimage" / "rootfs" / "usr" / "lib" / "python3.14" /
+    "site-packages" / "sitecustomize.py",
 ]
 
 

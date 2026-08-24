@@ -886,35 +886,15 @@ def wait_for_tailnet(transport, log=print):
 
 
 def _sleep(seconds):
-    # CheerpX quirks (verified 2026-08-15, plans/networking-bug.md §16):
-    # Python time.sleep() timers never fire (hang forever); busybox `sleep`
-    # via subprocess is flaky; busy-waits starve the guest clock; emulated
-    # socket-timeout waits hang too. NO wait primitive is reliable, so the
-    # sync's critical path avoids sleeping entirely (DEBOUNCE_S=0); this is
-    # a best-effort wait for the non-critical loops (poll interval, lease
-    # retry), which may stall under CheerpX without breaking the sync.
-    # On native runtimes the socket wait errors out instantly, so the
-    # remaining time is busy-waited on the (reliable) native clock.
-    t0 = time.time()
-    try:
-        import socket
-        s = socket.socket()
-        s.settimeout(seconds)
-        try:
-            s.recv(1)
-        except socket.timeout:
-            pass
-        except Exception:
-            pass
-        finally:
-            s.close()
-    except Exception:
-        pass
-    remaining = seconds - (time.time() - t0)
-    if remaining > 0:
-        end = time.time() + remaining
-        while time.time() < end:
-            pass
+    # time.sleep is patched by sitecustomize (shipped at
+    # /usr/lib/python3.14/site-packages/sitecustomize.py) to park on
+    # select()'s timeout arm — the one guest timer that fires under CheerpX.
+    # Before that patch existed this function hand-rolled a best-effort wait
+    # (unconnected-socket recv + busy-wait remainder), which spun the single
+    # guest vCPU: constant ~33% engine load and periodic desktop stutter on
+    # tailnet deployments (networking-bug.md §16 item 5 documents why every
+    # native wait primitive hangs).
+    time.sleep(seconds)
 
 
 def cmd_pull(home, cfg, log=print):

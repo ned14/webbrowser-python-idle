@@ -1,0 +1,72 @@
+#!/bin/sh
+# Loopback round-trip probe with PER-BOOT CACHING.
+#
+# Decides whether IDLE may use its default subprocess mode (working 127.0.0.1
+# TCP loopback) or must run in-process (-n). The full rationale — why -n
+# exists, why bind() alone is not enough, and why an unregistered tailnet
+# must never be probed — lives in idle3.14-launcher's header; this script
+# extracts the probe so the verdict is computed ONCE per boot instead of on
+# every IDLE launch: on the rebuilt tailscale.wasm the dead accept path made
+# each probe burn its select/accept timeouts (~2-8 s of blank-screen swap
+# per open). The verdict is a static property of the runtime (dead-accept
+# does not heal mid-session), and -n works everywhere, so a per-boot cache
+# is safe.
+#
+# Verdict file: /tmp/.idle-loopback contains "ok" (subprocess mode allowed)
+# or "no" (-n required). A missing file means undecided: this script then
+# probes inline (bounded by `timeout 8`) and records the result — so both
+# the boot-time background call (desktop.start) and a launcher fallback on
+# an undecided boot converge on the same cached verdict.
+set -u
+
+CACHE=/tmp/.idle-loopback
+
+# Already decided this boot: report the cached verdict.
+if [ -f "$CACHE" ]; then
+	case "$(cat "$CACHE" 2>/dev/null)" in
+		ok) exit 0 ;;
+	esac
+	exit 1
+fi
+
+# Condition 1: a network stack with an assigned address. Without it there is
+# no loopback TCP at all -> -n, decided instantly.
+if ip addr show eth0 2>/dev/null | grep -q "inet "; then
+	# Condition 2: a FULL round trip (bind+listen, connect, accept). On the
+	# dead-accept runtime connect_ex completes but accept never fires, so
+	# the bounded probe below fails -> -n.
+	if timeout 8 python3 - <<'EOF' >/dev/null 2>&1
+import socket, select, sys
+try:
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    cli.setblocking(False)
+    rc = cli.connect_ex(("127.0.0.1", port))
+    # connect_ex returns immediately (EINPROGRESS) when the round trip can
+    # complete; under the dead-accept runtime the SYN is consumed and the
+    # connection never becomes writable, so the select times out -> -n.
+    if rc not in (0, 115, 36):  # 0 done, 115 EINPROGRESS, 36 EALREADY
+        sys.exit(1)
+    _, w, _ = select.select([], [cli], [], 4)
+    if not w:
+        sys.exit(1)
+    srv.settimeout(2)
+    conn, _ = srv.accept()
+    conn.close()
+    cli.close()
+    srv.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+EOF
+	then
+		echo ok > "$CACHE" 2>/dev/null
+		exit 0
+	fi
+fi
+echo no > "$CACHE" 2>/dev/null
+exit 1

@@ -248,11 +248,13 @@ RUN chmod +x /home/user/.xinitrc && \
 # can run them in-guest under Xvfb.
 COPY scripts/file-explorer.py /usr/local/bin/file-explorer.py
 COPY scripts/file-explorer-tests.py /usr/local/bin/file-explorer-tests.py
-# Window-enumeration helper: Openbox (unlike the old i3) has no tree IPC, so
-# the explorer's window probes and the keep-alive daemon enumerate the WM's
-# client windows via xprop below. Installed for both the desktop and, for the
-# rootfs smoke suite, the in-guest tests.
-COPY scripts/wm-clients.py /usr/local/bin/wm-clients.py
+# Window-count helper: Openbox (unlike the old i3) has no tree IPC, so the
+# keep-alive daemon counts the WM's client windows via xprop below (pure
+# shell — no Python interpreter spawn on every 3 s poll; the old
+# wm-clients.py is gone). The file explorer itself reads the same
+# _NET_CLIENT_LIST property in-process (file-explorer.py `_wm_client_windows`).
+# Installed for the desktop and, for the rootfs smoke suite, the in-guest tests.
+COPY scripts/wm-clients.sh /usr/local/bin/wm-clients.sh
 # Shared file-type contract (explorer routing + viewer rendering) — importable
 # from /usr/local/bin by both scripts (underscore name: it is a module, not
 # an executable).
@@ -264,7 +266,7 @@ COPY scripts/file-viewer.py /usr/local/bin/file-viewer.py
 COPY scripts/file-viewer-tests.py /usr/local/bin/file-viewer-tests.py
 COPY rootfs/usr/local/bin/open-file-explorer.sh /usr/local/bin/open-file-explorer.sh
 COPY rootfs/usr/local/bin/keep-file-explorer.sh /usr/local/bin/keep-file-explorer.sh
-RUN chmod +x /usr/local/bin/open-file-explorer.sh /usr/local/bin/keep-file-explorer.sh /usr/local/bin/file-viewer.py /usr/local/bin/wm-clients.py
+RUN chmod +x /usr/local/bin/open-file-explorer.sh /usr/local/bin/keep-file-explorer.sh /usr/local/bin/file-viewer.py /usr/local/bin/wm-clients.sh
 
 # A starter .py in the home directory: new users can double-click it to try
 # IDLE right away, and the smoke suite's real-IDLE-launch check uses it.
@@ -295,13 +297,14 @@ COPY rootfs/etc/network/interfaces /etc/network/interfaces
 COPY rootfs/etc/local.d/desktop.start /etc/local.d/desktop.start
 RUN chmod +x /etc/local.d/desktop.start
 COPY rootfs/usr/local/bin/idle3.14-launcher /usr/local/bin/idle3.14-launcher
-RUN chmod +x /usr/local/bin/idle3.14-launcher
+# Per-boot loopback verdict for the IDLE launcher (see idle-loopback-cache):
+# computed once at desktop.start, consulted on every IDLE launch.
+COPY rootfs/usr/local/bin/idle-loopback-cache /usr/local/bin/idle-loopback-cache
+RUN chmod +x /usr/local/bin/idle3.14-launcher /usr/local/bin/idle-loopback-cache
 # LD_PRELOAD bootstrap for the openrc boot chain (inittab sysinit/boot/
 # default lines run through this wrapper — busybox init cannot set env)
 COPY rootfs/usr/local/sbin/rc-preload /usr/local/sbin/rc-preload
 RUN chmod 0755 /usr/local/sbin/rc-preload
-COPY rootfs/usr/local/sbin/prewarm-apps.sh /usr/local/sbin/prewarm-apps.sh
-RUN chmod 0755 /usr/local/sbin/prewarm-apps.sh
 # rc_env_allow: openrc's env_filter() strips LD_PRELOAD from the exec'd
 # init scripts' environment, which made them crash on faccessat(-1) under
 # CheerpX (no shim loaded). Keep it through (Tier B; see faccessat-fix.c).
@@ -325,6 +328,11 @@ COPY rootfs/etc/X11/xorg.conf /etc/X11/xorg.conf
 # Fontconfig aliases for common missing font families (consolas, arial, ...)
 # -> the installed DejaVu families (deterministic Tk/Xft font resolution).
 COPY rootfs/etc/fonts/conf.d/99-webvm-aliases.conf /etc/fonts/conf.d/99-webvm-aliases.conf
+
+# Global time.sleep patch for the CheerpX guest (see the file header):
+# site.py imports sitecustomize in EVERY interpreter — sync agent, explorer,
+# viewer, IDLE (-n user code included), any student script.
+COPY rootfs/usr/lib/python3.14/site-packages/sitecustomize.py /usr/lib/python3.14/site-packages/sitecustomize.py
 
 # CRITICAL FIX (2026-08-10, root cause of the display bug): `docker build`
 # creates a `/.dockerenv` file in the container rootfs. The `docker export`

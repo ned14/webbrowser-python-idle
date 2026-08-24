@@ -38,6 +38,13 @@ import os as _os
 import shutil as _shutil
 import sys as _sys
 import tempfile as _tempfile
+# file-explorer.py loads subprocess/threading/zipfile lazily now (first use
+# publishes them into this shared namespace); bind them here too so every
+# test body can patch/read the names directly regardless of what production
+# code has touched so far. Same sys.modules singletons either way.
+import subprocess
+import threading
+import zipfile
 
 # ---- framework -------------------------------------------------------------
 TESTS = []
@@ -819,7 +826,7 @@ def test_open_in_viewer_replaces_screen(done):
     calls = []
     class FakePopen:
         def __init__(self, args, **kw):
-            if args and args[0] != "/usr/local/bin/wm-clients.py":  # ignore the watcher's wm-clients probes
+            if args and os.path.basename(args[0]) != "xprop":  # ignore the watcher's in-process xprop probes
                 calls.append(list(args))
             self._end = time.time() + 0.6
         def poll(self):
@@ -860,7 +867,7 @@ def test_viewer_window_close_returns_when_process_lingers(done):
     calls = []
     class FakePopen:
         def __init__(self, args, **kw):
-            if args and args[0] != "/usr/local/bin/wm-clients.py":  # ignore the watcher's wm-clients probes
+            if args and os.path.basename(args[0]) != "xprop":  # ignore the watcher's in-process xprop probes
                 calls.append(list(args))
             self.pid = 424243  # process never exits on its own
         def poll(self):
@@ -1070,7 +1077,7 @@ def test_open_with_idle_replaces_screen(done):
     calls = []
     class FakePopen:
         def __init__(self, args, **kw):
-            if args and args[0] != "/usr/local/bin/wm-clients.py":  # ignore the watcher's wm-clients probes
+            if args and os.path.basename(args[0]) != "xprop":  # ignore the watcher's in-process xprop probes
                 calls.append(list(args))
             self._end = time.time() + 0.6
         def poll(self):
@@ -1111,7 +1118,7 @@ def test_idle_window_close_returns_when_process_lingers(done):
     calls = []
     class FakePopen:
         def __init__(self, args, **kw):
-            if args and args[0] != "/usr/local/bin/wm-clients.py":  # ignore the watcher's wm-clients probes
+            if args and os.path.basename(args[0]) != "xprop":  # ignore the watcher's in-process xprop probes
                 calls.append(list(args))
             self.pid = 424242  # process never exits on its own
         def poll(self):

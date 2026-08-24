@@ -276,9 +276,13 @@ jobs:
             build.sh server/entrypoint.sh gateway/entrypoint.sh \
             scripts/gen-certs.sh scripts/print-url.sh scripts/acceptance.sh \
             scripts/fetch-cheerpx-runtime.sh scripts/rebuild-tailscale-wasm.sh \
+            scripts/precompress-static.sh \
             diskimage/sync/sync-home.sh diskimage/rootfs/etc/local.d/desktop.start \
             diskimage/rootfs/usr/local/bin/keep-file-explorer.sh \
             diskimage/rootfs/usr/local/bin/open-file-explorer.sh \
+            diskimage/rootfs/usr/local/bin/idle3.14-launcher \
+            diskimage/rootfs/usr/local/bin/idle-loopback-cache \
+            diskimage/scripts/wm-clients.sh \
             diskimage/scripts/99-screen-resize.sh tests/rootfs/smoke.sh \
             tests/server/integration.sh tests/server/join-test-client.sh
       - name: yamllint

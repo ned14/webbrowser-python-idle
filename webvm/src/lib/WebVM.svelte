@@ -541,42 +541,62 @@
 		if(processCallback)
 			processCallback(processCount);
 	}
+	// ------------------------------------------------------------------
+	// Early boot-resource fetch. The naive chain is strictly sequential:
+	// hydration -> terminal setup -> dynamic import of the CheerpX runtime
+	// (~2.5 MB JS/WASM) -> disk block-device creation (first ext2 range
+	// GETs). Only terminal rendering truly needs to finish first, so start
+	// the runtime import and both device creations at mount time,
+	// concurrently with terminal setup — initCheerpX then just awaits the
+	// finished (or in-flight) promises. On a cold cache this overlaps the
+	// xterm chunk load with the CheerpX runtime download and the first
+	// image ranges; on a warm cache everything is local and free.
+	//
+	// Each promise gets an immediate no-op catch: an early rejection must
+	// NOT surface as a global unhandledrejection (that routes engine errors
+	// into the trap overlay prematurely) but must still propagate when the
+	// promise is awaited inside initCheerpX, exactly where the old inline
+	// code threw.
+	var earlyCheerpx = null;
+	var earlyBlockDevice = null;
+	var earlyBlockCache = null;
+	var earlyFetchStarted = false;
+	function guardedPromise(promise)
+	{
+		promise.catch(function() {});
+		return promise;
+	}
+	function startEarlyBootFetch()
+	{
+		if(earlyFetchStarted || fatal)
+			return;
+		earlyFetchStarted = true;
+		earlyCheerpx = guardedPromise(import('@leaningtech/cheerpx'));
+		earlyBlockCache = guardedPromise(earlyCheerpx.then(function(CheerpX) {
+			return CheerpX.IDBDevice.create(cacheId);
+		}));
+		earlyBlockDevice = guardedPromise(earlyCheerpx.then(function(CheerpX) {
+			switch(configObj.diskImageType)
+			{
+				// NOTE: unlike the old inline chain, the cloud case no longer
+				// retries wss:// URLs over https — that branch predates this
+				// project and every configured diskImageUrl is already
+				// https://same-origin (bytes) or a GitHub chunked image.
+				case "cloud":
+					return CheerpX.CloudDevice.create(configObj.diskImageUrl);
+				case "bytes":
+					return CheerpX.HttpBytesDevice.create(configObj.diskImageUrl);
+				case "github":
+					return CheerpX.GitHubDevice.create(configObj.diskImageUrl);
+				default:
+					throw new Error("Unrecognized device type");
+			}
+		}));
+	}
 	async function initCheerpX()
 	{
-		const CheerpX = await import('@leaningtech/cheerpx');
-		var blockDevice = null;
-		switch(configObj.diskImageType)
-		{
-			case "cloud":
-				try
-				{
-					blockDevice = await CheerpX.CloudDevice.create(configObj.diskImageUrl);
-				}
-				catch(e)
-				{
-					// Report the failure and try again with plain HTTP
-					var wssProtocol = "wss:";
-					if(configObj.diskImageUrl.startsWith(wssProtocol))
-					{
-						// WebSocket protocol failed, try agin using plain HTTP
-						blockDevice = await CheerpX.CloudDevice.create("https:" + configObj.diskImageUrl.substr(wssProtocol.length));
-					}
-					else
-					{
-						// No other recovery option
-						throw e;
-					}
-				}
-				break;
-			case "bytes":
-				blockDevice = await CheerpX.HttpBytesDevice.create(configObj.diskImageUrl);
-				break;
-			case "github":
-				blockDevice = await CheerpX.GitHubDevice.create(configObj.diskImageUrl);
-				break;
-			default:
-				throw new Error("Unrecognized device type");
-		}
+		const CheerpX = await earlyCheerpx;
+		var blockDevice = await earlyBlockDevice;
 		// Test-only hook (tests/e2e/tests/error-overlay.spec.js): force a boot
 		// failure so the fatal overlay's exact-reason display is assertable.
 		if (sessionStorage.getItem("webvm-test-bootfail"))
@@ -592,7 +612,7 @@
 		{
 			console.log("Unexpected exit", new Error("test-forced engine trap (webvm-test-trapreport)"));
 		}
-		blockCache = await CheerpX.IDBDevice.create(cacheId);
+		blockCache = await earlyBlockCache;
 		var overlayDevice = await CheerpX.OverlayDevice.create(blockDevice, blockCache);
 		var webDevice = await CheerpX.WebDevice.create("");
 		var documentsDevice = await CheerpX.WebDevice.create("documents");
@@ -700,6 +720,10 @@
 			if(document.visibilityState === "visible" && bootStarted && !pixelSeen)
 				guestOutputTs = Date.now();
 		});
+		// Start fetching the CheerpX runtime + disk devices NOW, concurrently
+		// with terminal setup (see startEarlyBootFetch). initCheerpX awaits
+		// these promises after the terminal is ready.
+		startEarlyBootFetch();
 		initTerminal().catch((e) => { showFatal("boot", e); });
 	});
 	async function handleConnect()
