@@ -300,6 +300,8 @@ RUN chmod +x /usr/local/bin/idle3.14-launcher
 # default lines run through this wrapper — busybox init cannot set env)
 COPY rootfs/usr/local/sbin/rc-preload /usr/local/sbin/rc-preload
 RUN chmod 0755 /usr/local/sbin/rc-preload
+COPY rootfs/usr/local/sbin/prewarm-apps.sh /usr/local/sbin/prewarm-apps.sh
+RUN chmod 0755 /usr/local/sbin/prewarm-apps.sh
 # rc_env_allow: openrc's env_filter() strips LD_PRELOAD from the exec'd
 # init scripts' environment, which made them crash on faccessat(-1) under
 # CheerpX (no shim loaded). Keep it through (Tier B; see faccessat-fix.c).
@@ -385,8 +387,6 @@ RUN /sbin/openrc sysinit; true
 RUN rm -rf /usr/share/doc /usr/share/man /usr/share/info /var/cache/apk/*
 
 # Size trimming (round 2, 2026-08-21): components verified unused at runtime.
-#   * Python __pycache__ (.pyc) — regenerated on demand by the interpreter
-#     (the guest FS is writable), so precompiling buys nothing here.
 #   * /usr/share/mime — only libgio's g_content_type_guess reads it; no guest
 #     binary calls that path (openbox menu has no icons, the explorer sniffs
 #     file types itself, xterm less/vi do not need the MIME DB).
@@ -406,7 +406,16 @@ RUN rm -rf /usr/share/doc /usr/share/man /usr/share/info /var/cache/apk/*
 #   * imlib2 CLI tools, non-Clearlooks openbox themes, mesa leftovers
 #     (drirc.d) and build-time aclocal macros, fontconfig cache (regenerated
 #     on demand).
-RUN find /usr/lib/python3.14 -type d -name __pycache__ -prune -exec rm -rf {} + && \
+#   * Python __pycache__ is NOT removed — it is PRE-BAKED with compileall.
+#     The original round-2 trim deleted __pycache__ on the theory that the
+#     interpreter regenerates it on demand, but that made the FIRST import on
+#     a fresh boot recompile every stdlib module onto the SLOW overlay
+#     (measured: first `import tkinter` 1.12 s with no pyc vs 0.30 s with
+#     baked pyc — plans/update-to-latest.md §9.5.1 item 11; idlelib and the
+#     file explorer import far more and paid even more). compileall prebakes
+#     bytecode matching the exact installed 3.14 interpreter (+~5.5 MiB),
+#     so first-run imports read cached .pyc instead of recompiling.
+RUN python3 -m compileall -q -j 4 /usr/lib/python3.14 && \
 	rm -rf /usr/share/mime /usr/libexec/glycin-loaders /usr/share/hwdata \
 		/usr/lib/girepository-1.0 /usr/share/drirc.d /usr/share/aclocal \
 		/var/cache/fontconfig \

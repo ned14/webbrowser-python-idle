@@ -767,6 +767,16 @@ class FileViewer(tk.Tk):
 
 
 def main(argv):
+    # PID file for the keep-alive daemon: while the viewer is up, the explorer
+    # is withdrawn, and the keep-alive must not treat that as a stuck desktop.
+    # pgrep -f is unusable in the guest (the CheerpX core traps on
+    # /proc/<pid>/cmdline reads of processes still being set up — see
+    # faccessat-fix.c), so liveness is tracked via this file.
+    try:
+        with open("/tmp/viewer.pid", "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
     paths = [p for p in argv if os.path.isfile(p)]
     if not paths:
         print("usage: file-viewer.py FILE [FILE ...]", file=sys.stderr)

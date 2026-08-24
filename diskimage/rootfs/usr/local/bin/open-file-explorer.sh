@@ -6,7 +6,13 @@
 # While IDLE is open the explorer is merely withdrawn (process alive, no
 # window), so a second launch must not happen — the guard keeps the desktop to
 # a single explorer at all times.
-if pgrep -f "file-explorer.py" >/dev/null 2>&1; then
+#
+# The single-instance guard checks the PID file written by the explorer
+# (CheerpX core defect: `pgrep -f` scans every /proc/<pid>/cmdline, and a read
+# of a process still being set up traps the emulator — see
+# diskimage/faccessat-fix.c; the guest shim now returns EOF for cmdline reads,
+# so the full command line is never available and pgrep -f cannot be used).
+if [ -f /tmp/explorer.pid ] && kill -0 "$(cat /tmp/explorer.pid 2>/dev/null)" 2>/dev/null; then
 	exit 0
 fi
 exec python3 /usr/local/bin/file-explorer.py

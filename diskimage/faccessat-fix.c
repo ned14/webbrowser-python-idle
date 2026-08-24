@@ -45,6 +45,8 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -72,6 +74,126 @@ typedef int (*sigprocmask_fn)(int, const sigset_t *, sigset_t *);
 
 #include <poll.h>
 #include <sys/types.h>
+
+/*
+ * Fourth CheerpX defect fixed here (diagnosed 2026-08-22): reading a
+ * /proc/<pid>/cmdline file while that process is still being set up (the
+ * keep-alive daemon's `pgrep -f` scans every pid while the desktop session
+ * spawns) traps the whole emulator with
+ *   Fault addr c0100000, ip 555f230d, proc /usr/bin/pgrep
+ *   Fault from Inode 18
+ * (the core's cmdline generator reads the process's argv from a bogus
+ * kernel address). The fault is a guest-mode read of the i386 kernel linear
+ * map base — a mid-exec process's arg_start is not yet a valid user pointer.
+ * The desktop is never blocked (the scan's process dies and the next poll
+ * succeeds) but the boot console prints the trap loudly on every boot.
+ *
+ * FIX: interpose read(2) and return 0 (EOF) for any /proc/<pid>/cmdline
+ * read, so pgrep/ps fall back to the comm field and never trigger the core's
+ * cmdline generator. The single-instance/keep-alive detection that used
+ * `pgrep -f "file-explorer.py"` etc. now uses PID files written by the
+ * explorer/viewer/IDLE launchers instead (keep-file-explorer.sh,
+ * open-file-explorer.sh, idle3.14-launcher) — the full cmdline is never
+ * needed by the guest. fd→path tracking is only maintained for /proc fds;
+ * everything else passes straight through.
+ */
+
+/* fd -> path for /proc files only (small fixed table; the guest uses low fds) */
+#define PROC_FD_TABLE 256
+static char proc_fd_path[PROC_FD_TABLE][256];
+static int proc_fd_used[PROC_FD_TABLE];
+
+static void note_proc_fd(int fd, const char *path)
+{
+	if (fd >= 0 && fd < PROC_FD_TABLE) {
+		if (path && strncmp(path, "/proc/", 6) == 0) {
+			snprintf(proc_fd_path[fd], sizeof(proc_fd_path[fd]), "%s", path);
+			proc_fd_used[fd] = 1;
+		} else {
+			/* A non-/proc open reuses the fd: drop any stale entry. */
+			proc_fd_used[fd] = 0;
+			proc_fd_path[fd][0] = '\0';
+		}
+	}
+}
+
+typedef int (*close_fn)(int);
+
+static close_fn real_close;
+
+int
+close(int fd)
+{
+	if (!real_close)
+		real_close = (close_fn)dlsym(RTLD_NEXT, "close");
+	if (fd >= 0 && fd < PROC_FD_TABLE && proc_fd_used[fd]) {
+		proc_fd_used[fd] = 0;
+		proc_fd_path[fd][0] = '\0';
+	}
+	return real_close(fd);
+}
+
+typedef ssize_t (*read_fn)(int, void *, size_t);
+
+ssize_t
+read(int fd, void *buf, size_t count)
+{
+	static read_fn real_read;
+
+	if (!real_read)
+		real_read = (read_fn)dlsym(RTLD_NEXT, "read");
+	if (fd >= 0 && fd < PROC_FD_TABLE && proc_fd_used[fd]) {
+		size_t plen = strlen(proc_fd_path[fd]);
+		if (plen > 8 && strcmp(proc_fd_path[fd] + plen - 8, "/cmdline") == 0) {
+			/* CheerpX core defect: the /proc/<pid>/cmdline read can
+			 * trap the emulator (mid-exec processes read a kernel
+			 * address). EOF makes pgrep/ps fall back to the (safe)
+			 * comm field. */
+			return 0;
+		}
+	}
+	return real_read(fd, buf, count);
+}
+
+typedef int (*open_fn)(const char *, int, ...);
+typedef int (*openat_fn)(int, const char *, int, ...);
+
+static open_fn real_open;
+static openat_fn real_openat;
+
+int
+open(const char *path, int flags, ...)
+{
+	va_list ap;
+	mode_t mode = 0;
+	int fd;
+
+	va_start(ap, flags);
+	mode = (mode_t)va_arg(ap, int);
+	va_end(ap);
+	if (!real_open)
+		real_open = (open_fn)dlsym(RTLD_NEXT, "open");
+	fd = real_open(path, flags, mode);
+	note_proc_fd(fd, path);
+	return fd;
+}
+
+int
+open64(const char *path, int flags, ...)
+{
+	va_list ap;
+	mode_t mode = 0;
+	int fd;
+
+	va_start(ap, flags);
+	mode = (mode_t)va_arg(ap, int);
+	va_end(ap);
+	if (!real_open)
+		real_open = (open_fn)dlsym(RTLD_NEXT, "open");
+	fd = real_open(path, flags, mode);
+	note_proc_fd(fd, path);
+	return fd;
+}
 
 static faccessat_fn real_faccessat;
 static unlinkat_fn real_unlinkat;
@@ -123,6 +245,8 @@ mkdirat(int dfd, const char *path, mode_t mode)
 int
 openat(int dfd, const char *path, int flags, ...)
 {
+	int fd;
+
 	if (bad_dfd(dfd)) { errno = EBADF; return -1; }
 	if (!real_openat)
 		real_openat = (openat_fn)dlsym(RTLD_NEXT, "openat");
@@ -132,8 +256,10 @@ openat(int dfd, const char *path, int flags, ...)
 		va_start(ap, flags);
 		mode = (mode_t)va_arg(ap, int);
 		va_end(ap);
-		return real_openat(dfd, path, flags, mode);
+		fd = real_openat(dfd, path, flags, mode);
 	}
+	note_proc_fd(fd, path);
+	return fd;
 }
 
 int
@@ -284,4 +410,50 @@ sigprocmask(int how, const sigset_t *set, sigset_t *old)
 	if (!real_sigprocmask)
 		real_sigprocmask = (sigprocmask_fn)dlsym(RTLD_NEXT, "sigprocmask");
 	return real_sigprocmask(how, set, old);
+}
+
+/*
+ * Third CheerpX defect fixed here (diagnosed 2026-08-21): CheerpX's fstatat
+ * returns a GARBAGE st_mtime (year 2695, e.g. 22906776799) for DIRECTORY
+ * inodes — regular files are correct, only directory inodes are affected.
+ * OpenRC's rc_deptree_update_needed() compares the cached dependency tree
+ * (/run/openrc/deptree, baked into the image by `RUN /sbin/openrc sysinit`
+ * in the Dockerfile) against the mtimes of every init.d/conf.d file AND the
+ * init.d DIRECTORY itself. The bogus directory mtime (2695) always reads
+ * "newer" than the baked deptree (2026), so openrc believes the cache is
+ * stale and re-runs "Caching service dependencies" on EVERY openrc
+ * invocation and every service state transition (~2 s each under CheerpX —
+ * the boot loses ~20 s to the loop; measured with a timestamped boot-console
+ * probe. See plans/update-to-latest.md §9.5.1 item 10.)
+ *
+ * Interpose rc_deptree_update_needed() (exported by librc.so.1 and called
+ * through the openrc binary's PLT — the openrc build has no -Bsymbolic) to
+ * skip the mtime scan entirely: the image SHIPS a pre-baked deptree, so the
+ * cache is always up to date. Only a MISSING deptree (a fresh browser
+ * overlay with an empty /run, e.g. the first boot after the disk image
+ * changes) must force regeneration. stat() is safe here (CheerpX returns
+ * correct mtimes for regular files — only directory fstatat is broken), so
+ * the existence check is reliable.
+ *
+ * ABI note: openrc declares this `bool` (_Bool, one byte); returning an int
+ * 0/1 is ABI-compatible on x86 (the caller reads AL, which holds 0/1).
+ */
+typedef int (*rc_deptree_update_needed_fn)(time_t *, char *);
+
+int
+rc_deptree_update_needed(time_t *newest, char *file)
+{
+	struct stat st;
+
+	/* The baked deptree is the source of truth. Only a MISSING cache
+	 * must be regenerated (fresh overlay); never trust mtimes under
+	 * CheerpX (directory fstatat returns year 2695). */
+	if (stat("/run/openrc/deptree", &st) == 0) {
+		if (newest)
+			*newest = 0;
+		if (file)
+			file[0] = '\0';
+		return 0;
+	}
+	return 1;
 }

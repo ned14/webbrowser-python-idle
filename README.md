@@ -23,8 +23,11 @@ CheerpX runtime doesn't implement `/dev/clipboard`, the best we can do is allow
 
 Todo items:
 
-- I think the guest runs much slower than before the upgrade - the guest
-CPU seems to spend more time running.
+- Improve VM performance:
+    - wm-clients.py should be replaced by shell to stop launching a python interpreter
+    every three seconds. Recommend: Fold the poll into the long-running explorer process — the file explorer is already a permanent Python process that withdraws/re-maps; it (or a single dedicated watcher process) can poll xprop -root _NET_CLIENT_LIST itself and self-heal, removing the per-poll interpreter spawn entirely.
+    - diskimage/rootfs/usr/local/bin/idle3.14-launcher runs a fresh python3 - <<EOF loopback probe on every IDLE launch in tailnet mode. That is one full interpreter startup before IDLE even starts. Two compounding facts from the repo's own docs: busybox timeout's SIGALRM never fires under CheerpX (update-to-latest.md §9.2: "a timed-out child is never killed; the wrapper only returns when the child exits on its own"), so the timeout 8 wrapper is decoration. select()-based timeouts are "not guaranteed to fire under CheerpX" (launcher comment). On the dead-accept runtime the probe can stall up to ~6 s before its own socket timeouts give up — and only then fall back to -n. Since the network state changes once per session (tailnet connects, then stays), the probe outcome can be computed once at boot (desktop.start runs it after eth0 is up) and cached in /run/idle-loopback-ok; the launcher then reads the file instead of spawning an interpreter. Best case saves one interpreter start per IDLE open; worst case removes a multi-second stall. In browser mode (no eth0) the launcher already short-circuits, so this only touches the tailnet path — the exact case where the E2E measures IDLE usability.
+    - Lazy imports in the viewer: file-viewer.py imports PIL and mistune at module level; file-explorer.py pulls subprocess/zipfile/threading eagerly. tkinter dominates (can't defer), but the others are bytecode reads + import machinery off the overlay on every launch. Deferring the non-UI modules saves a small slice of first-open latency. Low risk, low reward.
 - Implement paste as if typed by keyboard.
 - Networking icon in left bar should be crossed out and disabled if networking disabled.
 

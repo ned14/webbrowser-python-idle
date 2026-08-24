@@ -17,6 +17,19 @@ from file_types import ALL_TEXT_EXTS, IMAGE_EXTS
 
 VIEWER = "/usr/local/bin/file-viewer.py"
 
+# PID file for the keep-alive daemon / single-instance guard. The CheerpX
+# core's /proc/<pid>/cmdline read traps the emulator for processes still being
+# set up, so `pgrep -f` is unusable in the guest (see faccessat-fix.c); process
+# liveness is tracked via this file instead (keep-file-explorer.sh,
+# open-file-explorer.sh).
+PIDFILE = "/tmp/explorer.pid"
+
+try:
+    with open(PIDFILE, "w") as f:
+        f.write(str(os.getpid()))
+except OSError:
+    pass
+
 # =========================
 # App Setup
 # =========================
@@ -990,7 +1003,13 @@ class SingleTab(ttk.Frame):
                     continue
                 with open("/proc/%s/cmdline" % entry, "rb") as f:
                     cmd = f.read()
-                if b"idlelib.run" in cmd:
+                # CheerpX core defect: /proc/<pid>/cmdline reads return EOF
+                # (the fix shim, diskimage/faccessat-fix.c, short-circuits them
+                # because the core traps on reads of processes still being set
+                # up). The launcher's only children ARE the idlelib shell
+                # subprocesses, so an unreadable/empty cmdline is treated as a
+                # match (the ppid filter above already scoped to the launcher).
+                if not cmd or b"idlelib.run" in cmd:
                     out.append(int(entry))
             except (OSError, ValueError, IndexError):
                 continue

@@ -19,6 +19,12 @@
 #      process exists, force-kills it and relaunches — a deadlocked Tk startup
 #      cannot hold the desktop empty forever.
 #
+# Process liveness uses the PID files written by the explorer / viewer /
+# IDLE-launcher (NOT pgrep -f): the CheerpX core's /proc/<pid>/cmdline read
+# traps the emulator for processes still being set up, so the fix shim
+# (diskimage/faccessat-fix.c) returns EOF for cmdline reads and pgrep -f can
+# no longer see command lines. See diskimage/faccessat-fix.c for the defect.
+#
 # wm-clients.py errors (empty count output) must NOT trigger a relaunch —
 # hence the strict `= "0"` comparison.
 
@@ -26,7 +32,15 @@ set -u
 
 STUCK_SECONDS=30
 POLL_SECONDS=3
-EXPLORER=/usr/local/bin/file-explorer.py
+EXPLORER_PIDFILE=/tmp/explorer.pid
+IDLE_PIDFILE=/tmp/idle.pid
+VIEWER_PIDFILE=/tmp/viewer.pid
+
+# True if the pid recorded in $1 is a live process.
+pidfile_alive() {
+	[ -f "$1" ] || return 1
+	kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null
+}
 
 count_windows() {
 	# Returns the number of open program windows on stdout, or nothing (and a
@@ -35,20 +49,20 @@ count_windows() {
 }
 
 explorer_running() {
-	pgrep -f "$EXPLORER" >/dev/null 2>&1
+	pidfile_alive "$EXPLORER_PIDFILE"
 }
 
 idle_running() {
 	# IDLE launched from the explorer: while it runs, the explorer is
 	# intentionally windowless (withdrawn), so it must NOT be treated as stuck.
-	pgrep -f "idle3.14" >/dev/null 2>&1
+	pidfile_alive "$IDLE_PIDFILE"
 }
 
 viewer_running() {
 	# The Tk file viewer (file-viewer.py) launched from the explorer: same
 	# model as idle_running — the explorer is withdrawn while the viewer is
 	# up, and a slow viewer startup must not read as a stuck desktop.
-	pgrep -f "file-viewer.py" >/dev/null 2>&1
+	pidfile_alive "$VIEWER_PIDFILE"
 }
 
 launch() {
@@ -70,7 +84,13 @@ while :; do
 	if [ "$NOW" = "0" ]; then
 		WINDOWLESS_SINCE=0
 	fi
-	if [ "$(count_windows 2>/dev/null)" = "0" ]; then
+	# A WM-list failure ("") is treated as "no windows known": a wedged
+	# explorer keeps its window unmapped, so _NET_CLIENT_LIST can legitimately
+	# be unreadable. The idle/viewer process guards below still protect the
+	# IDLE/viewer swap (while they run, the force-kill never fires), so the
+	# stuck-explorer self-heal must NOT be disabled by a wm-clients failure.
+	WINS=$(count_windows 2>/dev/null)
+	if [ "$WINS" = "0" ] || [ -z "$WINS" ]; then
 		if explorer_running; then
 		# Windowless but alive: either still mapping its window, or
 		# withdrawn while IDLE / the viewer is being shown. The force-kill
@@ -80,7 +100,7 @@ while :; do
 		if ! idle_running && ! viewer_running && [ "$WINDOWLESS_SINCE" != "0" ] && \
 				 [ "$NOW" -gt "$WINDOWLESS_SINCE" ] && \
 				 [ $((NOW - WINDOWLESS_SINCE)) -ge "$STUCK_SECONDS" ]; then
-				pkill -9 -f "$EXPLORER" 2>/dev/null
+				kill -9 "$(cat "$EXPLORER_PIDFILE" 2>/dev/null)" 2>/dev/null
 				sleep 1
 				WINDOWLESS_SINCE=$NOW
 			elif [ "$WINDOWLESS_SINCE" = "0" ]; then

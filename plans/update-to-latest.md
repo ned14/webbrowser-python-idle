@@ -643,12 +643,97 @@ chain, each fixed:
    returns year 2695; `date` is correct, so it's a gettimeofday-vs-clock
    quirk; benign, boot proceeds). Keep the bake (saves a regen) but don't
    chase the 2695 — it is cosmetic.
+10. **The 2695 deptree skew is a REAL ~20 s boot cost, and the interpose
+    that removes it is SHIPPED (2026-08-22).** Root cause of the skew
+    (in-guest probes): CheerpX's `fstatat` returns a GARBAGE st_mtime (year
+    2695) for DIRECTORY inodes, so openrc's `rc_deptree_update_needed()`
+    (which compares the deptree against init.d/conf.d files AND the init.d
+    DIRECTORY) always sees the dir as "newer" and re-runs "Caching service
+    dependencies" on every openrc invocation (~2 s each → ~20 s of boot).
+    The `faccessat-fix.c` interpose of `rc_deptree_update_needed()` (skip
+    the scan; the image ships a baked deptree) removes the loop entirely —
+    verified in-guest: no re-cache, X starts ~6 s in, first pixels ~11 s
+    (was ~26 s/45 s). The X-server wedge observed in testing is a
+    PRE-EXISTING, host-load-dependent CheerpX defect, NOT caused by the
+    interpose: a control build with the ORIGINAL deptree loop (no interpose)
+    wedged identically (2/3, 1/3 stalls) under the same webdav+tailnet host
+    load (load avg 2.7-6.9 from VS Code/WindowServer). The wedge is the
+    same CheerpX WaitForSomething mainloop freeze documented in
+    plans/display-bug.md (stale-fdset/select class), surfaced more by any
+    fast/early X start and by the tailnet netcheck spin (browser-side
+    client netchecks every ~24 s throughout boot in webdav mode). The
+    wedged boot also surfaces a benign-but-loud CheerpX fault in `pgrep`
+    (`Fault addr c0100000, ip 555f230d, proc /usr/bin/pgrep` — reading
+    /proc through the busybox inode). Sleep/burn/churn before X did NOT
+    replicate the deptree loop's stabilizing effect reliably (tested 8 s,
+    20 s, 4 M burn, 300 spawns) — and since the control wedges too, the
+    deptree loop was never actually load-bearing for reliability. The
+    interpose ships; the residual X-wedge is a separate CheerpX-level issue
+    to track (item 13).
+11. **Python `__pycache__` prebake via compileall — SHIPPED 2026-08-21.**
+    The round-2 trim originally deleted `__pycache__` (the interpreter
+    "regenerates on demand"), but that made the FIRST import on a fresh boot
+    recompile every stdlib module onto the SLOW overlay (measured: first
+    `import tkinter` 1.12 s with no pyc vs 0.30 s with baked pyc; idlelib
+    and the file explorer import far more and paid even more). FIX (landed
+    in the Dockerfile round-2 trim): replace the `find ... -name
+    __pycache__ -exec rm` with `python3 -m compileall -q -j 4
+    /usr/lib/python3.14` — prebakes bytecode matching the exact installed
+    3.14 interpreter (+~5.5 MiB, 1328 pyc incl. .opt-1/.opt-2 variants).
+    Verified on the shipped webdav image: cold `import tkinter` 0.26 s,
+    boot-to-desktop ~42 s (was ~57 s on the previous webdav build). NOTE
+    the uniform ~12% interpreter startup regression (Python 3.10 → 3.14) is
+    the interpreter itself (bigger libpython3.14.so 5.25 MiB vs 3.40 MiB +
+    3.14 startup work), paid by every Python process — the pyc issue
+    AMPLIFIES it on first boot but is not the base cause.
+12. **keep-file-explorer.sh self-heal hardening (KEPT).** The stuck-explorer
+    force-kill was disabled whenever `wm-clients.py --count` failed
+    (returned "" — a wedged X server leaves _NET_CLIENT_LIST unreadable).
+    It now treats a WM-list failure as "no windows known"; the idle/viewer
+    process guards still protect the IDLE/viewer swap, so the self-heal
+    can recover a windowless explorer instead of being permanently
+    disabled by the very wedge it exists to fix.
+13. **Desktop-app prewarm — SHIPPED 2026-08-22.** `/usr/local/sbin/
+    prewarm-apps.sh` (run by desktop.start AFTER Xorg is up, BEFORE the
+    user session, bounded + non-fatal) imports the explorer/viewer module
+    set (tkinter, file_types, PIL, mistune), the idlelib set (pyshell,
+    editor, remote), and exercises a withdrawn Tk root against X. This
+    pre-fetches the .pyc blocks and warms the exec/Tk→X path, so later
+    IDLE/viewer/explorer launches are fast (the deptree interpose removed
+    the loop that incidentally warmed the emulator — this replaces that
+    lost warm-up with useful work). Phases measured in-guest: module-set
+    import ~0.6 s, idlelib import ~0.9 s (docker-local; slower under
+    CheerpX, which is the point — those blocks get cached). Boot
+    benchmarking is `tests/e2e/bench-boot-min.mjs` (N fresh-context boots,
+    reports first-pixels / explorer-ready times and stalls).
+14. **The pgrep boot fault (`Fault addr c0100000, ip 555f230d, proc
+    /usr/bin/pgrep` / `Fault from Inode 18`) is FIXED — SHIPPED
+    2026-08-22.** Root cause (in-guest trace + core wasm analysis): the
+    CheerpX core's `/proc/<pid>/cmdline` generation reads the process's
+    argv from guest memory, and for a process still being set up (the
+    desktop session spawns while the keep-alive's `pgrep -f` scans every
+    pid every 3 s) it reads a bogus pointer into the i386 kernel linear
+    map base (0xc0100000) — a deterministic guest-mode fault. Benign (the
+    scanned pgrep dies, the next poll succeeds) but loud on every boot.
+    FIX (in `faccessat-fix.c`): interpose `read(2)` and return EOF for any
+    `/proc/<pid>/cmdline` read, so pgrep/ps fall back to the safe comm
+    field and never trigger the core's cmdline generator. The
+    single-instance/keep-alive detection that relied on `pgrep -f
+    "file-explorer.py"` etc. now uses PID files written by the explorer
+    (`/tmp/explorer.pid`), the viewer (`/tmp/viewer.pid`) and the IDLE
+    launcher (`/tmp/idle.pid`; keep-file-explorer.sh / open-file-explorer.sh
+    check them with `kill -0`); the explorer's idlelib shell-subprocess
+    discovery treats empty cmdlines as matches (the ppid filter scopes it
+    to the launcher's children). Verified: 3/3 clean boot repro runs,
+    browser E2E 9/9 (incl. IDLE swap), rootfs smoke PASS, webdav E2E
+    network+sync PASS.
 
 **The fix shim today (`diskimage/faccessat-fix.c`, built in the Dockerfile
 `shimbuild` stage, installed as `/usr/local/lib/faccessat-fix.so`):**
 `bad_dfd→EBADF` for faccessat/unlinkat/fstatat/mkdirat/openat/renameat/
 symlinkat/readlinkat/utimensat; faithful SIG_UNBLOCK→SETMASK conversion;
-ppoll→poll; setsockopt(SO_PASSCRED)→0. Loaded via
+ppoll→poll; setsockopt(SO_PASSCRED)→0; **EOF for `/proc/<pid>/cmdline`
+reads** (the pgrep fault, item 14). Loaded via
 `/usr/local/sbin/rc-preload` (inittab sysinit/boot/default lines run through
 it — busybox init can't set env) + `rc_env_allow="LD_PRELOAD"` in rc.conf.
 Debug-only `segv-shim.so` (trace shim) is ALSO in the image but is only
