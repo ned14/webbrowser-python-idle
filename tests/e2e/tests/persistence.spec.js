@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/browser.js';
 
 // Persistence + single-session guard (plan §9.4).
 // browser mode: the IndexedDB overlay survives reloads and is never written

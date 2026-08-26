@@ -317,3 +317,22 @@ select-based sitecustomize sleep patch.** Open items: upstream report for
 BOTH core defects (post-boot type:95 mode-set re-negotiation requirement;
 sporadic overlay page-in fault), and re-testing the post-boot setKmsCanvas
 call path when a fixed runtime lands (flip `kmsInitialized` off).
+
+## CI E2E flake: renderer "Target crashed" on late boots (2026-08-26) — FIXED: fresh browser per test
+
+CI E2E (browser phase, `workers: 1`) began failing with `page.evaluate:
+Target crashed` / `Page crashed` at ~40 s into boots — but ONLY from the
+4th–5th VM boot of the run onward; `boot.spec`'s first boots always
+survived, and earlier runs of the same commit passed on re-run (0baae29:
+fail → pass). Runs failed with either boot HANGS (lightRatio ≈ 0 for the
+full window — swap thrash) or renderer CRASHES (OOM) — both signatures of
+memory exhaustion, not a code regression: the built-in Playwright `browser`
+fixture is WORKER-scoped, so all ~8 sequential VM sessions shared one
+Chromium whose renderers (same origin → same process pool) accumulated each
+session's WASM heap until the runner's ~7 GB was gone.
+
+**Fix:** `tests/e2e/lib/browser.js` shadows the `browser` fixture with a
+TEST-scoped one (launch → use → close), so every VM boot starts from a clean
+browser and a crashed attempt cannot poison the next test; all specs import
+`test`/`expect` from it. Also merged `boot.spec`'s two full-boot tests into
+one (7 full boots per run → 6).

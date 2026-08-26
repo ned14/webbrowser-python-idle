@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/browser.js';
 
 // Fatal-error overlay (plan §9.4): when the VM fails to load or stops, the
 // page must show EXACTLY why, on screen — never a silent blank/frozen load.

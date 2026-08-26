@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/browser.js';
 import { waitForDesktop, waitForLightDesktop, canvasHash } from '../lib/desktop.js';
 
 // Regression test (plans/display-bug.md §2.11): launching IDLE from the file

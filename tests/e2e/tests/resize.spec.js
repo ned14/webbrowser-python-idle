@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/browser.js';
 import { waitForDesktop, waitForLightDesktop, canvasHash } from '../lib/desktop.js';
 
 // Page-resize regression test: after the BROWSER window is resized the

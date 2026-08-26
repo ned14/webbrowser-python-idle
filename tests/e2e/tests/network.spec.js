@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/browser.js';
 import { waitForDesktop, lightRatio } from '../lib/desktop.js';
 import { basicAuthHeaders } from '../lib/webdav-auth.js';
 

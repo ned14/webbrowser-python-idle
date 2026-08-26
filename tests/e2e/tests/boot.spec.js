@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/browser.js';
 import { waitForDesktop } from '../lib/desktop.js';
 
 // E2E boot + no-egress assertions (plan §9.4).
@@ -24,8 +24,14 @@ const SITE_URL =
 	process.env.E2E_SITE_URL ||
 	`https://127.0.0.1:${process.env.E2E_SITE_PORT || 8081}/alpine.html`;
 
-test('boots the desktop over HTTPS with cross-origin isolation intact', async ({ page }) => {
+// The three assertions share ONE VM boot (a full boot is the suite's
+// dominant memory consumer; see lib/browser.js): isolation + console
+// cleanliness, zero external requests, and the 20 s settle during which any
+// blocked logtail fetch would fire.
+test('boots the desktop over HTTPS with cross-origin isolation intact and zero external requests', async ({ page }) => {
+	const external = [];
 	const consoleErrors = [];
+	const pageOrigin = new URL(SITE_URL).origin;
 	page.on('console', (msg) => {
 		if (msg.type() !== 'error') return;
 		const text = msg.text();
@@ -37,25 +43,6 @@ test('boots the desktop over HTTPS with cross-origin isolation intact', async ({
 		if (/Content Security Policy/.test(text) && /connect-src/.test(text)) return;
 		consoleErrors.push(text);
 	});
-
-	await page.goto(SITE_URL, { waitUntil: 'domcontentloaded' });
-	await waitForDesktop(page);
-
-	const isolation = await page.evaluate(() => ({
-		sab: typeof SharedArrayBuffer !== 'undefined',
-		coep: typeof crossOriginIsolated === 'boolean' && crossOriginIsolated,
-	}));
-	expect(isolation.sab).toBe(true);
-	expect(isolation.coep).toBe(true);
-
-	// After the strip, the URL hash must be gone (no secrets in history).
-	expect(page.url()).not.toMatch(/#authKey=/);
-	expect(consoleErrors).toEqual([]);
-});
-
-test('makes zero external requests (HTTP and WebSockets)', async ({ page }) => {
-	const external = [];
-	const pageOrigin = new URL(SITE_URL).origin;
 	await page.route('**/*', (route) => {
 		const url = new URL(route.request().url());
 		if (url.origin !== pageOrigin && !isControlPlane(url)) {
@@ -74,11 +61,23 @@ test('makes zero external requests (HTTP and WebSockets)', async ({ page }) => {
 
 	await page.goto(SITE_URL, { waitUntil: 'domcontentloaded' });
 	await waitForDesktop(page);
+
+	const isolation = await page.evaluate(() => ({
+		sab: typeof SharedArrayBuffer !== 'undefined',
+		coep: typeof crossOriginIsolated === 'boolean' && crossOriginIsolated,
+	}));
+	expect(isolation.sab).toBe(true);
+	expect(isolation.coep).toBe(true);
+
+	// After the strip, the URL hash must be gone (no secrets in history).
+	expect(page.url()).not.toMatch(/#authKey=/);
+
 	// Let the WASM Tailscale client attempt any (blocked) logtail fetch and
 	// settle its connections.
 	await page.waitForTimeout(20_000);
 
 	expect(external).toEqual([]);
+	expect(consoleErrors).toEqual([]);
 });
 
 test('serves only same-origin assets (no stock webvm external tags)', async ({ page }) => {

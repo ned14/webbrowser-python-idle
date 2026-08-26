@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/browser.js';
 import { basicAuthHeaders } from '../lib/webdav-auth.js';
 
 // webdav mode sync (plan §9.4): the guest sync agent must appear on the

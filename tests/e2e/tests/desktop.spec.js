@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from '../lib/browser.js';
 import { waitForDesktop, waitForLightDesktop } from '../lib/desktop.js';
 
 // Desktop-boot guarantee test (real browser, plan §9.4 boot case, extended).
