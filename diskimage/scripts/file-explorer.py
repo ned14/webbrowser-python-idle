@@ -12,7 +12,7 @@ from tkinter import font, ttk, simpledialog, filedialog, messagebox
 # trip a CheerpX inode-handling race — guest-wide python3 core faults
 # ("Fault addr …, Fault from Inode N") reproduced 3/3 on the GitHub Pages
 # deployment and failing CI's browser-mode E2E boot phase; see
-# plans/update-to-latest.md item 22. Cost kept: ~70 ms per launch on the
+# plans/update-to-latest.md §9.5.1 item 22. Cost kept: ~70 ms per launch on the
 # native image (acceptable until the core defect is fixed upstream). These
 # populate the same globals the accessors below read, so call sites,
 # semantics, and the test suite's subprocess patching are unchanged.

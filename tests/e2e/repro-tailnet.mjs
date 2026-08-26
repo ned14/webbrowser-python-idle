@@ -1,4 +1,5 @@
-// Instrumented tailnet repro (networking-bug.md §4a + T10).
+// Instrumented tailnet repro (networking-bug.md §16 — the driver/data-path
+// history; originally §4a of the superseded §2-14 investigation).
 //
 // Captures EVERY console line + pageerror with timestamps (to find the FIRST
 // error before the runtime wedge, per webvm #222), every control-plane

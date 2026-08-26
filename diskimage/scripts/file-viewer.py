@@ -73,7 +73,7 @@ def _ensure_mistune():
 # these resolvers moved Pillow/mistune's import-machinery filesystem walks
 # into the live Tk event loop, which trips a CheerpX inode-handling race —
 # guest-wide python3 core faults ("Fault addr …, Fault from Inode N") seen
-# on the GitHub Pages deployment; see plans/update-to-latest.md item 22.
+# on the GitHub Pages deployment; see plans/update-to-latest.md §9.5.1 item 22.
 # Cost restored: ~0.42 s per viewer launch on the native image.
 _ensure_pillow()
 _ensure_mistune()

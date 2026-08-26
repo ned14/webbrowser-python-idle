@@ -1,87 +1,23 @@
 # WebVM (Option A1) Implementation Plan — Personal Use, Minimal Alpine + IDLE, LAN-Only Networking, Configurable Storage (Browser | Samba | Container WebDAV)
 
 Research date: 2026-08-08 · Revised 2026-08-09 (see note below).
-See `plans/implementation_options.md` for the option comparison.
+See `attic/implementation_options.md` for the archived option comparison.
 
-> **Revision note (2026-08-09, review rounds 5–7):** the plan has been through
-> seven review rounds (round 5 = external cross-check against the CheerpX docs,
-> the webvm source, headscale v0.29.x source, tailscale source, the Alpine 3.17
-> APKINDEX, and empirical tests; round 6 = local review of the round-5 fixes;
-> round 7 = the implementation-time revisions recorded in the note below and
-> in §12/21).
-> Round 5 fixed: the SvelteKit output path
-> (`alpine.html`, not `alpine/index.html`), missing WebSocket upgrade headers
-> on the nginx `/derp` locations, the headscale fixed-IP claim (no such
-> mechanism exists in v0.29.x), the remaining runtime external requests
-> (blog-post images, Claude/AI tab, service worker), the `nc`/`busybox-extras`
-> claim (nc is in the base busybox), `derp.server.ipv4/ipv6` TEST-NET
-> placeholders, the STUN rationale, and several previously "assumed" items now
-> recorded as verification items in §12/21(k)–(p). Round 6 fixed the leftover
-> STUN risk-row contradiction, the unreachable E2E Claude-tab instruction, the
-> build.sh container-local-untar example, the nginx `root .` ambiguity for
-> `/custom-disk-images/`, the headscale preauth-key first-run bootstrap,
-> the CI artifact wiring for `WEBVM_IMAGE_BUILD`/the ext2, and the cacheId
-> fingerprint (content-stable, not raw ext2 bytes). Round 7 (implementation-time
-> revisions, 2026-08-09) records the deviations the built code makes from the
-> letter of the design below — every one verified against the pinned versions
-> and noted at the spot it touches plus in §12/21: **server_url is PATH-LESS**
-> (v0.29.3's noise-internal router 404s a base path — §12/21(c)); the 8443
-> listener is a **catch-all proxy** to headscale (no `/headscale/` prefix
-> locations); the **CheerpX runtime is self-hosted** at `/cheerpx/` (the npm
-> package CDN-loads its core by default — §12/21); the server container is
-> built on **`python:3.11-alpine`** (the `nginx:alpine` python3/libexpat pair
-> breaks pip); Alpine v3.17 repos point at **`dl-cdn.alpinelinux.org`** (the
-> archive host does not resolve); `preauthkeys create` takes the **numeric user
-> id** and `preauthkeys list` **masks keys**; the first-run key bootstrap uses
-> **`HEADSCALE_BOOTSTRAP=1`**; `EXTRA_BIND_IP` was **dropped** (not bindable on
-> macOS Docker Desktop); the guest SSH keypair is generated **at first boot**;
-> the guest **sync agent walks subdirectories** (recursive listing + MKCOL of
-> parent collections); and the CSP is the full `default-src 'self'` set
-> (`script-src 'unsafe-inline' 'unsafe-eval' blob:`, `worker-src blob:`), not
-> just `connect-src`. Round 8 (2026-08-16) records the **baked page config**
-> deviation: in tailnet modes the server entrypoint renders the network/sync
-> secrets into the same-origin **`/webvm-config.js`** at container start, and
-> the page seeds `sessionStorage` from it when the URL carries **no hash** —
-> visiting `https://127.0.0.1:8081` (root, no `make url` needed) auto-wires the
-> tailnet; **any explicit hash is a fully explicit session** (the baked config
-> is ignored, so saved `make url` URLs work unchanged). `make url` remains as
-> the explicit-hash escape hatch. Details at §5, Step 4 and §12/21(28).
-> Round 9 (2026-08-16) records the **fatal-error overlay**: any VM load
-> failure or stop now shows the exact reason on screen (`role="alert"`
-> overlay with message + stack, Reload and Copy buttons; boot errors
-> propagate to one `onMount` catch, a rejecting `cx.run()` is caught as
-> phase "runtime" instead of an unhandled rejection, and the session-lock
-> path can no longer stall the page — details §12/21(29)).
-> Round 12 (2026-08-16) records **silent-halt surfacing**: the CheerpX core
-> swallows guest-side WASM traps (e.g. `memory access out of bounds`) at its
-> own thread trampolines — it logs "Unexpected exit", pauses on a literal
-> `debugger;` when DevTools is open, and carries on, so a boot-critical
-> guest process can die with `cx.run()` never rejecting and the page black
-> forever (no overlay). The app now captures the engine's report off the
-> console, routes uncaught engine errors and rejecting `cx.run()` RuntimeErrors
-> to the overlay, retries ONCE automatically only on definitive boot-death
-> signals (a rejecting `cx.run()` or the stuck-watchdog verdict), surfaces
-> ambiguous engine trap reports immediately with the exact reason, and a boot
-> watchdog declares the VM stuck when a boot makes no progress beyond the
-> E2E-readiness budget; the vendored cxcore patch removes the `debugger;`
-> freeze, the spurious `e()`-calls-the-exception TypeError wedge, and elevates
-> the trap to `console.error`. Details §12/21(32).)
-> Round 10 (2026-08-16, late) recorded the **control-host verdict**: a
-> browser-facing `CONTROL_HOST=127.0.0.1` was implemented and REVERTED
-> because it appeared to break the guest data path. **Round 11 (2026-08-16,
-> user mandate) SUPERSEDES that verdict:** hostnames are banned — no
-> `host.docker.internal`, no `/etc/hosts` entries, no custom DNS for LAN
-> users; everything must work with `127.0.0.1` (zero-config single machine)
-> and a hardcoded LAN address (e.g. `192.168.x.x`) alone. The likely §16.9
-> mechanism is now understood: the netmap's DERP host (`127.0.0.1` with
-> server_url=127.0.0.1) was unreachable from the GATEWAY container (its own
-> loopback), and the fix is a gateway loopback socat relay on CONTROL_PORT →
-> the server's static compose-network IP (`GATEWAY_CONTROL_IP`, 172.28.0.10).
-> `host.docker.internal` was removed from every runtime config/script/test/CI
-> file; `tests/unit/test_scripts.py::test_control_host_defaults_consistent`
-> enforces the ban in CI. Full evidence: `plans/networking-bug.md` §16.9 +
-> §16.10, §12/21(30)-(31). The inbound accept path finding stands: the E2E
-> listen twin asserts bind+listen only (§16.9 item 1, unchanged).
+> **Revision note (condensed 2026-08-26; per-round detail is in the §12/21
+> records and git history):** rounds 5–7 (2026-08-09) corrected the design —
+> the SvelteKit output path (`alpine.html`), WebSocket upgrade headers on
+> `/derp`, the headscale fixed-IP claim, runtime external requests (blog
+> images, Claude tab, service worker), `nc` in base busybox, DERP/STUN
+> TEST-NET placeholders, the CSP set, the content-stable cacheId fingerprint,
+> the preauth-key bootstrap, the `python:3.11-alpine` server base (now 3.14,
+> §12/21(33)), and the implementation-time deviations recorded in §12/21
+> (path-less `server_url`, catch-all 8443 proxy, self-hosted runtime at
+> `/cheerpx/`, numeric user id, `HEADSCALE_BOOTSTRAP=1`, dropped
+> `EXTRA_BIND_IP`, first-boot SSH key, recursive sync).
+> Round 8 added the baked page config (§12/21(28)), round 9 the fatal-error
+> overlay (§12/21(29)), round 12 the silent-halt surfacing + vendored cxcore
+> trap patch (§12/21(32)), and rounds 10–11 the HOSTNAMES-ARE-BANNED verdict
+> (§12/21(30)-(31), enforced in CI).
 > all decisions are in the body (§3, §4, §5, §12) and full rationale is in git
 > history. Current standpoints in one paragraph: **HTTPS is the only access
 > mode** — `https://127.0.0.1:<SITE_PORT>` single-machine (private CA trusted
@@ -91,9 +27,11 @@ See `plans/implementation_options.md` for the option comparison.
 > DERP relay**, a `gateway` container (tailscaled userspace + socat relays to
 > the LAN), the gateway tailnet IP **recorded after first join and kept stable
 > by persistent node state**, and `derp.urls: []` (no public
-> Tailscale DERP). The guest is a minimal i386 Alpine 3.17 with stdlib-only
-> Python + IDLE (`idle3.10`); persistence is a browser IndexedDB overlay, or a
-> guest sync agent against Samba (`pysmb`) or container WebDAV (wsgidav).
+> Tailscale DERP). The guest is a minimal i386 Alpine 3.24 (uplifted from
+> 3.17, §12/21(34)) with stdlib-only Python + IDLE (`idle3.14`), an Openbox
+> desktop running a Tk file explorer; persistence is a browser IndexedDB
+> overlay, or a guest sync agent against Samba (`pysmb`) or container WebDAV
+> (wsgidav).
 
 ## 1. Summary
 
@@ -105,8 +43,9 @@ browser VM **LAN-only networking**; persistent files are stored on a
 infrastructure), with optional **Samba** or container **WebDAV** backends
 (configurable served path).
 
-Scope: **personal use only**; Alpine base; **Python + IDLE** (autostarted at
-desktop boot); terminal + file manager; a **git client** (clone/pull/push to
+Scope: **personal use only**; Alpine base; **Python + IDLE** (launched on
+demand from the autostarted file explorer); terminal + file manager; a **git
+client** (clone/pull/push to
 LAN remotes); no other GUI apps; **minimal ext2 image size**; guest network
 restricted to the **LAN only — the guest must never have public internet
 access**. The repo is public and is validated by **GitHub Actions CI** (guest
@@ -172,53 +111,39 @@ https://cheerpx.io/docs/tutorials/full_os
 deployments, and the Mini.WebVM launch post were read/visited directly. None
 of them provides LAN-only networking, self-hosted Headscale/embedded DERP, a
 gateway relay, configurable storage backends, or secret handling — those are
-the novel parts of this plan.
-
-| Implementation | What it is | Key differences vs this plan |
-|---|---|---|
-| **webvm.io** (Leaning Technologies reference) | The original full-Linux (Debian, ~2 GB) terminal VM, hosted publicly; source of the whole frontend stack this plan pins. | Public HTTPS + **public Tailscale** interactive login (`login.tailscale.com`) — no Headscale/gateway/pinned IP, no LAN-only confinement; the large Debian image is streamed via a **reverse-proxy range+compression hack** on their origin (this plan serves a ~140 MB Alpine ext2 same-origin with plain nginx byte-range — no compression/range ambiguity); persistence is IndexedDB overlay only (no samba/webdav sync); logtail/plausible are **not** blocked; multi-user public service, not a single personal desktop. |
-| **webvm.io/alpine.html** (Alpine Xorg/i3 desktop) | The reference for this plan's desktop: Alpine + Xorg + i3, KMS canvas, autologin via LightDM in the `leaningtech/alpine-image` build. | Image is far larger (adds gcc/nodejs/LightDM/rofi/polybar etc.) — this plan strips to stdlib-only Python + IDLE (~140 MB, no display manager); networking identical to webvm.io (public Tailscale), so no LAN-only path, no Headscale/gateway, no persistence backend, no single-session guard, no sessionStorage secrets handling. |
-| **mini.webvm.io** (Mini.WebVM reference) | Serverless GitHub Pages deployment: Dockerfile→ext2 via a GH Actions workflow; the ext2 is pre-split into 128 KiB chunks (+`.meta`/`index.list`) and streamed via `diskImageType:"github"` (`GitHubDevice`); a **service worker injects COOP/COEP** because Pages cannot set headers. | Fully static — **no server-side component at all** (this plan runs its own nginx container regardless); chunking exists only to work around Pages' lack of byte-range/streaming-miss — this plan needs none (nginx Range is native); public Tailscale interactive login; terminal-only; no persistence backend; 1 GB Pages limit / 2 GB range-limit noted (this plan's image is ~140 MB, under both). |
-| **GitHub Pages fork deployments** (the repo's "Deploy" workflow; third-party forks) | Any fork of `leaningtech/webvm` run through the Pages workflow — effectively mini.webvm.io per fork, at `<user>.github.io`. | Same as mini.webvm.io, plus: unversioned CheerpX per fork and no content control — this plan pins the exact webvm commit + `@leaningtech/cheerpx` version and serves everything from its own private HTTPS origin. |
-| *(adjacent, not WebVM)* **PythonFiddle** (leaningtech) | CheerpX-based in-browser Python REPL, not a full OS. | Not a comparable WebVM; noted only because it informs the CheerpX free-for-personal-use/licensing framing (§1, §12) and in-browser CheerpX UX patterns. |
-
-**What the comparisons change for this plan:** the reference implementations
-all assume public internet + public Tailscale, which this plan explicitly
-rejects (LAN-only, no exit node, `derp.urls: []`, CSP-blocked logtail). Worth
-copying: the frontend mechanics (KMS canvas resize, the Dockerfile→ext2
-pipeline) — though webvm's URL-hash handling is *not* copied as-is, since it
-leaves `authKey`/`controlUrl` in the URL while this plan moves them to
-`sessionStorage` and strips the hash. Worth avoiding: their workarounds
-(origin range-hack, GitHub-Pages chunking, service-worker header injection)
-that this plan's self-hosted nginx makes unnecessary.
+the novel parts of this plan. Comparison summary (full detail in git
+history): **webvm.io** = public Tailscale + Debian terminal VM; its
+**alpine.html** desktop = the reference for this plan's desktop (Alpine +
+Xorg + KMS canvas) but far larger (gcc/LightDM/rofi…) and with public-
+Tailscale-only networking; **mini.webvm.io / Pages forks** = serverless
+deployments that need the ext2 pre-chunked (`diskImageType:"github"`) and a
+service worker to inject COOP/COEP — workarounds this plan's self-hosted
+nginx makes unnecessary (native Range serving); **PythonFiddle** = a CheerpX
+REPL, noted only for licensing/UX framing. Worth copying: the frontend
+mechanics (KMS canvas resize, the Dockerfile→ext2 pipeline); worth avoiding:
+their public-internet assumptions and the anti-HTTPS workarounds
+(all rejected here: LAN-only, no exit node, `derp.urls: []`, CSP-blocked
+logtail, fingerprint-versioned overlay, sessionStorage secrets).
 
 ## 3. Decisions (resolved)
 
 1. **License:** personal use → CheerpX free (package README). No commercial
    license; do not distribute the site organizationally.
-2. **Base image:** `i386/alpine:3.17` (32-bit, matching the reference Alpine
-   image). EOL fallback: `/etc/apk/repositories` →
-   `https://archive.alpinelinux.org/alpine/v3.17/{main,community}`.
-   **REVISED at implementation (2026-08-09):** the archive host does not
-   resolve (NXDOMAIN even at public resolvers) and `dl-cdn.alpinelinux.org`
-   still serves v3.17, so the repositories point at the CDN
-   (`https://dl-cdn.alpinelinux.org/alpine/v3.17/{main,community}`) — switch
-   to the archive host if the CDN ever drops EOL versions.
-   **The Dockerfile must enable the `community` repo** (the official Alpine
-   image ships `main` only): `python3-tkinter` and `python3-idle` live in
-   `community`. Note: tkinter/idle build against Python 3.10.11 while `main`
-   ships `python3` 3.10.15 — a benign patch-level mismatch (same 3.10 ABI).
+2. **Base image:** `i386/alpine:3.24.1` (was 3.17 at design time; Tier B
+   uplift 2026-08-20, §12/21(34)). The Dockerfile rewrites both repositories
+   to the pinned branch (`https://dl-cdn.alpinelinux.org/alpine/v3.24/{main,community}` —
+   rewrite, not append).
  3. **Apps:** `python3`, `python3-tkinter`, **IDLE** (the Alpine `python3-idle`
-    package ships `/usr/bin/idle3.10` + `idlelib` — there is no `idle3`
+    package ships `/usr/bin/idle3.14` + `idlelib` — there is no `idle3`
     binary — and it hard-depends on `python3-tests`, an ~85 MiB install of the
     CPython test suite; the Dockerfile therefore **extracts `idlelib` and
-    `idle3.10` from the package with `apk fetch` + `tar` instead of
+    `idle3.14` from the package with `apk fetch` + `tar` instead of
     `apk add python3-idle`** so the guest stays minimal, Step 2), `xterm`,
     and **the file explorer** — a stdlib-only Tk app
     (`/usr/local/bin/file-explorer.py`, §12/25). **No display manager** (direct
     `su user -c startx` → openbox; fallback LightDM autologin). **The file explorer
     autostarts on the user's home directory**; `.py` files open in IDLE via
-    `idle3.10-launcher` (the explorer yields the screen to IDLE while it runs);
+    `idle3.14-launcher` (the explorer yields the screen to IDLE while it runs);
     and a keep-alive daemon (`keep-file-explorer.sh`) relaunches the explorer
     whenever the last window closes, so the desktop never sits empty.
 4. **No guest internet:** enforced by design (no exit node, LAN-bound services,
@@ -364,25 +289,14 @@ the WebSocket tunnel).
   (`writeFile("/syncrc", …)` → guest path `/opt/syncrc`, §4 Mode C spike)
   before boot; the guest sync agent reads that at startup, falling back to
   baked `/root/.syncrc`.
-- **DataDevice injection spike (Phase 2, before Step 9):** the CheerpX API to
-  *populate* a `DataDevice` — `dataDevice.writeFile(filename, contents)` — is
-  **documented** (CheerpX 1.2.x docs; note the docs' filesystem table still
-  lists DataDevice as "Write: no", an inconsistency with `writeFile`). The
-  reference WebVM only mounts `DataDevice.create()` at `/data` without writing
-  to it, so confirm `writeFile` against the **pinned** CheerpX version with a
-  minimal page test. **Path semantics:** `writeFile` paths are relative to the
-  device root, so the page mounts the device at `/opt` and calls
-  `writeFile("/syncrc", …)` — the guest then sees the file at `/opt/syncrc`
-  (mounting at `/opt/syncrc` instead would produce `/opt/syncrc/syncrc`).
-  If `writeFile` is unavailable in that version, use the fallback:
-  **baked `/root/.syncrc` only** — and because the baked file is built from
-  real build args (Mode B/Step 2), it works without the injection; port
-  remapping then requires an image rebuild (the baked fallback already targets
-  the recorded gateway tailnet IP, so it only changes when ports/creds change) —
-  or serve the sync config via the `/web` mount (read-only; the browser-side
-  WebDevice fetch does not depend on guest networking, but the file is baked
-  into the served site, so it has the same rebuild limitation as the baked
-  fallback).
+- **DataDevice injection (RESOLVED — works, §12/21(i)):** the page writes the
+  sync config via `dataDevice.writeFile("/syncrc", …)` with the device mounted
+  at `/opt` (paths are relative to the device root — mounting at `/opt/syncrc`
+  would produce `/opt/syncrc/syncrc`). The **baked `/root/.syncrc`** fallback
+  (built from real build args, Mode B/Step 2) works without the injection;
+  port remapping then requires an image rebuild (the baked fallback already
+  targets the recorded gateway tailnet IP, so it only changes when
+  ports/creds change).
 - `WEBDAV_ROOT` is configurable at build time (baked into the wsgidav config)
   and at run time (entrypoint runs `envsubst` over a template).
 
@@ -507,23 +421,13 @@ hash makes the session fully explicit — the baked config is ignored, so saved
   on CONTROL_PORT (§5.2, networking-bug.md §16.10); LAN/multi-device use
   sets `CONTROL_HOST=<LAN_IP>` (hardcoded LAN address). See §12/13 and
   Step 6.
-- **CORS (verify-at-implementation):** the browser Tailscale client receives
-  the DERP map **inside the control-protocol netmap over the WSS control
-  channel** (headscale v0.29.x serves no `/derpmap` HTTP endpoint and never
-  uses the request `Host` header to build URLs), so no cross-origin request
-  fetches the DERP map. However, the **current webvm README recommends adding
-  CORS headers in front of Headscale**, and the one cross-origin HTTP request
-  the WASM client makes — `/derp/probe` (relay latency probe) — must also be
-  compatible with COEP `require-corp`. Source-checked: the probe is issued in
-  **CORS mode** (Go's js/wasm `net/http` transport; the no-cors transport is
-  wired only to logtail), so headscale's own `Access-Control-Allow-Origin: *`
-  on `/derp/probe` should satisfy COEP with no nginx change — but **re-verify
-  against the pinned build at Phase 2 (Step 8)**; if the probe is ever issued
-  no-cors, `Access-Control-Allow-Origin` alone is **not** CORP-compatible and
-  the 8443 listener must add **`Cross-Origin-Resource-Policy: cross-origin`**
-  (add this, plus the README's ACAO block, if the probe is blocked; relay-only
-  mode still works). Headscale has **no `cors` config option**; the fallback
-  is nginx `add_header` rules.
+- **CORS (verified at implementation — §6 Step 6 + networking-bug.md
+  §15.2.1):** the browser Tailscale client receives the DERP map **inside the
+  control-protocol netmap over the WSS control channel** (headscale v0.29.x
+  serves no `/derpmap` HTTP endpoint), so no cross-origin request fetches the
+  DERP map; the one cross-origin HTTP request — `/derp/probe` — is handled by
+  the 8443 listener's ACAO/Vary/CORP rules (Step 6). Headscale has **no
+  `cors` config option**; the fallback is nginx `add_header` rules.
 
 **Components:**
 1. **Container:** nginx with **two HTTPS listeners inside the `server`
@@ -678,25 +582,16 @@ socat relays.
   `serviceWorker.js` script, and the Claude/AI sidebar tab (Step 4); nginx
   `location = /` → 302 `/alpine.html`. **Tailscale logtail is
   blocked, not permitted:** the browser's Tailscale WASM client is
-  **compiled-in** to log to logtail's default endpoint — `wasm_js.go` builds
-  `logtail.Config{Collection: logpolicy.NewConfig(logtail.CollectionNode)…}`,
-  and `logtail.Config.BaseURL` defaults to `https://log.tailscale.com`
-  (collection `tailnode.log.tailscale.io`; re-check the exact endpoint in the
-  pinned build) — so the nginx site header
-  `Content-Security-Policy: connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}`
-  rejects the logtail fetch (CSP applies to no-cors fetches too). Note that
-  headscale **can** influence client logging in one way: its netmap carries
-  `Debug.DisableLogTail` (`true` when `logtail.enabled: false`, the default),
-  so a compliant client may disable logtail without any CSP block — either way
-  the guarantee holds (never attempted *or* blocked), and the CSP header is the
-  belt-and-braces that does not depend on client behavior. Logtail
-  failures are **non-fatal** to the Tailscale client, so blocking it costs only
-  browser-side diagnostics (which would have gone to a third party anyway).
-  Result: the page and the WASM client make **zero external requests** — DevTools
-  and the E2E no-egress test assert this (§9.4); the host firewall drops egress
-  beyond RFC1918 as a second layer. (The one caveat: logtail is only reachable
-  when the LAN itself has public internet; without internet the attempts fail
-  silently either way.)
+  **compiled-in** to log to logtail's default endpoint (BaseURL defaults to
+  `https://log.tailscale.com`; the rebuilt wasm client's uploads were removed
+  at source, networking-bug.md §16.1/16.7) — so the nginx site CSP
+  `connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT}`
+  rejects the logtail fetch (CSP applies to no-cors fetches too), and
+  headscale's netmap `Debug.DisableLogTail` (`logtail.enabled: false`, the
+  default) may disable it client-side as well — either way the page and the
+  WASM client make **zero external requests**, asserted by DevTools and the
+  E2E no-egress test (§9.4); the host firewall drops egress beyond RFC1918 as
+  a second layer. Logtail failures are **non-fatal** to the client.
 - Headscale ACLs default (tailnet-only); MagicDNS off (`dns.magic_dns: false`
   — the guest uses IPs, never DNS).
 - **TLS spike:** issue a private-CA cert (SAN: `CONTROL_HOST`, `127.0.0.1`,
@@ -826,27 +721,29 @@ used only for the navbar) is not SSH-fetchable in CI: the frontend build script
 `npm ci` (documented in Step 5).
 
 #### Step 2 — Minimal guest image (`diskimage/Dockerfile`)
-`FROM docker.io/i386/alpine:3.17`; build-only DNS; point **both** repositories
-at v3.17 (**REVISED at implementation: the CDN, not the archive** — the
-archive host does not resolve and the CDN still serves v3.17; the base image
-ships `dl-cdn.alpinelinux.org` URLs for `main` — **rewrite, don't append**):
+`FROM docker.io/i386/alpine:3.24.1` (was 3.17 at design time; Tier B uplift,
+§12/21(34)); build-only DNS; point **both** repositories at the pinned
+branch — **rewrite, don't append**:
 ```
 cat > /etc/apk/repositories <<'EOF'
-https://dl-cdn.alpinelinux.org/alpine/v3.17/main
-https://dl-cdn.alpinelinux.org/alpine/v3.17/community
+https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+https://dl-cdn.alpinelinux.org/alpine/v3.24/community
 EOF
 ```
 then:
 ```
 apk add --no-cache alpine-base udev-init-scripts udev-init-scripts-openrc eudev \
-  xorg-server xinit xf86-input-libinput xrandr openbox xprop xsetroot font-dejavu \
+  xorg-server xinit xf86-input-evdev xrandr openbox xprop xsetroot font-dejavu \
   python3 python3-tkinter xterm git openssh-client-default \
   busybox-extras dbus
 ```
 (**dbus** added to the package list — the reference's `rc-update add dbus`
-needs the package installed.)
-(Verified against the v3.17 x86 index: the package names are **`xinit`**
-(not `xorg-xinit`) and **`openssh-client-default`** (not `openssh-client`).)
+needs the package installed.) (Verified against the v3.24 x86 index: the
+package names are **`xinit`** (not `xorg-xinit`) and
+**`openssh-client-default`** (not `openssh-client`). `xf86-input-evdev` +
+the static `/etc/X11/xorg.conf` input sections replaced the libinput path
+(update-to-latest.md §9.1 item 7 — the udev input backend finds nothing in
+CheerpX's shallow sysfs).
 - `nc` is **already provided by the base busybox** (verified empirically in
   `i386/alpine:3.17`: `/usr/bin/nc` exists without any extra package; Alpine's
   `busyboxconfig` ships `CONFIG_NC=y`, while `busyboxconfig-extras` disables
@@ -863,12 +760,12 @@ needs the package installed.)
   installed), so instead of `apk add python3-idle` the Dockerfile does:
   ```
   apk fetch --no-cache python3-idle && tar -xzf python3-idle-*.apk -C / \
-    usr/bin/idle3.10 usr/lib/python3.10/idlelib && rm -f python3-idle-*.apk
+    usr/bin/idle3.14 usr/lib/python3.14/idlelib && rm -f python3-idle-*.apk
   ```
-  This installs the **`idle3.10` binary + `idlelib`** (the package provides
-  only `/usr/bin/idle3.10` — **there is no `idle3`**), skipping the test-suite
+  This installs the **`idle3.14` binary + `idlelib`** (the package provides
+  only `/usr/bin/idle3.14` — **there is no `idle3`**), skipping the test-suite
   dependency. (Do **not** add the `python3-tkinter-tests` package either.)
-  The rootfs smoke tests assert `idle3.10` (display-free: binary presence +
+  The rootfs smoke tests assert `idle3.14` (display-free: binary presence +
   `python3 -c "import tkinter, idlelib"`).
 - Sync agent (selected by `ARG STORAGE_BACKEND`, installed only for
   `samba`/`webdav`): **samba** → the **`pysmb`** pure-Python agent by default
@@ -943,16 +840,11 @@ needs the package installed.)
   reference setup (add `lightdm` then). **In `samba`/`webdav` modes,
   `desktop.start` runs the boot pull FIRST (wait-for-tailnet retry loop, up to
   ~90 s, every 5 s) and only then starts X as `user`** (see Step 9).
-- **Guest NIC config (open spike, Phase 2 Step 8):** how the guest's emulated
-  NIC comes up is **not established by the reference**: the `alpine-image`
-  Dockerfile enables no networking service (`rc-update` adds only bootmisc/
-  udev*/dbus/lightdm) and bakes no `/etc/network/interfaces`, and the CheerpX
-  docs do not document the guest side of the emulated NIC. Treat this as a
-  **blocking spike**: verify `eth0` comes up once the browser Tailscale client
-  connects; if it needs configuration, **bake it in at image build time** —
-  `/etc/network/interfaces` (static address + default route via the CheerpX
-  gateway) or enable `udhcpc` for `eth0` — and make the sync agent's
-  wait-for-tailnet loop tolerate the extra boot time.
+- **Guest NIC config (RESOLVED, Phase 2):** the core never creates eth0
+  (networking-bug.md §16.6); guest networking works through the core's
+  syscall-level socket dispatcher, so the guest needs no interfaces file.
+  `desktop.start`'s eth0 retry loop + udhcpc runs only when eth0 exists
+  (networking-bug.md §15.2.6).
 - **Build-time DNS and guest resolv.conf:** during `docker build` the container
   uses the build's DNS (BuildKit sandbox or the engine's `127.0.0.11` stub);
   `apk add`/`apk fetch` need it to reach the CDN. **REVISED at implementation:**
@@ -979,75 +871,20 @@ they survive only if the untar + `mkfs.ext2 -d` run as root on a
 **container-local** path — never into the macOS-mounted `$PWD`, which would
 remap uids to the host user (the upstream `deploy.yml` documents the same loss
 even with `docker cp -a`). Sanity-check with `debugfs` in the same container:
-`/sbin/init`, `/home/user/.config/openbox/`, `/usr/bin/idle3.10`, the sync
+`/sbin/init`, `/home/user/.config/openbox/`, `/usr/bin/idle3.14`, the sync
 agent, **and ownership** (`/home/user` = `1000:1000`, busybox applet symlinks
 intact, setuid bits preserved).
 
-**Expected size (grounded — computed 2026-08-09 from the v3.17 x86
-`APKINDEX` installed sizes plus the base image's own `/lib/apk/db/installed`;
-the dependency closure was resolved over main + community, including
-`so:`/`cmd:`/`pc:` providers):**
-
-| Component | MiB |
-|---|---|
-| Base `i386/alpine:3.17` | 7.5 |
-| Step 2 `apk add` dependency closure (166 packages) | ≈ 190 |
-| idlelib extraction (`python3-idle` contents, no `python3-tests`) | +3.3 |
-| guest overlays/configs (`syncrc`, openbox/xinitrc, agent scripts) | +0.1 |
-| `pysmb` (samba mode only) | +0.5 |
-| Step 2 trimming (strip `doc/man/info`, trim locale — measured at build) | −≈10 |
-| **Rootfs** | **≈ 190** |
-| **ext2** (rootfs + ~20% headroom, 4 KiB blocks) | **≈ 230** (rounds to ~240) |
-
-(**Measured at implementation:** on 2026-08-09, browser-mode rootfs ≈ 197 MiB and
-the ext2 built at 209–246 MiB depending on the backend/trimming — consistent
-with the estimate. After the 2026-08-21 size trims — the Mesa/LLVM GL stack
-replaced by a 176 KiB no-op stub plus the round-2 removal of unused runtime
-components (see §12/21) — the rootfs is ≈ 134.7 MiB and the webdav ext2 builds
-at **137 MiB** (~161 MiB logical; browser/none builds are comparable). The SSH
-keypair is **not** part of the image anymore: it is generated at first boot by
-`desktop.start`, so the image has no baked key.)
-
-Per-package breakdown of the apk closure (installed MiB; the 109 packages
-below 0.5 MiB total ≈ 12.0):
-
-| Package | MiB | Package | MiB |
-|---|---|---|---|
-| `python3` | 47.8 | `font-dejavu` | 17.9 |
-| `py3-pip` | 13.8 | `gtk+3.0` | 10.9 |
-| `py3-setuptools` | 6.6 | `git` | 6.4 |
-| `tcl` | 5.2 | `font-misc-misc` | 5.1 |
-| `xkeyboard-config` | 4.0 | `glib` | 3.8 |
-| `xorg-server` | 3.3 | `libx11` | 3.1 |
-| `tzdata` | 3.0 | `openssh-client-common` | 2.7 |
-| `shared-mime-info` | 2.4 | `libstdc++` | 2.3 |
-| `tk` | 2.2 | `openrc` | 2.1 |
-| `gnutls` | 2.0 | `harfbuzz` | 1.8 |
-| `libunistring` | 1.7 | `hicolor-icon-theme` | 1.5 |
-| `python3-tkinter` | 1.4 | `hwdata-pci` | 1.3 |
-| `eudev` | 1.3 | `p11-kit` | 1.2 |
-| `libxml2` | 1.2 | `sqlite-libs` | 1.1 |
-| `libjpeg-turbo` | 1.1 | `libfm` | 1.1 |
-| `cairo` | 1.1 | `libxcb` | 1.0 |
-| `libepoxy` | 1.0 | `xterm` | 0.9 |
-| `openssh-client-default` | 0.9 | `openbox` (replacing `i3wm`) | 0.9 |
-| `py3-parsing` | 0.8 | `freetype` | 0.8 |
-| `encodings` | 0.8 | `brotli-libs` | 0.8 |
-| `pcre2` | 0.7 | `pango` | 0.7 |
-| `libcurl` | 0.7 | `fontconfig` | 0.7 |
-| `ca-certificates` | 0.7 | `pixman` | 0.6 |
-| `nettle` | 0.6 | `mesa-gl` | 0.6 |
-| `libwebp` | 0.6 | `cups-libs` | 0.6 |
-| `zstd-libs` | 0.5 | `tiff` | 0.5 |
-| `openssh-keygen` | 0.5 | `ncurses-libs` | 0.5 |
-| `libinput-libs` | 0.5 | `libdrm` | 0.5 |
-| `at-spi2-core` | 0.5 | *(109 smaller packages)* | *12.0* |
-
-This is far under the ≤ 2 GB cap and about a third of the reference
-`alpine-image` (which adds gcc/nodejs/LightDM/gvim/rofi/polybar etc.). The two
-discretionary chunks are `py3-pip` (~20 MiB incl. `py3-setuptools`, kept so
-`pip` exists) and the X font set (`font-dejavu` + `font-misc-misc` +
-`encodings` ≈ 24 MiB; `font-dejavu` is required for Tk/IDLE).
+**Image size (measured):** the original v3.17 estimate (≈190 MiB rootfs /
+≈230 MiB ext2, computed from APKINDEX installed sizes) is superseded. After
+the 2026-08-21 trims — the ~246 MiB Mesa/LLVM GL stack replaced by a 176 KiB
+no-op libGL stub (Xorg runs ShadowFB/AccelMethod none; nothing loads GLX) and
+a round-2 removal of unused runtime components (pyc prebake via compileall
+retained; full list in §12/21) — the rootfs is ≈ 134.7 MiB and the webdav
+ext2 builds at **137 MiB** (~161 MiB logical; browser/none builds comparable)
+— about a third of the reference `alpine-image`. The SSH keypair is **not**
+part of the image: it is generated at first boot by `desktop.start`, so the
+image has no baked key.
 
 #### Step 4 — Point the web app at the image + persistence wiring
 `config_public_alpine.js`: `diskImageUrl="/custom-disk-images/webvm-custom-disk.ext2"`,
@@ -1076,48 +913,33 @@ README's local-serving instructions.) Frontend edits (in
   BroadcastChannel, heartbeat/expiry as in §4) before mounting the fixed
   overlay; on contention, boot with an ephemeral (random) cacheId and show a
   notice.
-- **URL-hash handling (all secrets out of the hash; REVISED Round 8,
-  2026-08-16 — baked page config):** on page load read `authKey`, `controlUrl`,
-  and (webdav mode) `syncUrl`/`syncUser`/`syncPass` from the URL hash, move
-  them to `sessionStorage`, then strip the hash via `history.replaceState` so
-  **no secrets (including the preauth key) persist in browser history**.
-  **REVISED:** the page no longer depends on the hash alone — in tailnet modes
-  the server entrypoint renders the same values into the same-origin
-  **`/webvm-config.js`** (`window.__webvmConfig = {authKey, controlUrl,
-  syncUrl, syncUser, syncPass}`, JSON-escaped via the dedicated
-  `server/render-webvm-config.py` — never raw
-  envsubst, credentials may contain quotes/backslashes/`$`; `Cache-Control:
-  no-store` + `Cross-Origin-Resource-Policy: same-origin` so key rotation
-  after a container recreate takes effect and cross-origin webpages cannot
-  read the credentials back), and the
-  inline script seeds `sessionStorage` from it **when the URL carries no
-  hash** — visiting the site root then auto-wires the tailnet (this is the
-  Round 8 change; `make url`/`print-url.sh` remain as the explicit-hash
-  path).   **Any explicit hash disables the baked config entirely** (the session is
-  fully explicit — saved `make url` URLs behave identically to before) and
-  marks the tab explicit for its lifetime, so a later hash-less
-  navigation/reload in the same tab does not re-arm the baked config.
-  In bootstrap mode — and always in `browser`/`none` — the entrypoint renders
-  `{}`, so a disconnected session stays disconnected. The webdav fail-closed
-  set gained `GATEWAY_TAILNET_IP` (the baked `syncUrl` needs it; skipped
-  during bootstrap, when the gateway has not joined yet). **Ordering
-  requirement:** `network.js` (stock webvm reads the hash at module-import
-  time, before any component code runs) is adapted to read the values from
-  `sessionStorage`, and the hash→sessionStorage move must run in a small inline
-  script at the top of `app.html` **before** the app bundle is evaluated, so
-  the strip cannot race the read. Write the sync config into a `DataDevice`
-  before `CheerpX.Linux.create` (read-only from the guest's perspective) via
-  the documented `dataDevice.writeFile(path, contents)` API — **mount the
-  device at `/opt` and call `writeFile("/syncrc", …)` so the guest sees the
-  file at `/opt/syncrc`** (`writeFile` paths are relative to the device root;
-  mounting at `/opt/syncrc` would yield `/opt/syncrc/syncrc`) — **spike
-  first** against the pinned CheerpX version (§4 Mode C); if unavailable, the
-  agent uses the baked `/root/.syncrc` fallback. **UX caveat (revised):** after
-  the strip, the only copy of the hash's params lives in that tab's
-  `sessionStorage` — but a hash-less visit re-seeds from `/webvm-config.js`,
-  so a new tab at the site root is **connected**, not silently disconnected
-  (pre-Round-8 behavior); the explicit hash URL is still printed by `make url`
-  for the cases that need it.
+- **URL-hash handling (all secrets out of the hash; Round 8 = baked page
+  config, §12/21(28)):** on page load read `authKey`, `controlUrl`, and
+  (webdav mode) `syncUrl`/`syncUser`/`syncPass` from the URL hash, move them
+  to `sessionStorage`, then strip the hash via `history.replaceState` so **no
+  secrets persist in browser history**. In tailnet modes the server entrypoint
+  additionally renders the same values into the same-origin **`/webvm-config.js`**
+  (JSON-escaped via `server/render-webvm-config.py` — never raw envsubst;
+  `Cache-Control: no-store` + CORP same-origin), and the `app.html` inline
+  script seeds `sessionStorage` from it **when the URL carries no hash** —
+  visiting the site root auto-wires the tailnet. **Any explicit hash disables
+  the baked config entirely** and marks the tab explicit for its lifetime
+  (`webvm-explicit-session`), so saved `make url` URLs behave exactly as
+  before and a later hash-less reload never re-arms the config. The
+  hash→sessionStorage move must run in an inline script at the top of
+  `app.html` before the bundle (network.js reads `sessionStorage`, adapted
+  from the stock hash read). Bootstrap mode and `browser`/`none` render `{}`
+  (disconnected). The webdav fail-closed set gained `GATEWAY_TAILNET_IP`
+  (skipped during bootstrap — keep `HEADSCALE_BOOTSTRAP=1` until the IP is
+  recorded, else the server crash-loops before the gateway joins).
+  Write the sync config into a `DataDevice` mounted at `/opt` via
+  `dataDevice.writeFile("/syncrc", …)` → guest sees `/opt/syncrc` (paths are
+  relative to the device root; mounting at `/opt/syncrc` would yield
+  `/opt/syncrc/syncrc`); the baked `/root/.syncrc` fallback stays (build
+  args, functional out of the box). UX caveat: after the strip a new tab at
+  the site root is **connected** (re-seeds from `/webvm-config.js`), not
+  silently disconnected — `make url` prints the explicit-hash URL for the
+  cases that need it.
 - **No public-request frontend edits (required for the no-egress tests):**
   strip from `src/app.html`: the `https://plausible.leaningtech.com/js/script.js`
   tag, the `fonts.googleapis.com`/`fonts.gstatic.com` preconnects, **and the
@@ -1256,20 +1078,17 @@ or build-time dependency beyond the pinned npm packages.
     headers, `proxy_buffering off;` and generous `proxy_read_timeout` —
     headscale's DERP handler answers `426 Upgrade Required` and its TS2021
     handler `500` to any non-upgraded request.
-- **CORS (verified at implementation, §5/§12/21(d)):** `/derp/probe` IS a
-  CORS-mode fetch answered by headscale with `Access-Control-Allow-Origin: *`
-  (verified at runtime) and the 8443 listener also sets
-  **`Cross-Origin-Resource-Policy: cross-origin`** as belt-and-braces.
-  **REVISED (2026-08-15, browser-tailnet debugging):** the browser-side
-  Tailscale wasm client fetches the control plane's **`/key` endpoint
-  cross-origin** (page origin on SITE_PORT → control plane on CONTROL_PORT),
-  and headscale answers `/derp/probe` ONLY with ACAO — every other
-  control-plane response lacks it, so the fetch is CORS-blocked and the guest
-  tailnet never starts. The 8443 listener now adds
-  **`Access-Control-Allow-Origin: $http_origin` + `Vary: Origin`** (LAN-only
-  personal control plane; the fetch is non-credentialed). WebSockets
-  (`/ts2021`, `/derp`) are not subject to CORS, but the header is harmless on
-  them too.
+- **CORS (verified at implementation, §5/§12/21(d) + networking-bug.md
+  §15.2.1):** the browser-side Tailscale client fetches the control plane's
+  **`/key` endpoint cross-origin**, and headscale answers `/derp/probe` ONLY
+  with `ACAO: *` — every other control-plane response lacked it, so the
+  fetch was CORS-blocked and the tailnet never started. The 8443 listener
+  therefore adds **`Access-Control-Allow-Origin: $http_origin` + `Vary:
+  Origin`** (LAN-only personal control plane; non-credentialed fetch),
+  plus `proxy_hide_header Access-Control-Allow-Origin;` (headscale's `*` on
+  `/derp/probe` must not be echoed alongside it — `MultipleAllowOriginValues`)
+  and **`Cross-Origin-Resource-Policy: cross-origin`** belt-and-braces.
+  WebSockets (`/ts2021`, `/derp`) are not subject to CORS.
 - **Server container base (REVISED at implementation):** built on
   **`python:3.11-alpine`** with `nginx` installed from its repos — the
   `nginx:alpine` python3/libexpat pair breaks `pip`/`pyexpat` entirely
@@ -1446,69 +1265,53 @@ No host packages are required: `openssl`/`curl`/`git` are preinstalled on
 macOS, and everything else (e2fsprogs, pytest, shellcheck, yamllint, socat,
 tailscaled) runs in containers (Steps 3/6/7, §9.1, §8.4).
 
-#### Step 8 — TLS spike + route re-verification
-1. TLS spike: install the private CA in the browser (single-machine uses
+#### Step 8 — TLS spike + route re-verification (RESOLVED — kept as the acceptance recipe)
+1. Install the private CA in the browser (single-machine uses
    `https://127.0.0.1:<SITE_PORT>` — same CA, same one-time step); confirm the
-   **site loads over HTTPS with cross-origin isolation intact** and the guest's
-   network panel shows CONNECTED with a tailnet IP over WSS.
-2. CORS/COEP re-check (the §5 "no CORS needed" premise): confirm `/derp/probe`
-   returns `Access-Control-Allow-Origin: *` **and** is COEP-compatible from
-   the page (the pinned wasm client issues it in CORS mode, which should
-   suffice); if blocked, add **`Cross-Origin-Resource-Policy: cross-origin`**
-   (plus the webvm-README ACAO block) to the 8443 listener (relay-only mode
-   still works).
-3. Route check (cheap re-verification of the source findings), **backend-aware**:
-   from the guest, the relayed port for the running backend must succeed —
-   `nc -z <gateway-tailnet-IP> ${WEBDAV_PORT}` in `webdav` mode (default 8082),
-   `nc -z <gateway-tailnet-IP> 445` in `samba` mode, `nc -z
-   <gateway-tailnet-IP> 2222` only when a git SSH relay is configured — and
+   **site loads over HTTPS with cross-origin isolation intact**, and the
+   guest's network panel shows CONNECTED with a tailnet IP over WSS.
+2. CORS/COEP re-check: `/derp/probe` answers ACAO (the 8443 listener also
+   sets CORP cross-origin; the ACAO `$http_origin` + `proxy_hide_header`
+   rules landed — networking-bug.md §15.2.1/15.2.4).
+3. Route check (**backend-aware**, from the guest): the relayed port for the
+   running backend must succeed — `nc -z <gateway-tailnet-IP> ${WEBDAV_PORT}`
+   in `webdav` mode, `nc -z <gateway-tailnet-IP> 445` in `samba` mode, `nc -z
+   <gateway-tailnet-IP> 2222` when a git SSH relay is configured — and
    `nc -z <raw-LAN-IP> 445` must fail (no subnet routes — expected). (`nc` is
-   already provided by the base busybox in the guest — no extra package needed.)
+   already in the base busybox.) Note the guest's own listen path never
+   accepts (§16.9) — the E2E network spec covers both probe directions.
 
 ### Phase 3 — Guest sync agents + full validation
 
 #### Step 9 — Guest sync agent (per `STORAGE_BACKEND`)
 Read the endpoint config (runtime-injected `/opt/syncrc` if present, else the
 baked `/root/.syncrc` — functional out of the box via build args, Step 2).
-Cadence: **pull on boot before the desktop starts** (Step 2:
-`/etc/local.d/desktop.start`, wait-for-tailnet retry ~90 s, best-effort — X
-starts regardless; runs as `user`), then **push right after writes** (scan
-`~/` every ~5 s; push a debounced ~2 s per-file delta on any change), plus a
-**final push on shutdown** (best-effort `beforeunload`/`SIGTERM`; unreliable
-in a WASM guest, so the write-triggered push is the effective recovery point).
-**Push uses the same per-file mtime manifest as pull** (PUT only the changed
-files, keyed by the manifest; a full `~/` tarball is uploaded only when no
-manifest exists yet) — keeps round-trips low over the WebSocket tunnel and
-avoids re-uploading an entire large home. Pull decisions compare backend mtimes
-against the local **last-push** record (not wall-clock "now") to stay correct
-under clock skew (§4).
-Concurrency: the browser session guard (§4) serializes live tabs on the shared
-overlay; the agent additionally acquires a **backend lease** (heartbeat ~15 s,
-expiry ~90 s) before enabling sync — refuse to sync if another live session
-holds it; pull only files whose backend mtime is newer (per-file manifest via
-**PROPFIND** in webdav mode / **SMB metadata** in samba mode — PROPFIND is the
-WebDAV mechanism only, wsgidav supports it); push clears/releases the lease on
-shutdown.
-**REVISED at implementation (nested files + safety, §12/21):** the per-file
-manifest covers **subdirectory files** — the WebDAV listing is recursive
-(`Depth: infinity`) and the SMB listing walks the share tree; before each
-nested PUT the agent **MKCOLs the parent collections** (WebDAV/SMB return
-`409 Conflict` for a PUT whose parent does not exist). Pull is
-**non-clobbering**: the first-sync snapshot restore skips members that already
-exist locally, and per-file pulls never overwrite pre-existing unrecorded
-files, so a crash after local edits is never clobbered by an older snapshot.
-Remote listings are treated as untrusted input: `..`/absolute/empty-segment
-paths are rejected and `EXCLUDE_NAMES` (`.ssh`, `.cache`, `.syncrc`, …) are
-not pulled.
-- **samba mode:** target `//<gateway-tailnet-IP>/<share>` (port 445 relayed to
-  the LAN Samba server) via the **`pysmb`** agent (default; `smbprotocol` or
-  `smbclient` only if the share requires SMB3/other features — §4 Mode B). The
-  per-file mtime manifest uses SMB file timestamps (pysmb
-  `listPath`/`getAttributes`), not WebDAV PROPFIND.
-- **webdav mode:** target `http://<gateway-tailnet-IP>:<WEBDAV_PORT>/webdav/` via
-  Python stdlib (`urllib` PUT/GET/PROPFIND; basic auth) or `curl`; the URL comes
-  from the URL-hash `syncUrl` when injection is available, else the baked
-  `/root/.syncrc` (remapped ports then need an image rebuild).
+Cadence: **pull on boot before the desktop starts** (`desktop.start`,
+wait-for-tailnet retry ~90 s, best-effort — X starts regardless), then
+**push right after writes** (scan `~/` every ~5 s; debounced ~2 s per-file
+delta), plus a **final best-effort push on shutdown** (unreliable in a WASM
+guest — the write-triggered push is the effective recovery point). **Push
+uses the same per-file mtime manifest as pull** — compare backend mtimes
+against the local **last-push** record (not wall-clock "now", §4 clock-skew);
+a full `~/` tarball is uploaded only when no manifest exists yet.
+Concurrency: the browser session guard (§4) serializes live tabs; the agent
+additionally acquires a **backend lease** (heartbeat ~15 s, expiry ~90 s)
+before enabling sync — refuse to sync if another live session holds it.
+**Implementation notes (§12/21):** the manifest covers **subdirectory files**
+(recursive WebDAV `Depth: infinity` / SMB tree walk; **MKCOL parent
+collections** before nested PUTs, else 409); pull is **non-clobbering**
+(first-sync restore skips existing members; per-file pulls never overwrite
+pre-existing unrecorded files); remote listings are untrusted — `..`/
+absolute paths rejected, `EXCLUDE_NAMES` (`.ssh`, `.cache`, `.syncrc`, …)
+not pulled; the agent is a **single process** (pull + push loop, per
+networking-bug.md §16.3) started by `desktop.start`.
+- **samba mode:** target `//<gateway-tailnet-IP>/<share>` (port 445 relayed)
+  via **`pysmb`** (default; `smbprotocol`/`smbclient` only for SMB3 needs —
+  §4 Mode B); mtimes via SMB `listPath`/`getAttributes`, not PROPFIND.
+- **webdav mode:** target `http://<gateway-tailnet-IP>:<WEBDAV_PORT>/webdav/`
+  via Python stdlib (`urllib` PUT/GET/PROPFIND; basic auth); the URL comes
+  from the injected `syncUrl`, else the baked `/root/.syncrc` (remapped ports
+  then need an image rebuild).
 Keep it silent and small.
 
 #### Step 10 — Run & validate
@@ -1542,249 +1345,137 @@ credentials — treat it like a password in terminal scrollback/logs. Use
 
 The repo is public, so CI runs on every push/PR. **CI has no secrets or LAN
 config**: the guest Dockerfile and scripts must build with placeholders (no
-`/root/.syncrc`, no real SSH key — CI generates a throwaway key or skips baking
-those; defaults come from build args). `.github/workflows/ci.yml`:
+`/root/.syncrc`, no real SSH key; defaults come from build args).
+`.github/workflows/ci.yml` has four jobs (all `runs-on: ubuntu-latest`):
 
-**Jobs (all `runs-on: ubuntu-latest`):**
-1. **guest-image** — build the guest and its ext2 image across backends:
-   - `docker/setup-buildx-action` with layer caching. `docker/setup-qemu-action`
-     is **optional belt-and-braces**: i386 binaries run natively on the amd64
-     runner (x86-64 hardware compatibility mode + kernel compat ABI; the i386
-     image carries its own 32-bit libraries), so QEMU is not required for
-     `linux/i386`. Some BuildKit/builder configurations route non-amd64
-     platforms through binfmt, so keeping the QEMU action is harmless.
-   - Matrix `STORAGE_BACKEND: [browser, samba, webdav, none]`:
-     `docker build --platform=linux/i386 --build-arg STORAGE_BACKEND=${{ matrix.backend }} diskimage`.
-    - Install `e2fsprogs`, run `build.sh`, then verify the ext2 with `debugfs`:
-      `/sbin/init`, `/usr/bin/idle3.10`, `/home/user/.config/openbox/`, sync
-      agent, **and ownership** (`/home/user` = `1000:1000`, setuid bits intact —
-      the untar must run as root on a container-local path, §6 Step 3).
-    - Upload the ext2 **and its content fingerprint** (`sha256sum`, computed by
-      `build.sh` — §12/10) as a workflow artifact (`actions/upload-artifact`):
-      the `frontend` job needs the fingerprint for `WEBVM_IMAGE_BUILD` and the
-      `server` job needs the image itself (Step 4/Step 6).
-2. **frontend** — `actions/setup-node` (Node 20, npm cache) + rewrite the
+1. **guest-image** — `docker/setup-buildx-action` (layer cache; the QEMU
+   action is optional belt-and-braces — i386 runs natively on amd64 runners),
+   matrix `STORAGE_BACKEND: [browser, samba, webdav, none]`; `build.sh` +
+   `debugfs` verification of `/sbin/init`, `/usr/bin/idle3.14`,
+   `/home/user/.config/openbox/`, the sync agent, **and ownership**
+   (`/home/user` = `1000:1000`, setuid bits — the untar must run as root on a
+   container-local path, Step 3); upload the ext2 **and its content
+   fingerprint** (`WEBVM_IMAGE_BUILD`) as artifacts.
+2. **frontend** — `actions/setup-node` (Node 24, npm cache) + rewrite the
    `labs` dependency to HTTPS **before** `npm ci` (the committed lockfile must
-   match the rewritten `package.json` — Step 5) + `npm ci` (committed lockfile
-   with the pinned cheerpx version) + download the guest-image artifact
-   (`actions/download-artifact`) and export its fingerprint as
-   `WEBVM_IMAGE_BUILD` so the built cacheId matches the served image
-   (Step 4) + `npm run build` in `webvm/`; upload the `webvm/build` output.
-   The build must perform **no external fetch** beyond npm — after the Step 4
-   edits the prerender no longer loads `labs.leaningtech.com` blog posts, so
-   the job is deterministic.
-3. **server** — `docker compose config -q` (validates the compose file and its
-   inline defaults; secrets are `${VAR:-}` so this passes with none set);
-   **generate a throwaway private CA + server cert into `certs/` first** (SAN:
-   `127.0.0.1`, `localhost`, `IP:${LAN_IP}`, `IP:${SERVER_IP}` — no hostnames;
-   required before `docker
-   compose up`, since nginx serves HTTPS from `/certs`); **download the
-   `frontend` build artifact and the guest-image ext2 artifact and place them
-   where the `server/Dockerfile` consumes them** (declared build contexts for
-   `build/` and `custom-disk-images/` — the served `alpine.html` and the ext2
-   must be inside the server image);    **export throwaway
-   secret values** (`WEBDAV_USER`/`WEBDAV_PASS`, `HEADSCALE_PREAUTHKEY`,
-   `GATEWAY_AUTHKEY`) for the webdav-mode stack; set `CONTROL_HOST=127.0.0.1`
-   and `LAN_IP=127.0.0.1` via a temporary `.env`
-   override (or exported shell vars) since CI is not on a LAN — the defaults
-   already make this loopback-safe (§5); the gateway (and the §9.3 test client)
-   reach the control plane at the **server's static compose-network IP**
-   (`GATEWAY_CONTROL_IP` = `172.28.0.10`, cert SAN `IP:${SERVER_IP}` — no
-   `extra_hosts` hostname mapping, REVISED Round 11) and trust the CA via
-   `SSL_CERT_FILE=/certs/ca.crt`; `docker compose build`;
+   match the rewritten `package.json` — Step 5) + download the guest-image
+   artifact and export its fingerprint as `WEBVM_IMAGE_BUILD` so the built
+   cacheId matches the served image + `npm run build`; upload `webvm/build`.
+   The build must perform **no external fetch** beyond npm.
+3. **server** — `docker compose config -q` (secrets are `${VAR:-}`, passes
+   with none set); generate a throwaway private CA + server cert into
+   `certs/` first (SAN: `127.0.0.1`, `localhost`, `IP:${LAN_IP}`,
+   `IP:${SERVER_IP}` — no hostnames); place the frontend build and the ext2
+   where the `server/Dockerfile` consumes them; export throwaway
+   `WEBDAV_USER`/`WEBDAV_PASS`/`HEADSCALE_PREAUTHKEY`/`GATEWAY_AUTHKEY`
+   secrets; `CONTROL_HOST=127.0.0.1` and `LAN_IP=127.0.0.1` (loopback-safe
+   defaults, §5); the gateway and the §9.3 join-test client reach the control
+   plane at `GATEWAY_CONTROL_IP` (`172.28.0.10`, cert SAN covered — no
+   hostnames) and trust the CA via `SSL_CERT_FILE=/certs/ca.crt`;
    **bootstrap the preauth keys in the fresh headscale DB before the real
-   `up`** — start the server once with `HEADSCALE_BOOTSTRAP=1` (the
-   implementation's first-run override), run
+   `up`** — start the server once with `HEADSCALE_BOOTSTRAP=1`, run
    `docker compose exec server headscale preauthkeys create --user 1
-   --reusable --expiration 100y` twice (v0.29.x takes the **numeric** user id;
-   the entrypoint creates the `headscale` namespace first, id 1), and export
-   the **printed** values as
-   `HEADSCALE_PREAUTHKEY`/`GATEWAY_AUTHKEY` (headscale generates the key
-   values and the entrypoint fails closed if the `.env` keys are absent from
-   the DB — §6 entrypoint);
-   smoke test: bring the stack up with **`STORAGE_BACKEND=webdav`** (or
-   `HEADSCALE_ENABLED=1` + `make up-tailnet`) so the control plane runs, then
-   `curl -k` — COOP/COEP/CORP headers on `/alpine.html` over HTTPS (`/` → 302
-   `/alpine.html`), `GET /custom-disk-images/webvm-custom-disk.ext2` → 200 with
-   a Range request → `206 Partial Content`, and a WebDAV **PROPFIND/PUT/GET
-   round-trip with basic auth against wsgidav**; the Headscale join test (§9.3)
-   runs against this stack; `docker compose down`.
-4. **lint** — `shellcheck` on `build.sh`, `server/entrypoint.sh`, and the guest
-   sync scripts; `yamllint` on `compose.yaml` and the workflow. Locally these run
-   via Docker images (`koalaman/shellcheck`, `cytopia/yamllint`) — no host
-   installs.
+   --reusable --expiration 100y` twice (v0.29.x takes the **numeric** user
+   id; retry until a real `hskey-auth-*` value is returned — the socket
+   appears before the RPC/DB layer is ready), and export the printed values;
+   smoke test with `STORAGE_BACKEND=webdav` + `make up-tailnet`: `curl -k`
+   COOP/COEP/CORP on `/alpine.html` (`/` → 302), ext2 Range → 206, and a
+   WebDAV PROPFIND/PUT/GET round-trip with basic auth; the Headscale join
+   test (§9.3) runs against this stack.
+4. **lint** — `shellcheck` on `build.sh`, `server/entrypoint.sh`, the guest
+   sync scripts; `yamllint` on `compose.yaml` and the workflows; via Docker
+   images (`koalaman/shellcheck`, `cytopia/yamllint`) — no host installs.
 
 **Notes:**
-- The i386 guest build runs **natively** on the amd64 runner (no QEMU needed —
-  x86-64 runs 32-bit code in hardware compat mode); the main CI costs are the
-  four-backend matrix and image size, mitigated with buildx layer caching.
-- **Host-dependent:** on an **Apple Silicon (arm64)** dev machine (e.g. this
-  one — Docker Desktop 4.85, engine 29.6.2, Compose v5.3.1, Buildx v0.35),
-  `linux/i386` runs under Docker Desktop's **bundled QEMU/binfmt** (verified:
-  `docker build --platform=linux/i386` + `docker run` succeed, `uname -m` →
-  `i686`), so local guest builds are emulated and slower than CI. Everything
-  else (server image, compose, ext2 pipeline via a throwaway Ubuntu container,
-  Playwright on native arm64 Chromium) is unaffected.
-- CI builds the *artifacts* and runs the **test suite** (§9): the private-CA/
-  TLS and control-plane spike is covered by the Headscale-join integration test
-  and the E2E control-plane check; subnet-route acceptance is source-resolved
-  (`RouteAll=false`), and only the socat-relay path is validated (manual in §10).
-- **Tailnet tests need no hostname resolution (REVISED Round 11):** the
-  browser reaches `CONTROL_HOST=127.0.0.1` directly (no `/etc/hosts` entry),
-  and the `gateway`/client containers reach the **server container's static
-  compose-network IP** (`GATEWAY_CONTROL_IP` = `172.28.0.10`) directly; the
-  gateway's loopback relay forwards the netmap's DERP host (`127.0.0.1`),
-  so `server_url`'s DERP-map relay URL is reachable from both sides.
-- Optionally upload the ext2 image as a workflow artifact (`actions/upload-artifact`)
-  for manual download; do **not** publish it to a package registry.
+- The i386 guest build runs **natively** on the amd64 runner (no QEMU needed);
+  the main CI costs are the four-backend matrix and image size, mitigated with
+  buildx layer caching. On an **Apple Silicon (arm64)** dev machine
+  (Docker Desktop 4.85), `linux/i386` runs under the **bundled QEMU/binfmt**
+  (verified: `uname -m` → `i686`), so local guest builds are emulated and
+  slower than CI; everything else is unaffected.
+- The private-CA/TLS and control-plane spike is covered by the Headscale-join
+  integration test and the E2E control-plane check; subnet-route acceptance is
+  source-resolved (`RouteAll=false`), and only the socat-relay path is
+  validated (manual in §10).
+- **Tailnet tests need no hostname resolution (Round 11):** the browser
+  reaches `CONTROL_HOST=127.0.0.1` directly (no `/etc/hosts` entry); the
+  gateway/client containers reach the server's static compose-network IP
+  directly; the gateway's loopback relay forwards the netmap's DERP host
+  (`127.0.0.1`), so the DERP-map relay URL is reachable from both sides.
+- Optionally upload the ext2 as a workflow artifact for manual download; do
+  **not** publish it to a package registry.
 
 ## 9. Test suite (unit → integration → E2E)
 
 Goal: prove the system "definitely works". Because the VM only truly runs in a
 browser, the suite is layered — fast deterministic checks first, a real browser
 E2E as the gate — plus a LAN acceptance script for what CI cannot reach. CI jobs
-live in `tests/` (wired into §8); run everything locally with `make test` and
-`make acceptance`.
+live in `tests/` (wired into §8; layout in `tests/README.md`); run everything
+locally with `make test` and `make acceptance`.
 
 ### 9.1 Unit tests (CI, fast) — `tests/unit/`
 - **Sync agent** (`sync.py`): snapshot create/extract; non-destructive pull
-  (per-file mtime manifest compared against the **last-push record** — only
-  files whose backend copy is newer are overwritten); change detection +
-  debounced push (the ~5 s poll → ~2 s push-on-write behavior); lease
-  acquire/refresh/expiry and single-session refusal; endpoint config parsing
-  (`/opt/syncrc` vs baked fallback); WebDAV client PUT/GET/PROPFIND against a
-  local fake server fixture; SMB client behind an interface mock.
-- **Templates/entrypoint**: `envsubst` renders the expected nginx/Headscale/
-  wsgidav configs from given env — assert COOP/COEP/CORP, the HTTPS site block,
-  the **CSP `connect-src` header containing only `'self'` + the control host**,
-   the `/webdav/` block with `WEBDAV_ROOT`, LAN-bound published ports, the
-   control-plane nginx routing (**path-less catch-all `location /` proxy to
-   headscale with WebSocket upgrade headers** — `Upgrade`/`Connection:
-   $connection_upgrade`, `proxy_buffering off`, timeouts), the site redirects
-   (`/` → `/alpine.html`, `/alpine` → `/alpine.html`), the (path-less)
-   `server_url`/DERP relay addresses derived from
-   `CONTROL_HOST`, and the per-mode secret checks (fail-closed in
-   webdav/tailnet modes, no-op in browser/none). (No CORS headers are expected
-  by default — re-verified at Phase 2, §5/Step 8.)
-- **Frontend session guard** (optional, vitest): lock acquire/contention/
-  heartbeat/expiry and ephemeral-overlay fallback logic.
-- **Script hygiene**: `sh -n` on `build.sh`/`entrypoint.sh`/guest scripts;
-  `python3 -m py_compile` on the sync agent.
-- `pytest` via a compose `test-unit` service (e.g. `python:3-alpine` with
-  pytest installed in the image) — no host Python packages needed; no network,
-  seconds.
+  (per-file mtime manifest vs the **last-push record**); change detection +
+  debounced push; lease acquire/refresh/expiry + single-session refusal;
+  endpoint config parsing (`/opt/syncrc` vs baked); WebDAV PUT/GET/PROPFIND
+  against a fake-server fixture; SMB behind an interface mock.
+- **Templates/entrypoint**: rendered nginx/Headscale/wsgidav configs — COOP/
+  COEP/CORP, the CSP `connect-src` (`'self'` + control host only), LAN-bound
+  ports, the path-less catch-all control proxy with WebSocket upgrade headers,
+  the site redirects, `server_url`/DERP addresses from `CONTROL_HOST`, and the
+  per-mode fail-closed secret checks. **Plus the hostname-ban tripwire**
+  (`test_control_host_defaults_consistent`) and the CORS templates test.
+- Frontend session guard (lock acquire/contention/heartbeat), script hygiene
+  (`sh -n`, `py_compile`). pytest via a compose `test-unit` service — no host
+  Python packages needed.
 
 ### 9.2 Rootfs smoke tests (CI) — `tests/rootfs/`
 Run against the built guest image and ext2 (i386 runs natively on the amd64
-runner):
-- `docker run --rm --platform=linux/i386 webvm-guest …` asserts:
-  - `python3 -c "import tkinter, idlelib"` succeeds; **`/usr/bin/idle3.10`
-    exists** (there is no `idle3`; skip a display-dependent `idle3.10 --help`
-    check — the E2E covers a real IDLE launch).
-  - `command -v xterm openbox xprop git ssh nc` present and
-    **`pcmanfm`/`spacefm` absent**
-    (replaced by the Tk file explorer, §12/25; `nc` comes from the base
-    busybox, not `busybox-extras`).
-  - **curriculum packages are absent:** `python3 -c "import numpy"` and
-    `import requests` and `import pytest` each fail (guards against
-    re-adding the removed packages); `python3 -c "import pip"` succeeds.
-  - Openbox autostart runs `open-file-explorer.sh` (the file explorer) and
-    `keep-file-explorer.sh` (the keep-alive); `~user/.xinitrc` execs openbox
-    (and `xsetroot -solid black`); the
-    sync agent is a single process started by `desktop.start` (samba/webdav
-    builds).
-  - **In-guest GUI suite:** `tests/rootfs/smoke.sh` runs the full
-    `file-explorer-tests.py` suite (98 checks — every explorer function,
-    including the withdraw→IDLE→reappear flow), a real IDLE launch, and an
-    Openbox keep-alive relaunch check (the WM client list must contain a
-    managed window), all under an in-image `Xvfb` (§12/25).
-  - `/sbin/init`, the openrc `local` service (enabled via `rc-update add
-    local default`), and `/etc/local.d/desktop.start` (`sh -n` valid; starts X
-    via `su user -c startx`); `/etc/X11/xinit/xinitrc.d/99-screen-resize.sh`
-    present; in `samba`/`webdav` builds `desktop.start` runs the sync boot-pull
-    before X.
-  - git config, SSH key, `/root/.syncrc` present (CI placeholders via build-arg
-    defaults).
-- Ext2: `e2fsck -f` clean; `debugfs` shows `/sbin/init`, `/usr/bin/idle3.10`,
-  the Openbox config, and the sync agent.
+runner): `import tkinter, idlelib` succeeds and **`/usr/bin/idle3.14`
+exists**; `xterm openbox xprop git ssh nc` present and **`pcmanfm`/
+`spacefm` absent** (Tk file explorer, §12/25); **curriculum packages absent**
+(`import numpy/requests/pytest` fail; `pip` succeeds); openbox autostarts
+`open-file-explorer.sh` + `keep-file-explorer.sh`; `desktop.start` starts the
+sync agent as a single process (samba/webdav) and runs the boot-pull before X.
+**In-guest GUI suite** under an in-image `Xvfb`: `file-explorer-tests.py`
+(98 checks incl. the withdraw→IDLE→reappear flow), a real IDLE launch, and
+the keep-alive relaunch check (§12/25). Ext2: `e2fsck -f` clean; `debugfs`
+shows `/sbin/init`, `/usr/bin/idle3.14`, the openbox config, the sync agent.
 
 ### 9.3 Server integration tests (CI) — `tests/server/`
-- `docker compose config -q`; bring the stack up; assert nginx serves COOP/COEP/
-  CORP headers over HTTPS (`curl -k`), `/alpine.html` → 200 and `/` → 302 to
-  `/alpine.html`, `GET /custom-disk-images/webvm-custom-disk.ext2` → 200 with a
-  Range request → `206`, the control listener
-  answers `/derp/probe` with `Access-Control-Allow-Origin: *`, and (webdav
-  mode) a WebDAV **PROPFIND/PUT/GET round-trip with basic auth against
-  wsgidav**.
-- **Headscale join test** (validates the control plane + private-CA TLS without
-  a browser): run a `tailscaled` client container that trusts the test CA
-  (`SSL_CERT_FILE=/certs/ca.crt`, `./certs` mounted) and
-  `--login-server https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT}`
-  (`GATEWAY_CONTROL_IP` = the server's static compose-network IP
-  `172.28.0.10`, cert SAN covered — **no hostnames, no `extra_hosts`**,
-  REVISED Round 11) so the container reaches the control
-  plane over the compose network — **not** the loopback-published host port)
-  and assert it registers (`headscale nodes list`) and that tailnet
-  connectivity to a second node works (via the embedded DERP, whose relay URL
-  headscale derives from `server_url`).
-- Assert no exit node is advertised anywhere.
+`docker compose config -q`; stack up; assert COOP/COEP/CORP over HTTPS,
+`/alpine.html` → 200, `/` → 302, ext2 Range → 206, control listener
+`/derp/probe` ACAO (and the `MultipleAllowOriginValues` guard, networking-bug
+§15.2.4), and (webdav) a PROPFIND/PUT/GET round-trip with basic auth.
+**Headscale join test** (`join-test-client.sh`): a `tailscaled` client
+container trusting the test CA joins via
+`https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT}` (`172.28.0.10`, cert SAN
+covered — no hostnames), registers, and reaches a second node via the
+embedded DERP. Assert no exit node is advertised anywhere.
 
 ### 9.4 E2E tests (Playwright; CI + local) — `tests/e2e/`
 The definitive check — boot the real VM in headless Chromium against the
-running server (`@playwright/test`, `npx playwright install --with-deps chromium`,
-`ignoreHTTPSErrors: true` for the private CA since the site is HTTPS):
-- **boot**: page loads over HTTPS with cross-origin isolation intact; the
-  display canvas becomes non-blank within a generous timeout (desktop
-  rendered); no console errors (**allowlist the CSP `connect-src` violation
-  warning from the blocked logtail fetch, if it appears** — a compliant pinned
-  client may self-disable logtail via headscale's netmap `Debug.DisableLogTail`,
-  in which case no warning fires; either way the assertion is "no *successful*
-  external request", not "a warning occurs"). The
-  `browser`-mode matrix case is opened with **no `authKey`/`controlUrl`**
-  (disconnected session — asserting no auto-login attempt occurs); network
-  params are only present in the `webdav` case.
-- **no-egress**: intercept all requests **and WebSockets** (`page.route` for
-  HTTP(S) plus `page.on('websocket')` — the control connection is a WebSocket
-  that `page.route` does not see) and assert every URL is **same-origin (the
-  site) or the control host/port** (`${CONTROL_HOST}:${CONTROL_PORT}` — the
-  control WSS, `/derp`, `/derp/probe`). **There are no external hosts at all** —
-  in particular the browser must make **no** successful request to the logtail
-  endpoint (assert the logtail fetch is blocked by the CSP `connect-src`), the
-  plausible/fonts/**serviceWorker** script tags are stripped, the **blog-post
-  images are gone and the Claude/AI sidebar entry is absent** (open the Posts
-  sidebar entry and re-assert zero external requests; assert no Claude sidebar
-  entry or `anthropic.js` import exists), and the `/` route is
-  redirected to `/alpine.html` (§4/Step 4/Step 6).
-- **control plane**: in network modes, `headscale nodes list` gains a new
-  ephemeral node (proves browser Tailscale + WSS control + DERP + certs).
-- **sync (webdav mode)**: within ~2 min the lease file and a `~/` snapshot
-  appear on the WebDAV backend; reload the page → pull runs (snapshot timestamps
-  advance / content round-trips).
-- **network (webdav mode, Round 8)**: the user's exact acceptance sequence —
-  visit the site **root** (302 → `/alpine.html`, baked `/webvm-config.js`
-  auto-wires the tailnet, no hash), let the file manager load, then verify the
-  guest data path reaches the gateway relay: wait for the sync agent's
-  `webvm.lock` on the backend (proves in-guest connectivity — a broken data
-  path hangs exactly like `nc -z`), then drive the same `cjTailscale` socket
-  adapter the core hands guest `connect(2)` to (the `nc -z
-  <GATEWAY_TAILNET_IP> <WEBDAV_PORT>` twin) and assert a full TCP connect +
-  HTTP round-trip. Needs `E2E_GATEWAY_IP` (the gateway tailnet IP) — this
-  also gives the baked-config path its first boot-through E2E coverage.
-- **error overlay (Round 9)**: a forced boot failure (`webvm-test-bootfail`
-  sessionStorage hook in `initCheerpX`) must show the exact reason in a
-  visible full-screen overlay (role=alert), and the overlay's Reload must
-  work when the boot failed before the block cache existed (plain reload
-  fallback).
-- **persistence**: `browser` mode — the overlay's persistent browser store is
-  non-empty after boot and after a reload (assert `indexedDB.databases()` if
-  the pinned build uses `IDBDevice`, or the OPFS store if it uses
-  `OpfsDevice` — §2); `none` mode — fresh session does not reuse prior data.
-- **single-session guard**: opening a second tab while the first is live shows
-  the ephemeral-mode notice and does not write to the shared overlay.
-- Matrix over `[browser, webdav]`; samba/none logic is covered by unit + rootfs
-  (Samba E2E needs a live Samba server → LAN acceptance only).
-- CI: allow retries and use long timeouts (WASM boot is slow); this job is the
-  gate that must pass.
+running server (`ignoreHTTPSErrors: true` for the private CA):
+- **boot**: HTTPS + cross-origin isolation intact; canvas non-blank within a
+  generous timeout; no console errors (logtail CSP warnings are allowlisted —
+  the assertion is "no *successful* external request"); the `browser`-mode
+  case opens with **no `authKey`/`controlUrl`** (no auto-login attempt).
+- **no-egress**: intercept all requests **and WebSockets** (`page.on('websocket')`
+  — the control connection is a WS `page.route` does not see) and assert every
+  URL is same-origin or the control host/port; no logtail success; no
+  plausible/fonts/serviceWorker/blog images/Claude tab; `/` → `/alpine.html`.
+- **control plane**: `headscale nodes list` gains a new ephemeral node.
+- **sync/network (webdav)**: `webvm.lock` + a `~/` snapshot appear on the
+  backend within ~2 min, reload pulls; the network spec runs the user's exact
+  root-visit acceptance (baked config → lease → `cjTailscale` nc-twin connect
+  + HTTP round trip → listen-twin bind+listen; §16.9 accept-path limitation).
+- **error overlay** (`webvm-test-bootfail`/`webvm-test-trapreport` hooks):
+  exact reason shown, Reload recovers. **persistence**: browser mode survives
+  a reload (IDB/OPFS per §2); none mode does not. **single-session guard**:
+  second tab shows the ephemeral notice and never writes the shared overlay.
+- Matrix over `[browser, webdav]` (samba/none logic is unit + rootfs; Samba
+  E2E needs a live Samba server → §10). CI: retries + long timeouts; this job
+  is the gate.
 
 ### 9.5 Local / LAN acceptance — `scripts/acceptance.sh`
 Semi-automated, run on the LAN host after `make up`; covers what CI can't:
@@ -1796,100 +1487,44 @@ items (desktop renders, IDLE usable, canvas resize).
 
 ## 10. Manual & LAN acceptance
 
-Manual complements to the automated suite in §9, for the checks that need a
-real LAN, a private-CA-trusting browser, or human eyes (run via
-`scripts/acceptance.sh`):
-
-1. Site access paths: **`https://127.0.0.1:<SITE_PORT>/alpine.html`** (single
-   machine; CA installed once) and **`https://<LAN_IP>:<SITE_PORT>/alpine.html`**
-   (CA installed on the device) both serve COOP/COEP/CORP headers; `/` →
-   302 `/alpine.html`; `.ext2` Range → 206 on both.
-2. **No-internet:** DevTools shows only LAN/container requests — **zero
-   external hosts**, including the blocked logtail fetch
-   (CSP `connect-src`); from the
-   guest, a public IP is unreachable while relayed services (Samba/git/WebDAV
-   via the gateway's tailnet IP) answer; a raw LAN IP is unreachable (no
-   subnet routes); no exit node exists in the headnet. Confirm the guest URL
-   never carries `#authKey` without a matching `controlUrl` (that would
-   auto-register with public Tailscale).
-3. TLS/control: guest shows CONNECTED with a tailnet IP over WSS.
-4. Desktop: the file explorer auto-opens on `~/`; a new `.py` can be created
-   (New File) and opened in IDLE; closing the last window relaunches the
-   explorer; canvas resize works.
-5. **Storage sync (per backend):**
-   - Samba: from the guest connect to `//<gateway-tailnet-IP>/<share>`; push a
-     file and verify it on the server (also browsable from the host).
-   - WebDAV: push a file and verify it in the container volume at `$WEBDAV_ROOT`
-     (and via a host-side WebDAV client against
-     `http://<LAN_IP>:${WEBDAV_PORT}/webdav/`, PROPFIND included); confirm a
-     different `WEBDAV_ROOT`/volume is honoured when configured.
-   - Both: reboot the VM/tab → pull restores `~/`; a save in IDLE is pushed to
-     the backend **within a few seconds** (write-triggered push), not only on a
-     periodic tick.
-6. **Browser/none modes:** `browser` — a file written in `~/` survives a tab
-   reload (IndexedDB); `none` — it does not (ephemeral). No storage endpoint
-   needed in either case. Two concurrent tabs: second tab shows the
-   single-session notice and boots ephemeral.
-7. **Git:** **host-side first** — set `GIT_SSH_LAN_IP` in `.env` and recreate
-   the gateway to add the `2222` relay; then from inside the guest add the
-   remote with the explicit-port URL
-   `ssh://git@<gateway-tailnet-IP>:2222/<path>` (or an `~/.ssh/config` `Host`
-   alias with `Port 2222`), then `git clone`, `git pull`, and `git push`
-   against the LAN remote succeed.
-8. Image size + first-load time recorded; still ≤ 2 GB.
-9. **Port remapping:** change `SITE_PORT`/`CONTROL_PORT`/`WEBDAV_PORT`/`STUN_PORT`
-   in `compose.yaml` (or override via `.env`) and `docker compose up -d` (no
-   image rebuild); confirm the page, Headscale control, and webdav sync work
-   end-to-end with the new ports (URL-hash + `syncrc` ports must match the
-   gateway relays, which read the same env vars; the DERP-map relay URL follows
-   `CONTROL_PORT` automatically via `server_url`; where DataDevice injection is
-   unavailable, the baked `syncrc` must be rebuilt — see §4 Mode C).
+Manual complements to the automated suite in §9 (run via
+`scripts/acceptance.sh`): site access paths (`https://127.0.0.1:<SITE_PORT>`
+and `https://<LAN_IP>:<SITE_PORT>`, CA trusted once per browser); **no
+internet** proofs (DevTools zero external hosts + blocked logtail; guest
+cannot reach a public IP or a raw LAN IP; no exit node anywhere; never
+`#authKey` without `controlUrl`); guest CONNECTED with a tailnet IP over WSS;
+desktop (explorer auto-opens, `.py` → IDLE, keep-alive relaunch, resize);
+**storage sync per backend** (samba push/reconnect; webdav push + host-side
+WebDAV client + alternate `WEBDAV_ROOT`; both: reload → pull restores `~/`,
+a save in IDLE is pushed within seconds); browser/none persistence behavior;
+concurrent-tab single-session notice; **git** (host-side `GIT_SSH_LAN_IP`
+relay first, then in-guest `ssh://git@<gateway-tailnet-IP>:2222/<path>` clone/
+pull/push); image size + first-load time ≤ 2 GB; **port remapping** in
+compose/.env with no image rebuild (URL-hash + `syncrc` ports must match the
+gateway relays).
 
 ## 11. Risks & mitigations
 
 | Risk | Mitigation |
-|---|---|
+|---|---|---|
 | Browser Tailscale client ignores LAN subnet routes (source-verified: `RouteAll=false`) | socat TCP relays on the gateway (tailnet IP → LAN ports); join a machine to the tailnet if a port can't be relayed |
 | Gateway inbound delivery in userspace mode | Source-verified: tailscaled forwards tailnet-IP:port → `127.0.0.1:port` (`netstack.go`); socat binds `127.0.0.1`; Step 8 re-verifies with `nc`; host-tailscale fallback documented |
-| Browser/CA trust: private-CA site + control endpoint rejected | TLS spike first; import CA in the browser once — required for **both** the single-machine path `https://127.0.0.1:<SITE_PORT>` and LAN use (no plain-HTTP path exists) |
-| **Site over plain HTTP on a LAN IP → no SharedArrayBuffer → VM won't boot** | Site always served over HTTPS with the private CA (SITE_PORT) — the only access mode; verified by E2E boot over HTTPS and §10.1 |
-| nginx `dav_module` lacks PROPFIND (sync agent needs it) | Use **wsgidav** (PROPFIND/LOCK/auth); nginx dav module avoided; integration test covers PROPFIND/PUT/GET |
-| IDLE packaging: `python3-idle` depends on `python3-tests` (~85 MiB) and ships only `/usr/bin/idle3.10` | Enable the **community** repo; **extract `idlelib`/`idle3.10` from the package** instead of `apk add python3-idle` (Step 2); autostart/tests use `idle3.10`; benign 3.10.11-vs-3.10.15 patch mismatch |
-| X fails to bootstrap without a display manager (DRM/input perms, VT handling) | udev + `video`/`input`/`tty` groups; `XDG_RUNTIME_DIR` + dbus session; **start X as `user` (`su user -c startx`)**; direct `Xorg :0` fallback; ultimately LightDM autologin |
-| Alpine 3.17 EOL mirrors | Use archive.alpinelinux.org repositories |
-| SMB over the WebSocket tunnel is slow/chatty | Tarball snapshot sync (few round-trips); acceptable for IDLE-scale files |
-| Guest disk fills | ext2 headroom ~20% (min 100 MB), ≤ 2 GB |
-| Samba agent image size | Default is the **`pysmb`** pure-Python agent (~0.5 MB, no compiled deps); `smbprotocol` (~5–6 MB) only if SMB3 is required; `samba-client` (~25 MB closure) only as a compatibility fallback; `gvfs-smb` excluded |
-| SSH host-key verification in a headless guest | `StrictHostKeyChecking=accept-new`; the host key verified is the **LAN git server's** key (the gateway only relays TCP) — if a pre-seeded `known_hosts` is desired it must hold that key, indexed by `<gateway-tailnet-IP>:2222` |
-| Gateway tailnet IP changes on rejoin (breaks URLs/remotes/known_hosts) | headscale v0.29.x has **no fixed-IP mechanism** (verified); rely on persistence — headscale's SQLite DB + the gateway's tailscaled state on named volumes keep the node record (and its allocated IP) stable — and record the **actual** assigned IP as `GATEWAY_TAILNET_IP` after the first join; document the recovery path if the DB is wiped (§5.4/§6 Steps 6–7/§12/9) |
-| Git over the WebSocket tunnel is slower | Acceptable for personal LAN use; use smart-HTTP if a LAN git server exists |
-| Two VM tabs sync concurrently → last-writer-wins data loss / shared IndexedDB corruption | **Browser-level single-session guard** (localStorage+BroadcastChannel, all modes) + backend lease for sync agents + non-destructive pull (mtime manifest); one-session-at-a-time usage documented |
-| Hidden-tab timer throttling makes the session guard stale → two writers | `BroadcastChannel` liveness (ping before takeover); heartbeat tuned below worst-case throttling |
+| Browser/CA trust: private-CA site + control endpoint rejected | Import the CA in the browser once — required for **both** `https://127.0.0.1:<SITE_PORT>` and LAN use (no plain-HTTP path exists) |
+| **Site over plain HTTP on a LAN IP → no SharedArrayBuffer → VM won't boot** | Site always served over HTTPS with the private CA — the only access mode; verified by E2E boot over HTTPS and acceptance |
+| nginx `dav_module` lacks PROPFIND (sync agent needs it) | **wsgidav** (PROPFIND/LOCK/auth); integration test covers PROPFIND/PUT/GET |
+| IDLE packaging: `python3-idle` depends on `python3-tests` (~85 MiB) and ships only `/usr/bin/idle3.14` | Extract `idlelib`/`idle3.14` from the package (`apk fetch` + `tar`, Step 2) |
+| X fails to bootstrap without a display manager (DRM/input perms, VT handling) | udev + `video`/`input`/`tty` groups; `XDG_RUNTIME_DIR` + dbus session; **Xorg launched as root** with `-novtswitch`, user session via `~/.xinitrc` (§12/22 — the "start X as `user`" note in the original steps is superseded) |
+| Gateway tailnet IP changes on rejoin (breaks URLs/remotes/known_hosts) | headscale has **no fixed-IP mechanism** (verified); persistence (headscale SQLite DB + gateway state volumes) keeps the node record/IP stable; record the **actual** assigned IP as `GATEWAY_TAILNET_IP`; document the recovery path if the DB is wiped (§12/9) |
+| Two VM tabs sync concurrently → last-writer-wins data loss / shared IndexedDB corruption | **Browser-level single-session guard** (localStorage+BroadcastChannel, all modes, throttling-safe via BroadcastChannel pings) + backend lease for sync agents + non-destructive pull (mtime manifest vs last-push record); one-session-at-a-time usage documented |
 | Rebuilt ext2 leaves stale IndexedDB overlays (deltas against an old base → corrupt FS) | **CacheId versioned to the image build** (`blocks_alpine_<image-build>`); upgrades start fresh overlays (§4/Step 4) |
-| `#authKey` in the URL without a `controlUrl` auto-registers with **public Tailscale** | Never ship/use `#authKey` alone; disconnected sessions use no network params; E2E + acceptance assert this (§9.4, §10.2) |
-| CheerpX `DataDevice` population API unavailable → runtime `syncUrl` injection impossible | `dataDevice.writeFile` is documented (1.2.x) — confirm against the pinned version early (§4 Mode C/Step 4); fall back to baked `/root/.syncrc` (port remapping then needs a rebuild) or a `/web`-mounted config file |
-| Unpinned CheerpX/WebVM/Headscale/Tailscale drift breaks the integration | Pin webvm commit, exact `@leaningtech/cheerpx`, committed lockfile, Headscale + tailscale image tags; `labs` dep rewritten to HTTPS for CI |
-| Playwright E2E is slow/flaky (WASM boot, first-run downloads, HTTPS/certs) | Retries, generous timeouts, `ignoreHTTPSErrors` for the test CA; unit/rootfs layers catch most failures first |
-| Tailscale logtail telemetry from the browser (logtail default endpoint `log.tailscale.com`) | **Blocked, not permitted**: compiled-in default log policy (`logtail.CollectionNode`; headscale can only *disable* client logging via netmap `Debug.DisableLogTail`, not redirect it) → nginx CSP `connect-src` allows only `'self'` + the control host, plus the host firewall drops egress beyond RFC1918; logtail failures are non-fatal to the Tailscale client; E2E asserts **zero** external hosts (§5, §9.4, §12/20) |
-| Accidental internet exposure | No exit node; **`derp.urls: []` so no public DERP**; ports published to LAN IP + loopback only (never all interfaces); host pf firewall; DevTools egress check (§10.2); stock frontend external refs (plausible/fonts/`/` route) stripped or redirected **and the blog-post images, Claude/AI tab and service worker removed** (Step 4) |
-| `none` mode loses all changes on reload | By design; only use where ephemeral/read-only sessions are acceptable |
-| i386 guest build in CI is slow (native compat mode, no QEMU needed) | buildx layer cache; matrix limited to the four backends |
-| Cross-origin isolation misconfig | Validate headers first (§10.1); E2E boot asserts isolation |
-| Duplicate host port binds when `LAN_IP` is loopback (CI/dev) | Default is loopback-safe: `LAN_IP=127.0.0.1` only (the planned `EXTRA_BIND_IP=127.0.0.2` second binding was dropped — not bindable on macOS Docker Desktop; §12/21) — no collision; CI uses the same default |
-| Gateway container cannot reach the control plane/DERP over the host's loopback | **Fixed (REVISED Round 11):** the `server` container gets a static IP on a fixed-subnet compose network and the gateway points `--login-server` at that IP (`GATEWAY_CONTROL_IP` = `172.28.0.10`, cert SAN covered) + a loopback socat relay on CONTROL_PORT forwards the netmap's DERP host (127.0.0.1 single machine) to the server — no `extra_hosts` hostnames (works on Linux and Docker Desktop, independent of the loopback-published ports) + trusts the private CA via `SSL_CERT_FILE` (§5.2/Step 7) |
-| STUN discovery is gateway-only (the browser client has no UDP socket) | The gateway already reaches STUN at `172.28.0.10:3478` over the compose network without any host publish; the UDP host publish is a harmless extra; relay-only is the steady state (§6 Step 6, §12/21(h)) |
-| Non-reusable gateway auth key consumed on first join → recreated gateway can't rejoin | Make `GATEWAY_AUTHKEY` reusable and mount a named volume for the gateway's tailscaled state (§6/Step 7/§12/12) |
-| Default headscale config points clients at Tailscale's public DERP map | `derp.urls: []` + the embedded DERP region enabled per the pinned version's schema (verify the key names — e.g. `derp.server.*`, STUN — against the pinned headscale); `disable_check_updates: true` |
-| CORS misconception: "browser fetches the DERP map cross-origin" | The DERP map arrives **over the control WebSocket**; the only cross-origin HTTP request (`/derp/probe`) is issued in **CORS mode** by the pinned wasm client and answered with `Access-Control-Allow-Origin: *`, which satisfies COEP — **verify against the pinned versions at Phase 2**; if the probe is ever issued no-cors, add **`Cross-Origin-Resource-Policy: cross-origin`** (plus the README's ACAO block) to the 8443 listener (§5/Step 8) |
-| nginx `/derp`/`/ts2021` missing WebSocket upgrade headers → `426 Upgrade Required` / `500` (relay + registration fail) | The control listener is a **catch-all `location /`** proxy carrying the upgrade headers + `proxy_buffering off` + timeouts; unit test asserts them; §9.3 probes `/derp/probe` (§5/§6 Step 6/§9.1) |
-| SvelteKit static output path mismatch (404 on the alpine page) | Output is **`build/alpine.html`** (verified upstream); nginx serves it and redirects `/` and `/alpine` to `/alpine.html`; §9.3 asserts `/alpine.html` → 200 (Step 4/Step 6) |
-| `authKey`/`controlUrl` stay in browser history (URL fragment) | Move **all** hash params (`authKey`, `controlUrl`, `syncUrl`/`syncUser`/`syncPass`) to `sessionStorage` and strip the hash via `history.replaceState` (Step 4) |
-| Image upgrades orphan the old IndexedDB overlay DB | cacheId versioning starts a fresh overlay automatically; old `blocks_alpine_<oldsha>` DBs are simply orphaned (optional manual cleanup / existing Reset button) |
-| Per-file mtime sync across un-synchronized clocks (guest/browser vs backend) | Pull compares backend mtimes against the local **last-push** record, not wall-clock "now"; lease heartbeat (15 s) ≪ expiry (90 s) tolerates personal-LAN clock skew (§4/Step 9) |
-| Two-way sync without tombstones → deletions not propagated | Documented limitation: locally deleted files stay orphaned on the backend (never resurrected); backend deletions don't remove local files (§4) |
-| Push-on-write in a WASM guest (no guaranteed inotify) | Agent polls `~/` every ~5 s and pushes a debounced ~2 s delta after changes — effectively right after writes; effective RPO ≈ seconds, not the old 60 s tick (§4/Step 9) |
-| Headscale DB loss invalidates preauth keys and the gateway IP assignment | headscale's SQLite DB (`/var/lib/headscale`) on a named volume (§5.4/§6 Step 6); on DB loss, re-register the gateway, read its new IP, and update `GATEWAY_TAILNET_IP` + baked `syncrc`/remotes/`known_hosts` |
-| Preauth key expiry silently breaks the saved session URL | Keys are **long-lived** (e.g. `100y`) — a 180 d expiry is unnecessary for a personal LAN key (§6 Step 6/§12/12) |
+| `#authKey` in the URL without a `controlUrl` auto-registers with **public Tailscale** | Never ship/use `#authKey` alone; E2E + acceptance assert this |
+| Unpinned CheerpX/WebVM/Headscale/Tailscale drift breaks the integration | Pin webvm commit, exact `@leaningtech/cheerpx`, committed lockfile, image tags; `labs` dep rewritten to HTTPS for CI; the §12/21 checklist is re-run per bump (update-to-latest.md) |
+| Tailscale logtail telemetry from the browser | **Blocked, not permitted**: nginx CSP `connect-src` allows only `'self'` + the control host (and the rebuilt wasm client's uploads are removed at source); host firewall drops egress beyond RFC1918; logtail failures are non-fatal; E2E asserts **zero** external hosts |
+| Accidental internet exposure | No exit node; **`derp.urls: []` so no public DERP**; ports published to LAN IP + loopback only; host pf firewall; DevTools egress check; stock frontend external refs stripped/redirected (Step 4) |
+| Gateway container cannot reach the control plane/DERP over the host's loopback | **Fixed (Round 11):** gateway reaches the control plane at the server's static compose-network IP (`GATEWAY_CONTROL_IP` = `172.28.0.10`, cert SAN covered) + a loopback socat relay on CONTROL_PORT forwards the netmap's DERP host (127.0.0.1 single machine) — no hostnames (networking-bug.md §16.10) |
+| Guest inbound accept path is dead in the rebuilt wasm client (§16.9) | Runtime limitation: guest LISTEN services never accept; the E2E listen-twin asserts bind+listen ONLY; IDLE's launcher gates subprocess mode on a loopback round trip (display-bug.md §2.11); revisit if the wasm client is rebuilt |
+| Gateway auth key consumed on first join → recreated gateway can't rejoin | `GATEWAY_AUTHKEY` reusable + named volume for tailscaled state (§12/12) |
+| Headscale DB loss invalidates preauth keys and the gateway IP assignment | SQLite DB on a named volume; on DB loss, re-register the gateway, read its new IP, update `GATEWAY_TAILNET_IP` + baked `syncrc`/remotes/`known_hosts`; preauth keys are **long-lived** (`100y`) so saved session URLs don't silently expire |
 | Two profiles/browsers on one machine bypass the browser-level guard (per-profile storage) | Documented: one live session per profile; samba/webdav are additionally arbitrated across machines by the backend lease (§4). **Different site origins are separate sessions** (`https://127.0.0.1:<SITE_PORT>` vs `https://<LAN_IP>:<SITE_PORT>`): separate overlays and guards, one session per origin per profile |
 
 ## 12. Resolved decisions (open questions closed 2026-08-09)
@@ -1971,11 +1606,11 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
 17. **Python curriculum (revised):** the guest is **stdlib-only** — `py3-numpy`,
     `py3-matplotlib`, `py3-requests`, `py3-pytest` are removed; only `py3-pip`
     is baked in (§3/10, Step 2).
-18. **IDLE provisioning (revised):** `idlelib` + `/usr/bin/idle3.10` are
+18. **IDLE provisioning (revised):** `idlelib` + `/usr/bin/idle3.14` are
     **extracted from the `python3-idle` package** (`apk fetch` + `tar`) to skip
     the 85 MiB `python3-tests` dependency; IDLE is launched on demand from the
-    file manager (Step 2) — rootfs tests and acceptance use `idle3.10` and the
-    `idle3.10-launcher`.
+    file manager (Step 2) — rootfs tests and acceptance use `idle3.14` and the
+    `idle3.14-launcher`.
 19. **Control-plane hostname (REVISED Round 10 + Round 11):** `CONTROL_HOST`
     (default `127.0.0.1`; `<LAN_IP>` — hardcoded LAN address — for LAN use)
     is the single BROWSER-facing value rendered into headscale
@@ -2155,20 +1790,12 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
       `xinitrc.d`, so the screen-resize hook is sourced from `~/.xinitrc`;
       and the WM runs under `dbus-run-session` (a per-session D-Bus).
 
-23. **File-manager-first desktop (implementation change, 2026-08-13):** the
-    autostarted desktop client was switched from IDLE to the **pcmanfm** file
-    manager (`exec --no-startup-id pcmanfm /home/user`), with IDLE launched on
-    demand from it — `.py` files opened in IDLE via
-    `~/.config/mimeapps.list` → `idle3.10.desktop` (both exec the
-    `idle3.10-launcher`) and the right-click *Open with IDLE* custom action;
-    new `.py` files came from *File ▸ Create New* (`~/Templates/Python
-    Script.py`); `shared-mime-info` handled `.py` MIME detection. A keep-alive
-    daemon (`diskimage/rootfs/usr/local/bin/keep-file-manager.sh`) polled the
-    WM client list and relaunched `pcmanfm /home/user` whenever the number of
-    real windows dropped to zero.
-    **SUPERSEDED (2026-08-14):** pcmanfm is replaced by the Tk file explorer
-    (§12/25); the keep-alive became `keep-file-explorer.sh` and the pcmanfm
-    integration files/mimeapps/template were removed.
+23. **File-manager-first desktop (implementation change, 2026-08-13) —
+    SUPERSEDED (2026-08-14):** the autostarted desktop client was first
+    switched from IDLE to **pcmanfm** (GTK3 + libfm, keep-alive daemon,
+    mimeapps/`idle3.10.desktop`/Templates integration, `shared-mime-info`),
+    then **replaced by the Tk file explorer (§12/25)**; the pcmanfm
+    integration files and MIME machinery were removed from the image.
 
 24. **Baked-in Python examples (added 2026-08-13):** the `python-examples/`
     directory (moved from the repo root into `diskimage/`, so it is in the
@@ -2200,14 +1827,14 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `desktop.start`. A starter `/home/user/hello.py` is baked in so a new user
     can double-click into IDLE immediately.
     **Screen replacement:** "Open with IDLE" (or double-clicking a `.py`)
-    launches `idle3.10-launcher` per file and then **withdraws the explorer
+    launches `idle3.14-launcher` per file and then **withdraws the explorer
     window** — the whole screen is IDLE's. A watcher thread decides when IDLE
     is gone by watching the **window manager's client list** (not the
     process): the WM (Openbox) maintains the EWMH `_NET_CLIENT_LIST` root
     property, read in-process by the explorer (`_wm_client_windows`, via
     xprop — no per-poll interpreter spawn; the keep-alive counts the same
     property via the shell `wm-clients.sh`) — under CheerpX
-    closing IDLE can leave the `idle3.10` process alive (it waits on its
+    closing IDLE can leave the `idle3.14` process alive (it waits on its
     Python-shell subprocess, which a running program such as the snake game
     keeps busy), so waiting on the process would never return. The watcher
     waits for IDLE to map, then waits until its window disappears (IDLE
@@ -2247,52 +1874,24 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
 26. **GitHub Pages project website — the VM itself (added 2026-08-14):** a
     second workflow (`.github/workflows/pages.yml`) builds the browser-mode
     guest, **splits the ext2 into 128 KiB chunks** (`<name>.c<hex6>.txt` +
-    `<name>.meta` size file — the CheerpX `GitHubDevice` protocol, verified
-    against the pinned runtime and by a full boot test on a Pages-like static
-    host), builds the frontend with `diskImageType="github"` (new
-    `webvm/config_public_alpine_github.js`, selected by the `WEBVM_DISK_IMAGE`
-    env via a vite alias) and deploys the site + chunks to GitHub Pages
-    (`https://ned14.github.io/webbrowser-python-idle/alpine.html`). GitHub
-    Pages cannot set the COOP/COEP headers the graphical WebVM needs
-    (cross-origin isolation / SharedArrayBuffer — verified absent without
-    them), so a **service worker** (`webvm/static/sw.js`) re-serves navigations
-    with the headers and `alpine/+page.svelte` registers it and reloads once
-    when `crossOriginIsolated` is false (the local nginx server already sends
-    the headers, so the worker is never registered there). Pages supports the
-    byte-range + `Last-Modified` requests `HttpBytesDevice`/`GitHubDevice`
-    require. **Base-path fix (2026-08-14):** the first live deployment failed
-    with `Failed to fetch dynamically imported module:
-    https://ned14.github.io/cheerpx/cx.esm.js` — a project site lives at
-    `/webbrowser-python-idle/`, and the runtime import, `sw.js` registration and
-    the `/alpine.html` link were hardcoded root-absolute (they worked only on
-    the root-served Pages-like test host). The runtime entry (`cheerpx.js`) now
-    derives the site base from its own module URL (everything before
-    `/_app/`) and imports `{base}/cheerpx/cx.esm.js`; the alpine page registers
-    `sw.js` relatively; and the root `+page.svelte` redirects to `alpine.html`
-    relatively (matching the local nginx `location = /` rule) instead of
-    mounting the terminal VM with a `/custom-disk-images/` bytes device that
-    Pages does not serve. **Font robustness fix (2026-08-14):** running the
-    snake-game example on the Pages deployment surfaced `failed to allocate
-    font due to internal system font engine problem` (Tk/Xft could not open a
-    font). The image's font engine and every Tk font path (default, `consolas`
-    substitution, direct, IDLE in-process, IDLE open) verified working in both
-    editions under a local Pages-like host — the failure is specific to the
-    real Pages streamed-device reads, so the guest is made robust to a cold
-    font read instead: the example uses an **installed** family
-    (`DejaVu Sans Mono`, not `consolas`); a fontconfig alias file
-    (`/etc/fonts/conf.d/99-webvm-aliases.conf`) maps the common missing
-    families (consolas/arial/times new roman/...) deterministically to the
-    DejaVu families; and `desktop.start` **warms the font files into the
-    page's block cache at boot** (`cat /usr/share/fonts/{dejavu,misc}/*`), so
-    interactive font opens never depend on a cold chunked network read. Updated:
-    `.github/workflows/pages.yml`,
-    `webvm/vite.config.js`,
-    `webvm/config_public_alpine_github.js`, `webvm/static/sw.js`,
-    `webvm/src/lib/cheerpx.js`, `webvm/src/routes/+page.svelte`,
-    `webvm/src/routes/alpine/+page.svelte`, `README.md`,
-    `diskimage/Dockerfile`, `diskimage/rootfs/etc/local.d/desktop.start`,
-    `diskimage/rootfs/etc/fonts/conf.d/99-webvm-aliases.conf`,
-    `diskimage/python-examples/snake-game.py`.
+    `<name>.meta` — the `GitHubDevice` protocol, verified by a full boot test
+    on a Pages-like static host), builds the frontend with
+    `diskImageType="github"` (`webvm/config_public_alpine_github.js`, selected
+    via the `WEBVM_DISK_IMAGE` vite alias) and deploys to
+    `https://ned14.github.io/webbrowser-python-idle/alpine.html`. Pages cannot
+    set COOP/COEP, so a **service worker** (`webvm/static/sw.js`) re-serves
+    navigations with the headers; the alpine page registers it and reloads
+    once when `crossOriginIsolated` is false (never registered under the local
+    nginx). Two later fixes: the **base-path fix** (the runtime import, `sw.js`
+    registration and `/alpine.html` link were hardcoded root-absolute — a
+    project site lives at `/webbrowser-python-idle/`; `cheerpx.js` now derives
+    the site base from its own module URL, `sw.js` registers relatively, and
+    the root `+page.svelte` redirects relatively); and the **font robustness
+    fix** (`failed to allocate font due to internal system font engine
+    problem` on cold chunked reads — the snake example uses an installed
+    family, `99-webvm-aliases.conf` maps the common missing families to
+    DejaVu, and `desktop.start` warms the font files into the page's block
+    cache at boot).
 
 27. **Browser-side tailnet blocked by an upstream CheerpX runtime crash
     (2026-08-15) — RESOLVED 2026-08-15 (see networking-bug.md §16).** The webdav sync E2E
@@ -2386,36 +1985,24 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `tests/e2e/tests/error-overlay.spec.js`, plans §9.4.
 
 30. **Control-host verdict — 127.0.0.1 REVERTED, /etc/hosts required
-    (2026-08-16, late).** A browser-facing `CONTROL_HOST=127.0.0.1` default
-    (baked config + gateway loopback relays, Round 10 early draft) was
-    implemented, verified against a full bisect (server_url flips, gateway
-    entrypoint reverts, heal variants, headscale-DB purge, image rebuilds)
-    and REVERTED: with `server_url=https://127.0.0.1:8443` the page-side
-    adapter probe works but the GUEST data path never comes up (no lease,
-    zero wsgidav requests, guest stuck on the adapter path); with
-    `https://host.docker.internal:8443` everything works end-to-end (lease
-    in 15-30s). The mechanism lives in the rebuilt tailscale.wasm's
-    netmap/DERP handling of an IP-literal DERP host — no page-side or
-    config workaround found. Single-machine use therefore REQUIRES the
-    one-line `/etc/hosts` entry on the browser machine
-    (`127.0.0.1 host.docker.internal`) — without it the browser spams
-    "failure to resolve host.docker.internal" and the tailnet never starts
-    (the user's original report). Also pinned: the **inbound accept path is
-    dead** in the wasm client (own-IP TCP consumed internally by the
-    PeerAPI/self-loop; the IpStack spins a SYN/SYNACK loop) — guest servers
-    can bind+listen but never accept; the E2E listen twin asserts bind+
-    listen only (the §15 crash regression). The gateway keeps its
-    host.docker.internal login (extra_hosts) — the loopback-relay design
-    was removed. Unresolved flake (01:20-04:35 UTC): after the 127.0.0.1
-    flip the guest path stayed broken across many runs even after the
-    flip-back, then recovered after a full `make build` — cause not
-    identified (see plans/networking-bug.md §16.9, open item). Updated:
-    `compose.yaml`, `.env.example`, `README.md`, `scripts/gen-certs.sh`,
-    `.github/workflows/ci.yml`, `gateway/entrypoint.sh` (reverted),
-    `tests/e2e/tests/network.spec.js` (listen probe scoped),
-    `plans/networking-bug.md` §16.9.
-    **SUPERSEDED by §12/21(31):** the /etc/hosts requirement and the
-    hostname-based gateway login are BANNED (user mandate) — see (31).
+    (2026-08-16, late) — SUPERSEDED by (31).** A browser-facing
+    `CONTROL_HOST=127.0.0.1` default was implemented, verified against a full
+    bisect (server_url flips, heal variants, DB purge, rebuilds) and REVERTED:
+    with `server_url=https://127.0.0.1:8443` the page-side adapter probe works
+    but the GUEST data path never comes up, while
+    `https://host.docker.internal:8443` worked end-to-end — attributed at the
+    time to the rebuilt wasm client's netmap/DERP handling of an IP-literal
+    DERP host, with no page-side workaround found; single-machine use was
+    made to REQUIRE the one-line `/etc/hosts` entry. **Both conclusions are
+    superseded by (31)/networking-bug.md §16.10:** the mechanism was the
+    GATEWAY's own-loopback DERP unreachability (fixed by the gateway's
+    loopback CONTROL_PORT socat relay → `GATEWAY_CONTROL_IP`), and hostnames
+    are banned. The two findings that DO stand: the **inbound accept path is
+    dead** in the wasm client (guest servers bind+listen but never accept;
+    the E2E listen twin asserts bind+listen only), and the "unresolved flake"
+    (guest path broken across many runs after the flip-back, recovered after
+    a full `make build`) — never reproduced with the relay in place; re-check
+    if the wasm client is ever rebuilt.
 
 31. **Hostnames banned — host.docker.internal removed (2026-08-16, user
     mandate).** The user requires, categorically, that NO hostnames ever
@@ -2456,63 +2043,44 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     `AGENTS.md`, `plans/networking-bug.md` §16.10.
 
 32. **Silent-halt surfacing — the CheerpX swallowed-trap path (2026-08-16).**
-    **Symptom reported:** "sometimes the VM doesn't load and nothing appears";
-    with DevTools open the console shows `Unexpected exit` and the thrown
-    exception is `RuntimeError: memory access out of bounds`. **Root cause
-    (verified in the pinned 1.3.7 self-hosted runtime):** the core catches
-    guest-side WASM traps at its own thread trampolines —
-    `cxcore.js`(/`cxcore-no-return-call.js`) `catch(e){if(e!='CheerpJContinue')
-    {debugger;console.log('Unexpected exit',e.stack)}}` (+ a variant that
-    then `e()`-CALLS the caught exception → spurious uncaught
-    `TypeError: e is not a function` exactly as in plans/networking-bug.md §2
-    PAGEERROR). The swallow kills just that guest process (a boot-critical one
-    e.g. Xorg/init) and the run loop carries on — `cx.run()` NEVER settles, so
-    the §12/21(29) overlay could not fire and the screen stayed black. A
-    `memory access out of bounds` is a host-level WASM trap (guest physical
-    access beyond linear memory — memory-growth/layout race inside the
-    emulator), which is why it is intermittent and why the same boot usually
-    succeeds on retry. **Fixes:**
-    - `WebVM.svelte` now captures the engine's own `console.log/error
-      "Unexpected exit"` report (`installTrapCapture`, installed before the
-      CheerpX import) and routes uncaught engine errors +
-      `unhandledrejection` + rejecting `cx.run()` RuntimeErrors to the
-      overlay. The one-shot auto-reload is restricted to DEFINITIVE
-      boot-death signals (a rejecting `cx.run()` or the watchdog's
-      sustained-silence verdict, sessionStorage `webvm-trap-reload`
-      counter, cleared when a boot succeeds, block cache untouched);
-      ambiguous engine console reports surface the overlay immediately
-      with the exact reason but never reload — the core may have killed
-      only a disposable guest process and the boot can still reach the
-      desktop.
-    - A **boot watchdog** (2 s tick) declares the boot stuck when, visible-tab
-      only, there is no guest console output (`writeData` timestamp) AND no
-      non-black KMS pixel (`hasDisplayPixels` 256×256 probe) for 200 s with a
-      270 s floor since boot start — deliberately ABOVE the project's own
-      boot-readiness budget (240 s first-pixel timeout in
-      `tests/e2e/lib/desktop.js`) so a slow-but-successful cold-cache boot
-      can never be declared stuck while the E2E definition would accept it.
-      The last guest boot text is shown in the overlay. A "Booting the VM…
-      Ns" pill makes a still-booting screen honest instead of silently
-      black. Terminal-only VMs (no canvas) are excluded from the pixel
-      watchdog and pill (trap capture + global handlers still cover them).
-    - Vendored-runtime patch (reproducible: applied by
-      `scripts/fetch-cheerpx-runtime.sh` after every fetch): removes all
-      `debugger;` statements (they froze the whole tab exactly when DevTools
-      is open), drops the `e()` call, and reports EVERY swallowed trap via
-      the SAME `console.error('Unexpected exit', e.stack)` prefix so the
-      capture sees all three trampolines. The fetch script downloads into a
-      STAGING tree (`--fail` on curl) and only installs into the repo after
-      the patch and its presence-based guards pass (exactly three
-      `console.error('Unexpected exit'` sites, no `debugger`, no `e()` call)
-      — an interrupted fetch or CDN error never corrupts the committed
-      runtime.
-    - Test hook `webvm-test-trapreport` (mirrors `webvm-test-bootfail`) +
-      `tests/e2e/tests/error-overlay.spec.js` case asserting the overlay shows
-      the exact captured reason and that Reload recovers.
-    **Known limitation:** the underlying trap (a CheerpX-core memory-layout
-    bug, not a guest code bug — no guest fix exists for wild host-level
-    accesses) is not preventable from here; retry-once + exact-reason overlay
-    is the mitigation. Updated: `webvm/src/lib/WebVM.svelte`,
+    **Symptom:** "sometimes the VM doesn't load and nothing appears"; with
+    DevTools open: `Unexpected exit` + `RuntimeError: memory access out of
+    bounds`. **Root cause (verified in the pinned self-hosted runtime):** the
+    core catches guest-side WASM traps at its own thread trampolines
+    (`catch(e){if(e!='CheerpJContinue'){debugger;console.log('Unexpected
+    exit',e.stack)}}` + a variant that `e()`-CALLS the caught exception →
+    `TypeError: e is not a function`, the historical crash record in
+    plans/networking-bug.md §15.1). The swallow kills just that guest process
+    and `cx.run()` NEVER settles — the §12/21(29) overlay could not fire and
+    the screen stayed black. A `memory access out of bounds` is a host-level
+    trap (memory-growth/layout race inside the emulator) — intermittent, and
+    the same boot usually succeeds on retry. **Fixes:**
+    - `WebVM.svelte` captures the engine's own `console.error("Unexpected
+      exit")` report (`installTrapCapture`, before the CheerpX import) and
+      routes uncaught engine errors + `unhandledrejection` + rejecting
+      `cx.run()` RuntimeErrors to the overlay; the one-shot auto-reload is
+      restricted to DEFINITIVE boot-death signals (rejecting `cx.run()` or
+      the watchdog verdict; sessionStorage `webvm-trap-reload` counter);
+      ambiguous trap reports surface the overlay immediately but never
+      reload (the core may have killed only a disposable process).
+    - A **boot watchdog** (2 s tick) declares the boot stuck when, visible
+      tab only, there is no guest console output AND no non-black KMS pixel
+      for 200 s (270 s floor) — above the E2E's 240 s first-pixel budget so a
+      slow cold-cache boot is never falsely declared stuck; the last boot
+      text is shown in the overlay and a "Booting the VM… Ns" pill makes a
+      still-booting screen honest. Terminal-only VMs are excluded from the
+      pixel checks.
+    - Vendored-runtime patch (applied by `scripts/fetch-cheerpx-runtime.sh`
+      after every fetch): removes all `debugger;` statements (they froze the
+      tab with DevTools open), drops the `e()` call, and reports EVERY
+      swallowed trap via the same `console.error('Unexpected exit', …)`
+      prefix; the fetch downloads to a STAGING tree (`--fail`) and only
+      installs after the presence guards pass (exactly three sites, no
+      `debugger`, no `e()`).
+    - Test hook `webvm-test-trapreport` + error-overlay spec case.
+    **Known limitation:** the trap is a CheerpX-core memory-layout bug, not a
+    guest code bug — no guest fix exists; retry-once + exact-reason overlay is
+    the mitigation. Updated: `webvm/src/lib/WebVM.svelte`,
     `webvm/cheerpx/cxcore.js`, `webvm/cheerpx/cxcore-no-return-call.js`,
     `scripts/fetch-cheerpx-runtime.sh`, `tests/e2e/tests/error-overlay.spec.js`.
 
@@ -2588,58 +2156,34 @@ real LAN, a private-CA-trusting browser, or human eyes (run via
     extraction trick stays), pysmb 1.2.15, third_party fork at
     tcl/tk-8.6.17 (only the notifier stale-fdset patch applied; the other
     aports patches are upstreamed in 8.6.17/18).
-    **CheerpX boot blockers (all root-caused + fixed 2026-08-19/20):** the
-    openrc 0.63.2 boot (new in 3.24) failed under CheerpX with five
-    distinct syscall-emulation defects, all worked around in one LD_PRELOAD
-    shim (`diskimage/faccessat-fix.c`, built in a `shimbuild` stage,
-    loaded via `rc-preload` + `rc_env_allow="LD_PRELOAD"` in rc.conf):
-    (1) `faccessat(-1)` wild-call — openrc 0.60+ calls it BY DESIGN on
-    every service state check (STOPPED/CRASHED → RC_DIR_INVALID → dfd -1);
-    shim returns EBADF for `dfd < 0 && != AT_FDCWD` across the whole *at()
-    family; (2) `sigprocmask(SIG_UNBLOCK)` wild-call in exec_service's
-    child — converted to a faithful read-mask/clear/SETMASK; (3) `ppoll`
-    always returns -1/errno=0 while `poll` works (GLib g_poll → openbox/
-    dbus main loops spun) — shim converts ppoll → poll; (4)
-    `setsockopt(SO_PASSCRED)` EPROTONOSUPPORT → endless udevd netlink
-    retry loop that wedged the emulator — shim fakes success for exactly
-    SOL_SOCKET/SO_PASSCRED; (5) openrc's `env_filter()` scrubbed
-    LD_PRELOAD from the exec'd init scripts (they then crashed on
-    faccessat(-1) with the shim never loaded) — `rc_env_allow="LD_PRELOAD"`.
-    Image changes: `/run/openrc/{starting,started,stopping,inactive,
-    wasinactive,failed,hotplugged,daemons,options,exclusive,scheduled,
-    init.d,tmp}` + `/run/lock`/`/run/secrets` baked (openrc 0.63's svcdir
-    moved to /run and a missing dir left `dirfds[] = -1` → the hang);
-    patched `usr/libexec/rc/sh/init.sh` (the /run tmpfs mount failure —
-    mount(2) ENOSYS under CheerpX — is a warning, not an abort);
-    udev-trigger/udev-settle NOT added + `networking` removed from the
-    boot runlevel (trigger/settle churn udevd forever; networking WANTs
-    dev-settle and its ioctl ifup cannot work — the eth0 retry loop +
-    udhcpc in desktop.start is the established mechanism); static
-    `/etc/X11/xorg.conf` evdev InputDevice sections (the udev input
-    backend finds nothing in CheerpX's shallow sysfs — without them no
-    pointer/keyboard attaches and double-clicks never dispatch);
-    `build.sh` fingerprint now includes `faccessat-fix.c` (a changed shim
-    with an unchanged Dockerfile produced the same cacheId and stale IDB
-    overlays served the OLD guest); baked deptree via `RUN /sbin/openrc
-    sysinit; true` (the guest's deptree regeneration path crashed the
-    first service spawn under CheerpX — skew mtime adjustments to year
-    2695 are cosmetic, don't chase them). Tcl/Tk remains at the apk
-    version 8.6.17 with ONLY the CheerpX notifier fix (the plan's 8.6.18
-    note is superseded). Sync agent audited on 3.14 (urllib WebDAV path,
-    lazy pysmb connect + reset-on-failure).
-    **Re-verified gates (all green):** browser-phase Playwright **9/9**
-    (boot/desktop/error-overlay/idle-pointer/persistence/no-egress) and
-    the webdav-phase suite **12/12** (incl. network.spec — root-visit
-    tailnet + guest data path + nc twin probes — and sync.spec lease/
-    snapshot/pull) on 1.3.8 + headscale 0.29.3; unit suite **92/92**;
-    rootfs smoke (explorer 98-check + viewer suites under Xvfb, real-IDLE
-    launch, viewer launch, openbox managed window, keep-alive relaunch)
-    **×4 backends**; server integration PASS (incl. join-test-client);
-    shellcheck + yamllint clean. NOTE on the 2026-08-20 handoff's "webdav
-    data path" failure: it was an artifact of running the webdav-phase
-    specs against a BROWSER-mode guest (desktop.start never starts the
-    sync agent) — with a correctly-backend-built guest the data path works
-    end to end (verified 2026-08-21).
+    **CheerpX boot blockers (all root-caused + fixed 2026-08-19/20); full
+    numbered record (the five syscall-emulation defects, the image changes
+    and the later 2026-08-22/24 hardening items) is in
+    plans/update-to-latest.md §9.5.1:** the openrc 0.63.2 boot (new in 3.24)
+    failed under CheerpX with five distinct syscall-emulation defects, all
+    worked around in one LD_PRELOAD shim (`diskimage/faccessat-fix.c`, built
+    in a `shimbuild` stage, loaded via `rc-preload` +
+    `rc_env_allow="LD_PRELOAD"` in rc.conf): `faccessat(-1)` wild-calls,
+    `sigprocmask(SIG_UNBLOCK)` wild-calls, `ppoll` always failing, an
+    endless `setsockopt(SO_PASSCRED)` retry loop, and openrc's
+    `env_filter()` scrubbing LD_PRELOAD from exec'd init scripts. Image
+    changes: `/run/openrc` state dirs + `/run/{lock,secrets}` baked; patched
+    `init.sh` (/run tmpfs mount failure is a warning, not an abort);
+    udev-trigger/udev-settle + `networking` removed from the boot runlevel;
+    static `/etc/X11/xorg.conf` evdev InputDevice sections; `build.sh`
+    fingerprint includes `faccessat-fix.c`; baked deptree via
+    `RUN /sbin/openrc sysinit; true` (the year-2695 skew mtime noise is
+    cosmetic — the deptree-scan interpose removes its ~20 s boot cost).
+    Tcl/Tk stays at apk 8.6.17 with ONLY the CheerpX notifier fix (the
+    plan's 8.6.18 note is superseded). Sync agent audited on 3.14.
+    **Re-verified gates (all green):** browser-phase Playwright **9/9** and
+    the webdav-phase suite **12/12** on 1.3.8 + headscale 0.29.3; unit
+    **92/92**; rootfs smoke ×4 backends; server integration PASS (incl.
+    join-test-client); shellcheck + yamllint clean. NOTE on the 2026-08-20
+    handoff's "webdav data path" failure: it was an artifact of running the
+    webdav-phase specs against a BROWSER-mode guest (desktop.start never
+    starts the sync agent) — with a correctly-backend-built guest the data
+    path works end to end (verified 2026-08-21).
 
 No open questions remain. Anything still marked "at implementation time"
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path

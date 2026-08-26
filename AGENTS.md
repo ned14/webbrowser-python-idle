@@ -18,8 +18,8 @@ workflow.
   locally** (§12/21 carries the implementation-time verification results).
   Follow its phasing (Phase 1 `browser` mode end-to-end → Phase 2
   tailnet/gateway → Phase 3 git/sync).
-- `plans/implementation_options.md` — option comparison that motivated the
-  plan.
+- `attic/implementation_options.md` — archived option comparison that
+  motivated the plan.
 - `prompts/research.md` — the original research prompt.
 
 ## Non-negotiable design facts (don't contradict these)
