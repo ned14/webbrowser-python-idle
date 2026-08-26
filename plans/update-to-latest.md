@@ -407,7 +407,7 @@ Browser-phase Playwright **9/9**; webdav-phase **12/12**; unit **92/92**;
 rootfs smoke ×4; integration.sh PASS. Full boot chain under CheerpX:
 `/sbin/init` → openrc sysinit/boot/default → udevd → dbus → local →
 desktop.start → Xorg (KMS FB 1344x900x32, static input devices) → openbox →
-file explorer → .py double-click → explorer withdraws → IDLE maps
+  file explorer → .py double-click → explorer disables its UI → IDLE maps
 (in-process `-n` via idle3.14-launcher).
 
 ### 9.5.3 RESOLVED — webdav-phase guest data path (was "the ONLY remaining failure")

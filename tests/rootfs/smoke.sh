@@ -49,17 +49,17 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	grep -q "<context name=\"Close\">" /home/user/.config/openbox/rc.xml || { echo "FAIL: openbox rc.xml missing the Close-context mousebind (titlebar ✕ would do nothing)" >&2; exit 1; }
 	grep -q "<action name=\"Close\"/>" /home/user/.config/openbox/rc.xml || { echo "FAIL: openbox rc.xml Close context has no Close action" >&2; exit 1; }
 	# File explorer -> IDLE integration: the explorer launches IDLE for .py
-	# files and replaces itself on screen until IDLE exits.
+	# files and disables its UI until IDLE exits.
 	[ -f /usr/local/bin/file-explorer.py ] || { echo "FAIL: file-explorer.py missing" >&2; exit 1; }
 	[ -f /usr/local/bin/file-explorer-tests.py ] || { echo "FAIL: file-explorer-tests.py missing" >&2; exit 1; }
 	[ -x /usr/local/bin/open-file-explorer.sh ] || { echo "FAIL: open-file-explorer.sh missing" >&2; exit 1; }
 	grep -q "idle3.14-launcher" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not launch IDLE" >&2; exit 1; }
-	grep -q "root.withdraw()" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not yield the screen to IDLE" >&2; exit 1; }
-	grep -q "root.deiconify()" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not reappear after IDLE" >&2; exit 1; }
+	grep -q "_set_ui_enabled(False)" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not disable its UI while IDLE runs" >&2; exit 1; }
+	grep -q "_set_ui_enabled(True)" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not re-enable its UI after IDLE" >&2; exit 1; }
 	grep -q "load_folder(self.current_path)" /usr/local/bin/file-explorer.py || { echo "FAIL: explorer does not refresh after IDLE" >&2; exit 1; }
 	[ -x /usr/local/bin/idle3.14-launcher ] || { echo "FAIL: idle3.14-launcher missing" >&2; exit 1; }
 	# Tk file viewer integration: the explorer routes non-Python files to the
-	# viewer and swaps screens with it; the keep-alive daemon guards it.
+	# viewer and disables itself while it runs; the keep-alive daemon guards it.
 	[ -f /usr/local/bin/file-viewer.py ] || { echo "FAIL: file-viewer.py missing" >&2; exit 1; }
 	[ -x /usr/local/bin/file-viewer.py ] || { echo "FAIL: file-viewer.py not executable" >&2; exit 1; }
 	[ -f /usr/local/bin/file-viewer-tests.py ] || { echo "FAIL: file-viewer-tests.py missing" >&2; exit 1; }
@@ -74,10 +74,10 @@ docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND"
 	# Curriculum examples baked into ~/ and read-only (dir 0555, files 0444).
 	# Check the mode bits, not -w: the smoke run is root, and root access
 	# bypasses write permission, so a -w test would falsely pass.
-	[ -d /home/user/python-examples ] || { echo "FAIL: ~/python-examples missing" >&2; exit 1; }
-	[ -f /home/user/python-examples/snake-game.py ] || { echo "FAIL: ~/python-examples/snake-game.py missing" >&2; exit 1; }
-	[ "$(stat -c %a /home/user/python-examples)" = "555" ] || { echo "FAIL: ~/python-examples not read-only (555)" >&2; exit 1; }
-	[ "$(stat -c %a /home/user/python-examples/snake-game.py)" = "444" ] || { echo "FAIL: example file not read-only (444)" >&2; exit 1; }
+	[ -d /home/user/examples ] || { echo "FAIL: ~/examples missing" >&2; exit 1; }
+	[ -f /home/user/examples/snake-game.py ] || { echo "FAIL: ~/examples/snake-game.py missing" >&2; exit 1; }
+	[ "$(stat -c %a /home/user/examples)" = "555" ] || { echo "FAIL: ~/examples not read-only (555)" >&2; exit 1; }
+	[ "$(stat -c %a /home/user/examples/snake-game.py)" = "444" ] || { echo "FAIL: example file not read-only (444)" >&2; exit 1; }
 	grep -q "Xorg :0" /etc/local.d/desktop.start || { echo "FAIL: desktop.start does not launch Xorg" >&2; exit 1; }
 	grep -q "sh /home/user/.xinitrc" /etc/local.d/desktop.start || { echo "FAIL: desktop.start does not run the user session" >&2; exit 1; }
 	[ -f /etc/runlevels/default/local ] || { echo "FAIL: openrc local service not enabled" >&2; exit 1; }

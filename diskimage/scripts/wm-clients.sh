@@ -4,9 +4,10 @@
 # Openbox is an EWMH-compliant window manager but (unlike i3) has no
 # `i3-msg -t get_tree`-style IPC to enumerate windows, so the keep-alive
 # daemon counts the EWMH `_NET_CLIENT_LIST` root property instead: the window
-# IDs of every client window the WM manages. A withdrawn (unmapped) window —
-# e.g. the file explorer while IDLE/the viewer is shown — is dropped from the
-# list, exactly as it used to disappear from the i3 tree.
+# IDs of every client window the WM manages. The file explorer's window stays
+# in the list while IDLE/the viewer is shown (it disables its UI rather than
+# unmapping), so the count is the number of windows ON the desktop — the
+# keep-alive relaunches only when that number is zero.
 #
 # This replaces the old wm-clients.py. That helper started a fresh Python
 # interpreter on every poll just to run one xprop read; the count now lives in

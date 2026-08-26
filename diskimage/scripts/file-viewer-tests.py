@@ -336,7 +336,7 @@ def test_broken_image_with_text_falls_back(done):
 @test
 def test_close_button(done):
     # The toolbar's ✕ Close button must close the viewer (the explorer's
-    # watcher then restores the file manager).
+    # watcher then re-enables the file manager).
     closed = []
     orig_destroy = root.destroy
     root.destroy = lambda: closed.append(True)

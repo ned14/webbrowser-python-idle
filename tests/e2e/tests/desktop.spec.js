@@ -12,9 +12,9 @@ import { waitForDesktop, lightRatio } from '../lib/desktop.js';
 //      Openbox root).
 //
 // The full explorer behaviour — including the "Open with IDLE" swap (explorer
-// withdraws, IDLE takes the screen, the explorer reappears refreshed when
-// IDLE exits), every other function, and the keep-alive relaunch — is
-// exercised in-guest: file-explorer-tests.py runs under Xvfb (part of
+// disables its UI while IDLE runs and re-enables, refreshed, when IDLE exits),
+// every other function, and the keep-alive relaunch — is exercised in-guest:
+// file-explorer-tests.py runs under Xvfb (part of
 // tests/rootfs/smoke.sh), and smoke.sh additionally boots Openbox under Xvfb,
 // kills the explorer, and verifies the keep-alive relaunches it. This spec
 // covers what only a real VM boot in a real browser can prove.

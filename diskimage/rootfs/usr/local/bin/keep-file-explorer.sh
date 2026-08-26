@@ -3,25 +3,25 @@
 # SELF-HEAL a stuck launch.
 #
 # The explorer is the desktop's only permanent window. When IDLE is opened
-# from it ("Open with IDLE"), the explorer WITHDRAWS itself — the process stays
-# alive but windowless, and re-shows itself once IDLE exits. This daemon:
+# from it ("Open with IDLE"), the explorer DISABLES its UI — the process and
+# its window stay up, inert, under the maximized launched app — and re-enables
+# itself once IDLE exits. This daemon:
 #   1. Watches the window manager's client list for the number of real
 #      windows: a long-lived `xprop -spy -root _NET_CLIENT_LIST` session,
 #      which prints the CURRENT value as soon as it attaches and a fresh line
-#      every time Openbox updates the EWMH root property. Withdrawn windows
-#      drop out of the list, exactly as they used to disappear from i3's
-#      tree. Earlier generations polled (i3-msg, then wm-clients.py, then
-#      wm-clients.sh --count three times a minute): each poll was a chain of
-#      ~6 execves (xprop + grep + wc + tr + date ...) — expensive under
-#      CheerpX emulation. Here the spy session parses its lines and writes
-#      ONLY the resulting count to COUNT_FILE; the main shell picks changes
-#      up within POLL_SECONDS using builtin-only reads (no per-tick forks).
+#      every time Openbox updates the EWMH root property. Earlier generations
+#      polled (i3-msg, then wm-clients.py, then wm-clients.sh --count three
+#      times a minute): each poll was a chain of ~6 execves (xprop + grep + wc
+#      + tr + date ...) — expensive under CheerpX emulation. Here the spy
+#      session parses its lines and writes ONLY the resulting count to
+#      COUNT_FILE; the main shell picks changes up within POLL_SECONDS using
+#      builtin-only reads (no per-tick forks).
 #   2. Relaunches the explorer only when zero windows exist AND no explorer
-#      process is running. The process guard is what keeps the desktop safe
-#      around the IDLE swap: while IDLE is up the explorer is alive-but-
-#      withdrawn, and a relaunch must not stack a second explorer on top of
-#      IDLE. When the user closes the explorer its process exits, so zero
-#      windows + no process = relaunch.
+#      process is running. The process guard keeps the desktop safe around
+#      the IDLE swap: while IDLE is up the explorer is alive-but-inert, and a
+#      relaunch must not stack a second explorer on top of IDLE. When the
+#      user closes the explorer its process exits, so zero windows + no
+#      process = relaunch.
 #   3. If the desktop stays windowless for STUCK_SECONDS while an explorer
 #      process exists, force-kills it and relaunches — a deadlocked Tk
 #      startup cannot hold the desktop empty forever.
@@ -80,14 +80,14 @@ explorer_running() {
 }
 
 idle_running() {
-	# IDLE launched from the explorer: while it runs, the explorer is
-	# intentionally windowless (withdrawn), so it must NOT be treated as stuck.
+	# IDLE launched from the explorer: while it runs, the explorer keeps its
+	# window but stays inert (disabled UI), so it must NOT be treated as stuck.
 	pidfile_alive "$IDLE_PIDFILE"
 }
 
 viewer_running() {
 	# The Tk file viewer (file-viewer.py) launched from the explorer: same
-	# model as idle_running — the explorer is withdrawn while the viewer is
+	# model as idle_running — the explorer is disabled while the viewer is
 	# up, and a slow viewer startup must not read as a stuck desktop.
 	pidfile_alive "$VIEWER_PIDFILE"
 }
@@ -113,9 +113,9 @@ apply_window_count() {
 	if [ "$WINS" = "0" ]; then
 		if explorer_running; then
 			# Windowless but alive: either still mapping its window, or
-			# withdrawn while IDLE / the viewer is being shown. The
-			# force-kill applies only when neither is running (a
-			# withdrawn explorer behind a running app is healthy). A
+			# inert (disabled UI) while IDLE / the viewer is being shown. The
+			# force-kill applies only when neither is running (an inert
+			# explorer behind a running app is healthy). A
 			# stuck explorer gets STUCK_SECONDS, then is force-killed so
 			# the desktop can start fresh.
 			if ! idle_running && ! viewer_running && \

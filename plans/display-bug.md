@@ -128,7 +128,7 @@ so the idle pass starves). Verified standalone and in-IDLE; a
 that must animate under CheerpX: flush from the timer callback**
 (`window.update_idletasks()` usually suffices; use `update()` when in doubt)
 — passive reliance on the event loop's idle redraw does not work here. The
-shipped `diskimage/python-examples/snake-game.py` calls `update()` every
+shipped `diskimage/examples/snake-game.py` calls `update()` every
 tick; the deeper notifier gap remains open as a future Tcl patch.
 
 ### 2.11 FIXED — IDLE hangs forever when opening any .py with networking enabled (2026-08-17)
@@ -238,7 +238,7 @@ as historical instrumentation of a removed component.
   Tk file explorer on `~/`; guarded against a second instance) and
   `keep-file-explorer.sh` (relaunches when the last window closes). IDLE is
   launched on demand — *Open with IDLE* / double-click a `.py` launches
-  `idle3.14-launcher` and withdraws the explorer for the duration.
+  `idle3.14-launcher` and disables the explorer's UI for the duration.
 - `diskimage/rootfs/usr/local/bin/idle3.14-launcher` — the §2.11 conditional
   launcher (round-trip probe, eth0-gated).
 - `build.sh`'s content fingerprint includes `diskimage/trace/`.

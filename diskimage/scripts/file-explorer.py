@@ -212,8 +212,9 @@ def close_window():
     """Close the explorer. The keep-alive daemon relaunches it immediately."""
     root.destroy()
 
-def set_status(msg):
-    """Show a status message that clears itself after a few seconds."""
+def set_status(msg, persistent=False):
+    """Show a status message that clears itself after a few seconds (unless
+    persistent — used while a launched app has disabled the explorer)."""
     global status_clear_timer
     status_var.set(msg)
     root.update_idletasks()
@@ -223,6 +224,8 @@ def set_status(msg):
         except Exception:
             pass
         status_clear_timer = None
+    if persistent:
+        return
     if _th().current_thread() is _th().main_thread():
         def _clear():
             global status_clear_timer
@@ -279,6 +282,24 @@ def touch_button(parent, text, command=None):
                      highlightthickness=0, activebackground="#a0a0a0",
                      cursor="hand2")
 
+def _set_widget_enabled(widget, enabled):
+    """Enable/disable one widget: tk widgets take `-state`, ttk widgets the
+    `state()` subcommand. Widgets without a state option are left alone."""
+    try:
+        if widget.winfo_class().startswith("T"):
+            widget.state(["!disabled"] if enabled else ["disabled"])
+        else:
+            widget.config(state="normal" if enabled else "disabled")
+    except tk.TclError:
+        pass
+
+def _walk_widgets(widget):
+    """Yield the widget and every descendant (menus are toplevel windows and
+    are not children, so popup menus are never reached)."""
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk_widgets(child)
+
 # Gesture parameters for the touch pointer model. Because presses arrive as
 # synthetic mouse events, tap / long-press / scroll are told apart by time and
 # movement only. The long-press hold is generous (1500 ms): under CheerpX a
@@ -305,6 +326,7 @@ class TouchTree(ttk.Treeview):
         self._press_xy = None
         self._timer = None
         self._long_pressed = False
+        self._enabled = True  # False while a launched app (IDLE/viewer) runs
         self._popup_xy = (None, None)
         self._anchor = None  # range anchor for Shift+click
         self.bind("<ButtonPress-1>", self._on_press)
@@ -319,18 +341,26 @@ class TouchTree(ttk.Treeview):
         self.bind("<Control-w>", self._on_ctrl_w)
 
     def _on_ctrl_a(self, e):
+        if not self._enabled:
+            return "break"
         self.event_generate("<<SelectAll>>", when="tail")
         return "break"
 
     def _on_ctrl_c(self, e):
+        if not self._enabled:
+            return "break"
         self.event_generate("<<Copy>>", when="tail")
         return "break"
 
     def _on_ctrl_v(self, e):
+        if not self._enabled:
+            return "break"
         self.event_generate("<<Paste>>", when="tail")
         return "break"
 
     def _on_ctrl_o(self, e):
+        if not self._enabled:
+            return "break"
         self.event_generate("<<OpenWithIdle>>", when="tail")
         return "break"
 
@@ -340,6 +370,8 @@ class TouchTree(ttk.Treeview):
         return "break"
 
     def _on_press(self, e):
+        if not self._enabled:
+            return "break"  # another app has taken over: stay inert
         self.focus_set()  # keyboard shortcuts apply to the file list
         self._press_t = time.monotonic()
         self._press_y = e.y
@@ -412,6 +444,8 @@ class TouchTree(ttk.Treeview):
         return "break"
 
     def _on_double(self, e):
+        if not self._enabled:
+            return "break"
         row = self.identify_row(e.y)
         if row:
             self.selection_set(row)
@@ -420,6 +454,8 @@ class TouchTree(ttk.Treeview):
         return "break"
 
     def _on_ctx(self, e):
+        if not self._enabled:
+            return "break"
         row = self.identify_row(e.y)
         if row and row not in self.selection():
             self.selection_set(row)
@@ -430,6 +466,8 @@ class TouchTree(ttk.Treeview):
 
     def _fire_longpress(self, y):
         self._cancel_timer()
+        if not self._enabled:
+            return
         self._long_pressed = True
         row = self.identify_row(y)
         if row:
@@ -483,6 +521,7 @@ class SingleTab(ttk.Frame):
         self._load_gen = 0
         self._more_button = None
         self._active_menu = None
+        self._ui_disabled = False  # True while a launched app (IDLE/viewer) runs
 
         # Root container: the main panel
         split_root = ttk.Frame(self)
@@ -545,6 +584,24 @@ class SingleTab(ttk.Frame):
         self.load_folder(self.current_path)
 
     # -------------------------
+    # Launched-app UI disable
+    # -------------------------
+    def _set_ui_enabled(self, enabled):
+        """Disable/enable the whole explorer UI while a launched program (IDLE
+        or the viewer) runs.
+
+        The explorer stays visible under the maximized launched window instead
+        of withdrawing itself: the X withdraw round-trip is unreliable under
+        the CheerpX runtime (the explorer was observed to stay mapped and
+        interactive over IDLE), and the re-map on return flickers. Disabling
+        in-process is pure Tk widget state — no X traffic — and re-enabling is
+        a plain widget walk."""
+        self._ui_disabled = not enabled
+        self.file_list._enabled = enabled
+        for w in _walk_widgets(root):
+            _set_widget_enabled(w, enabled)
+
+    # -------------------------
     # Selection-mode toolbar
     # -------------------------
     def _rebuild_toolbar(self):
@@ -591,6 +648,12 @@ class SingleTab(ttk.Frame):
                 row=0, column=6, sticky="ew", padx=2, pady=2)
             self._more_button = touch_button(self.toolbar, "More", self._popup_more)
             self._more_button.grid(row=0, column=7, sticky="ew", padx=2, pady=2)
+        if self._ui_disabled:
+            # A toolbar rebuild (e.g. an async folder-size refresh) must not
+            # re-enable buttons while a launched app holds the desktop.
+            for w in self.toolbar.winfo_children():
+                if w.winfo_class() == "Button":
+                    w.config(state="disabled")
 
     def clear_selection(self):
         self.file_list.selection_set()
@@ -667,6 +730,8 @@ class SingleTab(ttk.Frame):
             menu.grab_release()
 
     def _popup_context(self):
+        if self._ui_disabled:
+            return
         x, y = self.file_list.popup_xy()
         if x is None or y is None:
             return
@@ -699,7 +764,7 @@ class SingleTab(ttk.Frame):
             return None
 
     def _popup_more(self):
-        if self._more_button is None:
+        if self._ui_disabled or self._more_button is None:
             return
         menu = self._new_menu()
         if menu is None:
@@ -799,7 +864,10 @@ class SingleTab(ttk.Frame):
                         reselect.append(iid)
             if reselect:
                 self.file_list.selection_set(*reselect)
-            set_status(f"Loaded {len(entries)} items in {self.current_path}")
+            if not self._ui_disabled:
+                # Keep the persistent "file manager disabled" status visible
+                # while a launched app holds the desktop.
+                set_status(f"Loaded {len(entries)} items in {self.current_path}")
             self._rebuild_toolbar()
         root.after(0, _update)
 
@@ -957,28 +1025,30 @@ class SingleTab(ttk.Frame):
         return self._is_text_file(path)
 
     def _open_in_viewer(self, paths):
-        """Open non-Python files in the Tk viewer, replacing this window for
+        """Open non-Python files in the Tk viewer, disabling this window for
         the duration.
 
-        Same swap model as IDLE (_open_in_idle): the explorer withdraws while
-        the viewer is up and only returns once the viewer's window is gone
-        from the WM client list (the viewer exits with its window, so the
+        Same swap model as IDLE (_open_in_idle): the explorer disables its UI
+        while the viewer is up and only re-enables once the viewer's window is
+        gone from the WM client list (the viewer exits with its window, so the
         window check doubles as the process check and is robust to a lingering
-        process)."""
+        process). Openbox maximizes the viewer over the explorer, so the
+        screen still looks swapped without the explorer ever unmapping."""
         try:
             proc = _sp().Popen([VIEWER] + list(paths),
                                     start_new_session=True)
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
-        set_status(f"Opened {len(paths)} file(s) in viewer")
-        root.withdraw()
+        set_status(f"Opened {len(paths)} file(s) in viewer — "
+                   "file manager disabled until it closes", persistent=True)
+        self._set_ui_enabled(False)
         _th().Thread(target=self._wait_for_viewer, args=(proc,),
                          daemon=True).start()
 
     def _wait_for_viewer(self, proc):
-        # Never leave the explorer stuck: whatever happens (including watcher
-        # errors), always return to the file manager.
+        # Never leave the explorer disabled: whatever happens (including watcher
+        # errors), always re-enable the file manager.
         try:
             self._watch_viewer(proc)
         except Exception:
@@ -998,7 +1068,7 @@ class SingleTab(ttk.Frame):
         # cadence of phase 1 is only needed for window-mapping; here a slow
         # poll avoids thousands of xprop spawns/hour competing with the
         # viewer's rendering — a couple of seconds of delay before the
-        # explorer reappears is imperceptible. Each poll is a single xprop
+        # explorer re-enables is imperceptible. Each poll is a single xprop
         # subprocess read from this process (_wm_client_windows) — no
         # interpreter spawn per poll.
         while True:
@@ -1008,7 +1078,7 @@ class SingleTab(ttk.Frame):
                 break
             time.sleep(3.0)
         # Viewer gone: make sure no stray process outlives its window and
-        # blocks the return to the file manager.
+        # blocks the re-enable of the file manager.
         self._kill_idle_tree(proc, [])
 
     @staticmethod
@@ -1037,12 +1107,16 @@ class SingleTab(ttk.Frame):
         self._open_in_idle(items)
 
     def _open_in_idle(self, paths):
-        """Open Python files in IDLE, replacing this window for the duration.
+        """Open Python files in IDLE, disabling this window for the duration.
 
         IDLE is the only other full-screen app on this desktop. Opening a .py
-        therefore withdraws the explorer — the whole screen is handed to IDLE —
-        and only restores it once IDLE is gone, reloading the folder so
-        anything IDLE created/edited/saved shows up.
+        therefore disables the explorer — the whole screen is handed to IDLE
+        (Openbox maximizes IDLE over the still-visible explorer) — and only
+        re-enables it once IDLE is gone, reloading the folder so anything IDLE
+        created/edited/saved shows up. The window is never withdrawn: the
+        disable is in-process widget state, which the CheerpX runtime honours
+        even when its X layer drops the withdraw round-trip (observed: the
+        explorer staying mapped and interactive over IDLE).
 
         "IDLE is gone" is decided by the WINDOW tree, not the process: under
         CheerpX closing IDLE can leave the idle3.14 process alive (it waits on
@@ -1059,13 +1133,14 @@ class SingleTab(ttk.Frame):
         if not procs:
             set_status("No Python file opened")
             return
-        set_status(f"Opened {len(procs)} file(s) in IDLE")
-        root.withdraw()
+        set_status(f"Opened {len(procs)} file(s) in IDLE — "
+                   "file manager disabled until IDLE exits", persistent=True)
+        self._set_ui_enabled(False)
         _th().Thread(target=self._wait_for_idle, args=(procs, list(paths)), daemon=True).start()
 
     def _wait_for_idle(self, procs, paths):
-        # Never leave the explorer stuck: whatever happens (including watcher
-        # errors), always return to the file manager.
+        # Never leave the explorer disabled: whatever happens (including watcher
+        # errors), always re-enable the file manager.
         try:
             self._watch_idle(procs, paths)
         except Exception:
@@ -1097,7 +1172,7 @@ class SingleTab(ttk.Frame):
             time.sleep(0.5)
         # IDLE is gone: kill everything it spawned (its Python-shell subprocess
         # and any program running in it, e.g. the snake game) so no stray
-        # window outlives IDLE and blocks the return to the file manager.
+        # window outlives IDLE and blocks the re-enable of the file manager.
         for proc in procs:
             self._kill_idle_tree(proc, sub_pids)
 
@@ -1197,15 +1272,15 @@ class SingleTab(ttk.Frame):
 
     def _idle_finished(self):
         # IDLE may have created/edited/saved files while the explorer was
-        # hidden; reload the current folder before reappearing.
+        # disabled; re-enable the UI and reload the current folder.
+        self._set_ui_enabled(True)
         self.load_folder(self.current_path)
-        root.deiconify()
 
     def _viewer_finished(self):
         # The viewer is view-only, but the folder may have changed (e.g. a
-        # sync pull); reload before reappearing, same as after IDLE.
+        # sync pull); re-enable and reload, same as after IDLE.
+        self._set_ui_enabled(True)
         self.load_folder(self.current_path)
-        root.deiconify()
 
     def select_all(self):
         if self.displayed_items:

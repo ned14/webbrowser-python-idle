@@ -27,10 +27,6 @@ CheerpX runtime doesn't implement `/dev/clipboard`, the best we can do is allow
 Todo items:
 
 - Implement paste as if typed by keyboard.
-- File manager redraws after opening IDLE, it would look better if it disabled itself
-while another program runs.
-- Has automatic screen resizer broken?
-- Need to do something about that Documents folder in the home dir.
 - After launching and closing IDLE a few times CPU seems to peg to 100%. It still
 works but it's SLOW.
 
@@ -64,8 +60,8 @@ desktop boots to the **file explorer** open on `~/` (a keep-alive daemon
 relaunches it whenever the last window closes, so the desktop never sits
 empty); new files/folders are created from the toolbar, and `.py` files open in
 **IDLE** via the *Open in IDLE* button (or double-click / Ctrl+O) — the
-explorer yields the whole screen to IDLE and returns, listing refreshed, when
-IDLE exits. Example scripts are baked read-only into `~/python-examples/`
+explorer disables its UI while IDLE runs and re-enables, listing refreshed,
+when IDLE exits. Example scripts are baked read-only into `~/examples/`
 (reference material to copy, not edit in place). Files in `~/` survive reloads
 via the browser IndexedDB overlay. Use `make url` to print the session URL.
 

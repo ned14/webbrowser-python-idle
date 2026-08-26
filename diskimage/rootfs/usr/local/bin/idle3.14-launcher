@@ -1,13 +1,13 @@
 #!/bin/sh
 # IDLE launch wrapper.
 #
-# PID file for the keep-alive daemon: while IDLE is up, the explorer is
-# withdrawn, and the keep-alive must not treat that as a stuck desktop.
-# pgrep -f is unusable in the guest (the CheerpX core traps on
-# /proc/<pid>/cmdline reads of processes still being set up — see
-# faccessat-fix.c), so liveness is tracked via this file. The pid is ours and
-# stays ours across the exec below (idle3.14 -> python3), so it is exactly
-# IDLE's pid.
+# PID file for the keep-alive daemon: while IDLE is up, the explorer keeps
+# its window but stays inert (disabled UI), and the keep-alive must not treat
+# that as a stuck desktop. pgrep -f is unusable in the guest (the CheerpX
+# core traps on /proc/<pid>/cmdline reads of processes still being set up —
+# see faccessat-fix.c), so liveness is tracked via this file. The pid is ours
+# and stays ours across the exec below (idle3.14 -> python3), so it is
+# exactly IDLE's pid.
 echo $$ > /tmp/idle.pid 2>/dev/null
 
 # Subprocess mode (-n or not) is decided by the per-boot cached loopback

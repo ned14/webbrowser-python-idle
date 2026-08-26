@@ -606,7 +606,7 @@ webvm-custom/
 ├─ diskimage/
 │  ├─ Dockerfile            # i386 Alpine guest (ARG STORAGE_BACKEND selects agent;
 │  │                        # ARG SAMBA_*/SYNC_* render /root/.syncrc)
-│  ├─ python-examples/      # curriculum scripts baked READ-ONLY into ~/python-examples
+│  ├─ examples/             # curriculum scripts baked READ-ONLY into ~/examples
 │  ├─ scripts/99-screen-resize.sh
 │  ├─ config/               # xinitrc, openbox config (file-manager autostart), .Xresources
 │  ├─ sync/                 # sync.py per backend (samba/webdav) + sync-home.sh
@@ -1438,7 +1438,7 @@ exists**; `xterm openbox xprop git ssh nc` present and **`pcmanfm`/
 `open-file-explorer.sh` + `keep-file-explorer.sh`; `desktop.start` starts the
 sync agent as a single process (samba/webdav) and runs the boot-pull before X.
 **In-guest GUI suite** under an in-image `Xvfb`: `file-explorer-tests.py`
-(98 checks incl. the withdraw→IDLE→reappear flow), a real IDLE launch, and
+(98 checks incl. the disable→IDLE→re-enable flow), a real IDLE launch, and
 the keep-alive relaunch check (§12/25). Ext2: `e2fsck -f` clean; `debugfs`
 shows `/sbin/init`, `/usr/bin/idle3.14`, the openbox config, the sync agent.
 
@@ -1797,13 +1797,14 @@ gateway relays).
     then **replaced by the Tk file explorer (§12/25)**; the pcmanfm
     integration files and MIME machinery were removed from the image.
 
-24. **Baked-in Python examples (added 2026-08-13):** the `python-examples/`
+24. **Baked-in Python examples (added 2026-08-13; renamed `examples`
+    2026-08-26):** the `examples/`
     directory (moved from the repo root into `diskimage/`, so it is in the
-    Docker build context) is copied to `/home/user/python-examples/` at image
+    Docker build context) is copied to `/home/user/examples/` at image
     build time and made **read-only in the image** (`chmod 0555` dir / `0444`
     files, owned by `user` — the guest FS refuses writes even through the
     IndexedDB overlay). They are reference material to copy, never to edit in
-    place. `diskimage/python-examples` is added to `build.sh`'s content
+    place. `diskimage/examples` is added to `build.sh`'s content
     fingerprint, so example-content changes rebuild a fresh overlay. Updated:
     `diskimage/Dockerfile`, `build.sh`, `tests/rootfs/smoke.sh`.
 
@@ -1818,7 +1819,7 @@ gateway relays).
     autostarted by Openbox via the guarded single-instance launcher
     `/usr/local/bin/open-file-explorer.sh`; `keep-file-manager.sh` became
     `keep-file-explorer.sh` (same WM-client-list polling, plus a "relaunch only
-    when no explorer process exists" guard so a withdrawn explorer is never
+    when no explorer process exists" guard so an inert explorer is never
     doubled). Removed from the image: the `pcmanfm`/`spacefm`/`shared-mime-info`
     packages, the pcmanfm/libfm instrumentation and the whole `/trace`
     diagnostic tree (the Tcl/Tk `libtcl8.6.so.patched` fix stays), the
@@ -1826,9 +1827,15 @@ gateway relays).
     pcmanfm integration, and the `/proc/self/mountinfo` stub in
     `desktop.start`. A starter `/home/user/hello.py` is baked in so a new user
     can double-click into IDLE immediately.
-    **Screen replacement:** "Open with IDLE" (or double-clicking a `.py`)
-    launches `idle3.14-launcher` per file and then **withdraws the explorer
-    window** — the whole screen is IDLE's. A watcher thread decides when IDLE
+    **Screen replacement (changed 2026-08-26):** "Open with IDLE" (or
+    double-clicking a `.py`) launches `idle3.14-launcher` per file and then
+    **disables the explorer's UI in-process** (`_set_ui_enabled(False)`) —
+    every button, the file list and the menus go inert, and Openbox
+    maximizes IDLE over the still-visible window. It no longer withdraws
+    itself: the X withdraw round-trip is unreliable under the CheerpX
+    runtime (the explorer was observed staying mapped and interactive over
+    IDLE) and the re-map on return flickered, so the swap is now pure Tk
+    widget state with no X traffic. A watcher thread decides when IDLE
     is gone by watching the **window manager's client list** (not the
     process): the WM (Openbox) maintains the EWMH `_NET_CLIENT_LIST` root
     property, read in-process by the explorer (`_wm_client_windows`, via
@@ -1844,7 +1851,9 @@ gateway relays).
     subprocess (found in `/proc` by its `idlelib.run` command line), and any
     children via `pkill -P` (CheerpX does not implement `killpg()`; it is kept
     as a POSIX fallback) — so no stray program window outlives IDLE and blocks
-    the return to the file manager. Closing the explorer (WM close, or the
+    the re-enable of the file manager. The same disable/re-enable model
+    covers the Tk file viewer (`_open_in_viewer`/`_viewer_finished`).
+    Closing the explorer (WM close, or the
     Ctrl+W shortcut added for it) exits the process and the keep-alive
     relaunches it. **Touch model
     hardening (2026-08-14):** the release handler no longer drops clicks whose
@@ -1855,7 +1864,7 @@ gateway relays).
     extended to cover every function (sorts, wheel scroll, breadcrumbs, go
     up/to-path, text sniffing, rename/create/delete/batch-rename, zip/unzip,
     status bar, the real open_selected dir/.py/.txt paths, the late-release
-    tap, the Ctrl+O/Ctrl+W shortcuts, and the withdraw→IDLE→reappear flow —
+    tap, the Ctrl+O/Ctrl+W shortcuts, and the disable→IDLE→re-enable flow —
     98 checks) and now runs **inside the guest** as part of
     `tests/rootfs/smoke.sh` under an in-image Xvfb (`xvfb` package added for
      this); the same smoke block runs a REAL IDLE launch and boots Openbox

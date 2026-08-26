@@ -276,14 +276,14 @@ COPY rootfs/home/user/hello.py /home/user/hello.py
 COPY rootfs/home/user/Readme.md /home/user/Readme.md
 RUN chown user:user /home/user/hello.py /home/user/Readme.md
 
-# Curriculum examples: bake the python-examples directory into the user's home.
+# Curriculum examples: bake the examples directory into the user's home.
 # It is READ-ONLY in the image (0555 dir / 0444 files, owner 'user') so the
 # guest FS refuses writes even through the IndexedDB overlay — the examples are
 # reference material to copy, never to edit in place.
-COPY python-examples/ /home/user/python-examples/
-RUN chown -R user:user /home/user/python-examples && \
-	chmod 0555 /home/user/python-examples && \
-	chmod 0444 /home/user/python-examples/*
+COPY examples/ /home/user/examples/
+RUN chown -R user:user /home/user/examples && \
+	chmod 0555 /home/user/examples && \
+	chmod 0444 /home/user/examples/*
 
 # Display auto-resize support (matches the X resolution to the KMS canvas)
 COPY scripts/99-screen-resize.sh /etc/X11/xinit/xinitrc.d/99-screen-resize.sh

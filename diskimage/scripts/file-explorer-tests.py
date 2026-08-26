@@ -205,6 +205,10 @@ def _toolbar():
     return [w.cget("text") for w in pane.toolbar.winfo_children()
             if w.winfo_class() == "Button"]
 
+def _toolbar_states():
+    return [str(w.cget("state")) for w in pane.toolbar.winfo_children()
+            if w.winfo_class() == "Button"]
+
 def _paste_state():
     for w in pane.toolbar.winfo_children():
         if w.winfo_class() == "Button" and str(w.cget("text")).startswith("Paste"):
@@ -819,9 +823,9 @@ def test_open_selected_routes_to_viewer(done):
     ], done))
 
 @test
-def test_open_in_viewer_replaces_screen(done):
-    # The viewer swap mirrors the IDLE swap: the explorer withdraws while the
-    # viewer runs and reappears once it exits.
+def test_open_in_viewer_disables_ui(done):
+    # The viewer swap mirrors the IDLE swap: the explorer stays visible but
+    # DISABLES its UI while the viewer runs and re-enables it once it exits.
     _make_fixtures()
     calls = []
     class FakePopen:
@@ -836,7 +840,7 @@ def test_open_in_viewer_replaces_screen(done):
     subprocess.Popen = FakePopen
     # No real viewer window is mapped under the test Xvfb (FakePopen swallows
     # the launcher), so pin the window probe to "open": the watcher must
-    # notice the viewer PROCESS exiting and bring the explorer back.
+    # notice the viewer PROCESS exiting and re-enable the explorer.
     pane._viewer_window_open = lambda: True
     txt = os.path.join(SRC, "visible.txt")
     _ORIG_VIEWER([txt])
@@ -844,12 +848,22 @@ def test_open_in_viewer_replaces_screen(done):
         (100, lambda: check("viewer launched for text",
                             calls == [["/usr/local/bin/file-viewer.py", txt]],
                             repr(calls))),
-        (100, lambda: check("explorer withdrawn while viewer runs",
-                            str(root.state()) == "withdrawn", root.state())),
+        (100, lambda: check("explorer stays visible while viewer runs",
+                            str(root.state()) == "normal", root.state())),
+        (0, lambda: check("explorer UI disabled while viewer runs",
+                          pane._ui_disabled is True
+                          and all(s == "disabled" for s in _toolbar_states())
+                          and "disabled" in lb.state(),
+                          repr((pane._ui_disabled, _toolbar_states(), lb.state())))),
+        (0, lambda: (lb.selection_set(), _click(0))),
+        (50, lambda: check("clicks ignored while viewer runs",
+                           not lb.selection(), repr(lb.selection()))),
         # The watcher polls for the viewer's exit at 3 s cadence, so the
-        # reappear needs that budget plus margin (as in the lingering test).
-        (3500, lambda: check("explorer reappears once viewer exits",
-                             str(root.state()) == "normal", root.state())),
+        # re-enable needs that budget plus margin (as in the lingering test).
+        (3500, lambda: check("explorer re-enabled once viewer exits",
+                             pane._ui_disabled is False
+                             and all(s == "normal" for s in _toolbar_states()),
+                             repr((pane._ui_disabled, _toolbar_states())))),
         (100, lambda: check("folder reloaded after viewer",
                             pane.current_path == SRC and pane.displayed_paths,
                             pane.current_path)),
@@ -861,8 +875,8 @@ def test_open_in_viewer_replaces_screen(done):
 
 @test
 def test_viewer_window_close_returns_when_process_lingers(done):
-    # A lingering viewer process must not keep the explorer hidden: the
-    # watcher returns when the viewer WINDOW disappears from the WM client list.
+    # A lingering viewer process must not keep the explorer disabled: the
+    # watcher re-enables when the viewer WINDOW disappears from the WM list.
     _make_fixtures()
     calls = []
     class FakePopen:
@@ -882,11 +896,17 @@ def test_viewer_window_close_returns_when_process_lingers(done):
     txt = os.path.join(SRC, "visible.txt")
     _ORIG_VIEWER([txt])
     _steps([
-        (200, lambda: check("explorer withdrawn while viewer runs",
-                            str(root.state()) == "withdrawn", root.state())),
+        (200, lambda: check("explorer stays visible while viewer runs",
+                            str(root.state()) == "normal", root.state())),
+        (0, lambda: check("explorer UI disabled while viewer runs",
+                          pane._ui_disabled is True
+                          and all(s == "disabled" for s in _toolbar_states()),
+                          repr((pane._ui_disabled, _toolbar_states())))),
         (0, lambda: holder.__setitem__("open", False)),  # viewer window closes
-        (3500, lambda: check("explorer reappears once viewer's window is gone",
-                             str(root.state()) == "normal", root.state())),
+        (3500, lambda: check("explorer re-enabled once viewer's window is gone",
+                             pane._ui_disabled is False
+                             and all(s == "normal" for s in _toolbar_states()),
+                             repr((pane._ui_disabled, _toolbar_states())))),
     ], lambda: (
         subprocess.__setattr__("Popen", orig_popen),
         pane.__setattr__("_viewer_window_open", orig_open),
@@ -1072,7 +1092,7 @@ def test_row_icons_are_guest_font_glyphs(done):
     ], done))
 
 @test
-def test_open_with_idle_replaces_screen(done):
+def test_open_with_idle_disables_ui(done):
     _make_fixtures()
     calls = []
     class FakePopen:
@@ -1087,7 +1107,7 @@ def test_open_with_idle_replaces_screen(done):
     subprocess.Popen = FakePopen
     # No real IDLE window is mapped under the test Xvfb (FakePopen swallows
     # the launcher), so pin the window probe to "open": the watcher must
-    # notice the IDLE PROCESS exiting and bring the explorer back.
+    # notice the IDLE PROCESS exiting and re-enable the explorer.
     pane._idle_window_open = lambda basenames: True
     try:
         py = os.path.join(SRC, "app.py")
@@ -1095,12 +1115,22 @@ def test_open_with_idle_replaces_screen(done):
         _steps([
             (100, lambda: check("IDLE launcher invoked for the .py",
                                 calls == [["/usr/local/bin/idle3.14-launcher", py]], repr(calls))),
-            (100, lambda: check("explorer withdrawn while IDLE runs",
-                                str(root.state()) == "withdrawn", root.state())),
+            (100, lambda: check("explorer stays visible while IDLE runs",
+                                str(root.state()) == "normal", root.state())),
+            (0, lambda: check("explorer UI disabled while IDLE runs",
+                              pane._ui_disabled is True
+                              and all(s == "disabled" for s in _toolbar_states())
+                              and "disabled" in lb.state(),
+                              repr((pane._ui_disabled, _toolbar_states(), lb.state())))),
+            (0, lambda: (lb.selection_set(), _click(0))),
+            (50, lambda: check("clicks ignored while IDLE runs",
+                               not lb.selection(), repr(lb.selection()))),
             # The watcher polls for IDLE's exit at 0.5 s cadence: the 0.6 s
             # fake process lifetime plus one poll, with a margin.
-            (1500, lambda: check("explorer reappears once IDLE exits",
-                                 str(root.state()) == "normal", root.state())),
+            (1500, lambda: check("explorer re-enabled once IDLE exits",
+                                 pane._ui_disabled is False
+                                 and all(s == "normal" for s in _toolbar_states()),
+                                 repr((pane._ui_disabled, _toolbar_states())))),
             (100, lambda: check("folder reloaded after IDLE",
                                 pane.current_path == SRC and pane.displayed_paths,
                                 pane.current_path)),
@@ -1113,7 +1143,7 @@ def test_open_with_idle_replaces_screen(done):
 def test_idle_window_close_returns_when_process_lingers(done):
     # Closing IDLE can leave the idle3.14 process alive (it waits on its shell
     # subprocess, kept busy by a running game). The explorer must detect the
-    # IDLE window disappearing and return to the file manager anyway.
+    # IDLE window disappearing and re-enable the file manager anyway.
     _make_fixtures()
     calls = []
     class FakePopen:
@@ -1133,11 +1163,17 @@ def test_idle_window_close_returns_when_process_lingers(done):
     py = os.path.join(SRC, "app.py")
     _ORIG_IDLE([py])
     _steps([
-        (200, lambda: check("explorer withdrawn while IDLE runs",
-                            str(root.state()) == "withdrawn", root.state())),
+        (200, lambda: check("explorer stays visible while IDLE runs",
+                            str(root.state()) == "normal", root.state())),
+        (0, lambda: check("explorer UI disabled while IDLE runs",
+                          pane._ui_disabled is True
+                          and all(s == "disabled" for s in _toolbar_states()),
+                          repr((pane._ui_disabled, _toolbar_states())))),
         (0, lambda: holder.__setitem__("open", False)),  # user closes IDLE
-        (3500, lambda: check("explorer reappears once IDLE's window is gone",
-                             str(root.state()) == "normal", root.state())),
+        (3500, lambda: check("explorer re-enabled once IDLE's window is gone",
+                             pane._ui_disabled is False
+                             and all(s == "normal" for s in _toolbar_states()),
+                             repr((pane._ui_disabled, _toolbar_states())))),
     ], lambda: (
         subprocess.__setattr__("Popen", orig_popen),
         pane.__setattr__("_idle_window_open", orig_open),

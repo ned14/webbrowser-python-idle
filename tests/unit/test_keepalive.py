@@ -13,7 +13,8 @@ The daemon is a POSIX shell script whose observable contract is:
      across xprop builds — and "not found") are SKIPPED: never treated as a
      zero-window desktop, which would cause spurious launches.
   3. A windowless-but-alive explorer behind a live IDLE/viewer process is
-     the intentional IDLE-swap withdraw and must NEVER be force-killed.
+     the intentional IDLE-swap (the explorer disabled itself while the app
+     runs) and must NEVER be force-killed.
   4. A windowless-alive explorer with no IDLE/viewer is STUCK after
      STUCK_SECONDS: force-killed AND relaunched (a killed windowless
      explorer emits no property update, so without an explicit launch the
@@ -217,9 +218,10 @@ def test_unreadable_client_list_lines_are_skipped(vm):
     assert vm.read_count() == "", "failure lines must not be published as counts"
 
 
-def test_withdrawn_explorer_behind_idle_is_not_killed(vm):
-    """Zero windows + live explorer + live IDLE = the IDLE swap: the explorer
-    is intentionally withdrawn and must survive past STUCK_SECONDS untouched."""
+def test_windowless_explorer_behind_idle_is_not_killed(vm):
+    """Zero windows + live explorer + live IDLE = the IDLE swap (the explorer
+    disabled itself while IDLE runs): it must survive past STUCK_SECONDS
+    untouched, even if the swap model ever leaves it windowless."""
     sleeper = _live_pid()
     try:
         vm.start([ZERO_WINDOWS])
@@ -230,10 +232,10 @@ def test_withdrawn_explorer_behind_idle_is_not_killed(vm):
         # Stay observed well past STUCK_SECONDS (2s in the sandbox).
         time.sleep(6)
         assert sleeper.poll() is None, (
-            "withdrawn explorer behind IDLE must not be force-killed"
+            "explorer behind IDLE must not be force-killed"
         )
         assert len(vm.launches) == 0, (
-            "withdrawn explorer behind IDLE must not be relaunched"
+            "explorer behind IDLE must not be relaunched"
         )
     finally:
         sleeper.kill()

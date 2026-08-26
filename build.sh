@@ -190,7 +190,7 @@ FINGERPRINT_INPUT=$( \
 	# stale IndexedDB overlays serve the old guest).
 	cat diskimage/faccessat-fix.c 2>/dev/null; \
 	find diskimage/rootfs diskimage/config diskimage/scripts diskimage/sync \
-		diskimage/python-examples \
+		diskimage/examples \
 		-type f -not -path '*/.git/*' -not -name '*.pyc' -not -path '*/__pycache__/*' \
 		-not -name '.DS_Store' -not -path '*/rootfs/home/user/.ssh/*' -print0 2>/dev/null | sort -z | xargs -0 cat; \
 	cat diskimage/trace/libtcl8.6.so.patched 2>/dev/null; \

@@ -20,11 +20,34 @@ import { waitForDesktop, lightRatio, canvasHash } from '../lib/desktop.js';
 // connect.
 //
 // The test drives the real user path: boot the desktop, open hello.py in
-// IDLE from the file explorer, detect the explorer→IDLE screen swap, then
-// require that the IDLE window is ALIVE — its shell cursor keeps blinking
-// (canvas changes without mouse input) — and that the pointer keeps
-// following the mouse. A wedged subprocess-mode IDLE is frozen-static and
-// fails both.
+// IDLE from the file explorer, detect the explorer→IDLE swap, then require
+// that the IDLE window is ALIVE — its shell cursor keeps blinking (canvas
+// changes without mouse input) — and that the pointer keeps following the
+// mouse. A wedged subprocess-mode IDLE is frozen-static and fails both.
+//
+// SWAP MODEL (2026-08-26): the explorer no longer withdraws when it launches
+// an app — the X withdraw round-trip is unreliable under the CheerpX runtime
+// (the explorer was observed to stay mapped and interactive over IDLE), and
+// the re-map on return flickered. Instead it DISABLES its whole UI in-process
+// and Openbox maximizes the launched window (IDLE or the file viewer) over
+// it; when the app exits, the explorer simply re-enables. Consequences for
+// pixel-level detection:
+//   * There is NO black gap anymore — the screen is never empty.
+//   * A launch is signalled by the explorer's disabled render: its toolbar
+//     buttons grey out and the status bar text changes ("file manager
+//     disabled until ..."), both within ~1 s of the click.
+//   * The launched window mapping is signalled by the Openbox TITLEBAR band
+//     (top ~30 px): it shows the explorer's title until the new window maps,
+//     then the app's title. A directory navigation changes neither the
+//     toolbar band nor the titleband (rows re-render below them), so it is
+//     told apart by the toolbar band returning to the enabled baseline.
+//
+// The viewer is still told apart from IDLE by dismissing it: the viewer's
+// own in-toolbar "✕ Close" button (top-right, BELOW the Openbox titlebar;
+// IDLE does not have one) is swept; closing it returns the explorer's title
+// to the titleband (and its toolbar to the enabled baseline), while the same
+// clicks on a live IDLE land harmlessly on its menubar/editor and change
+// nothing.
 //
 // Note on input: under CheerpX's event pipeline a synthetic button-release
 // can arrive late (desktop.spec.js note), so the open is driven as repeated
@@ -34,22 +57,6 @@ import { waitForDesktop, lightRatio, canvasHash } from '../lib/desktop.js';
 // (the explorer's non-Python opener — correct behaviour) is detected via its
 // Close button and skipped, as is a directory navigation (recovered via the
 // toolbar's Up button).
-//
-// The desktop runs Openbox (diskimage/config/openbox/rc.xml), which draws a
-// real ✕ Close button on every window titlebar and honours
-// _NET_WM_ACTION_CLOSE / WM_DELETE_WINDOW. That changes how the viewer is
-// told apart from IDLE after a swap: IDLE now ALSO has a clickable titlebar ✕,
-// so closing it would return the explorer and make IDLE read as "the viewer".
-// We therefore never close a window to identify it. Instead the viewer is
-// dismissed via ITS OWN in-toolbar "✕ Close" button (which sits BELOW the
-// titlebar, and which IDLE does not have), and the dismissal is CONFIRMED by
-// the BLACK GAP: closing the viewer makes the withdrawn explorer re-map, so
-// the screen goes black and then light again (watchForSwap's L→B→L), whereas
-// IDLE's editor is just as light as the explorer and never goes black
-// (a light-ratio threshold alone would misread a live IDLE as "the viewer",
-// observed 2026-08-18). The dismissal clicks sweep a band of y values below
-// the titlebar so they hit the viewer's toolbar ✕ but never the titlebar ✕
-// above it (and never close a live IDLE).
 
 const SITE_URL =
 	process.env.E2E_SITE_URL ||
@@ -66,6 +73,16 @@ const VIEWER_CLOSE_X = 1240;
 const VIEWER_CLOSE_Y_BAND = [48, 62, 76, 90];
 const UP_BTN = { x: 45, y: 45 }; // toolbar column 0: "Up" in navigation mode
 const DARK_MARGIN = { x: 5, y: 400 }; // window edge: dismisses menus, touches nothing
+// Band geometry (pixels of the 1344x900 KMS canvas). The Openbox titlebar
+// band, the explorer's toolbar-button band, and its status-bar band — the
+// three signals the swap detection uses (see the SWAP MODEL note above). The
+// pointer stays outside every band during the scans (the mouse is parked at
+// the clicked row, y >= 195, or at the dismissal positions).
+const BANDS = {
+	title: { x: 0, y: 0, w: 512, h: 30 }, // window titlebar
+	toolbar: { x: 0, y: 35, w: 400, h: 60 }, // explorer toolbar buttons
+	status: { x: 0, y: 845, w: 400, h: 53 }, // explorer status bar (bottom)
+};
 
 // Row bands: y centers of the text rows in the file list (44px pitch).
 async function rowBands(page) {
@@ -102,55 +119,124 @@ async function rowBands(page) {
 	);
 }
 
-// Watch for the explorer→app swap: the explorer withdraws (screen goes
-// BLACK — the Openbox root) and the launched window maps (LIGHT again).
-// Detects the BLACK→LIGHT transition itself rather than the L+B+L+ pattern:
-// on a slow machine the withdraw can complete before the first sample, and
-// an in-process IDLE (-n, the browser-phase path) can keep the screen black
-// for 20-40 s while idlelib boots — a fixed window starting after the
-// double-click would expire mid-black and miss the swap entirely (observed
-// 2026-08-18 in CI). Returns false quickly if the screen never goes black
-// (nothing launched).
-async function watchForSwap(page, ms) {
+// Hash of one rectangular band of the display canvas (same downscale-and-sum
+// technique as canvasHash, cropped to the band). Null when unreadable.
+function bandHash(page, band) {
+	return page.evaluate(
+		(band) => {
+			const d = document.getElementById('display');
+			if (!d || !d.width || !d.height) return null;
+			const scratch = document.createElement('canvas');
+			scratch.width = band.w;
+			scratch.height = band.h;
+			const ctx = scratch.getContext('2d');
+			ctx.drawImage(d, band.x, band.y, band.w, band.h, 0, 0, band.w, band.h);
+			try {
+				const data = ctx.getImageData(0, 0, scratch.width, scratch.height).data;
+				let hash = 0;
+				for (let i = 0; i < data.length; i += 4) {
+					hash = (hash * 31 + data[i] + data[i + 1] + data[i + 2]) | 0;
+				}
+				return hash;
+			} catch (e) {
+				return null;
+			}
+		},
+		band
+	);
+}
+
+async function titleBandHash(page) {
+	return bandHash(page, BANDS.title);
+}
+
+async function toolbarBandHash(page) {
+	return bandHash(page, BANDS.toolbar);
+}
+
+async function statusBandHash(page) {
+	return bandHash(page, BANDS.status);
+}
+
+// The three band hashes of the healthy, enabled explorer — sampled once the
+// desktop is up, before any interaction.
+async function sampleExplorerBaseline(page) {
+	return {
+		title: await titleBandHash(page),
+		toolbar: await toolbarBandHash(page),
+		status: await statusBandHash(page),
+	};
+}
+
+// Watch for the explorer→app swap: the click disables the explorer (toolbar
+// + status bands change, no black gap), then the launched window maps and
+// REPLACES the explorer's title in the titlebar band. Returns
+// { swapped, launching }:
+//   swapped   — a new window's title took over the titlebar band;
+//   launching — the explorer's disabled render was observed (a launch is in
+//               progress; IDLE can sit disabled for 20-40 s while idlelib
+//               boots in-process, so the caller must keep waiting rather
+//               than clicking around).
+// A click that launched nothing (missed row, plain selection) changes
+// neither band pair and returns { swapped: false, launching: false } quickly
+// — a directory navigation changes the status band alone (and re-enables the
+// toolbar within seconds), never the titleband.
+async function watchForSwap(page, ms, baseline) {
 	const start = Date.now();
-	const blackDeadline = start + 8000; // a launch withdraws within seconds or not at all
 	const deadline = start + ms;
-	let sawBlack = false;
+	const launchDeadline = start + 8000; // a launch disables within seconds or not at all
+	let launching = false;
 	while (Date.now() < deadline) {
-		const ratio = await lightRatio(page);
-		if (ratio > 0.3) {
-			if (sawBlack) return true; // black -> light: the app mapped
-		} else {
-			sawBlack = true; // explorer withdrew; app still mapping
+		const title = await titleBandHash(page);
+		if (title !== null && title !== baseline.title) return { swapped: true, launching: true };
+		if (!launching) {
+			const toolbar = await toolbarBandHash(page);
+			const status = await statusBandHash(page);
+			// Disabled render = BOTH the toolbar buttons greyed AND the status
+			// text replaced. A plain selection changes only the toolbar band;
+			// a directory navigation only the status band (and briefly).
+			if (toolbar !== null && toolbar !== baseline.toolbar && status !== null && status !== baseline.status) {
+				launching = true;
+			}
 		}
+		if (!launching && Date.now() > launchDeadline) return { swapped: false, launching: false };
 		await page.waitForTimeout(200);
-		if (!sawBlack && Date.now() > blackDeadline) return false;
+	}
+	return { swapped: false, launching };
+}
+
+// After a launch was observed but no window mapped yet, distinguish a slow
+// boot from a directory navigation: a directory row re-enables the explorer
+// (its toolbar band returns to the enabled baseline) within seconds, while a
+// real launch keeps it disabled for the whole boot. Returns true when the
+// explorer came back (the row was a directory).
+async function explorerReturned(page, ms, baseline) {
+	const deadline = Date.now() + ms;
+	while (Date.now() < deadline) {
+		const toolbar = await toolbarBandHash(page);
+		if (toolbar !== null && toolbar === baseline.toolbar) return true;
+		await page.waitForTimeout(300);
 	}
 	return false;
 }
 
-// After a swap (explorer withdrew, another full-screen window took over),
-// decide whether that window is the file viewer or IDLE — WITHOUT closing a
-// window to find out (both now have an Openbox titlebar ✕, so closing would
-// return the explorer and misread IDLE as the viewer).
+// After a swap, decide whether the swapped window is the file viewer or IDLE
+// — WITHOUT closing a window to find out (both now have an Openbox titlebar
+// ✕, so closing would return the explorer and misread IDLE as the viewer).
 //
 // The viewer is dismissed via its OWN in-toolbar "✕ Close" (below the Openbox
-// titlebar; only the viewer has one): closing it makes the WITHDRAWN explorer
-// re-map, so the screen goes BLACK (viewer gone, explorer still re-mapping)
-// before going light again — watchForSwap's L→B→L is that re-map. IDLE's
-// editor is just as light as the explorer, so a light-ratio threshold alone
-// CANNOT tell a still-up IDLE from a re-mapped explorer (observed 2026-08-18:
-// a live IDLE read as "the viewer" and was skipped, failing the test); the
-// black gap is the discriminator — IDLE never goes black. On a live IDLE the
-// clicks land harmlessly on its menubar/shell area (never on its titlebar ✕,
-// which sits above the band), so it is never closed by the sweep; a wedged
-// IDLE is equally static and the clicks change nothing.
-// Returns true when the swapped window is confirmed to be the viewer.
-async function dismissIfViewer(page) {
+// titlebar; only the viewer has one): closing it returns the explorer's TITLE
+// to the titlebar band (and its toolbar band to the enabled baseline) — the
+// old L→B→L black-gap discriminator is gone because the explorer never
+// un-maps now. IDLE's editor is just as light as the explorer, and the same
+// clicks on a live IDLE land harmlessly on its menubar/shell area (never on
+// its titlebar ✕, which sits above the band), so IDLE is never closed by the
+// sweep. Returns true when the swapped window is confirmed to be the viewer.
+async function dismissIfViewer(page, baseline) {
 	for (const y of VIEWER_CLOSE_Y_BAND) {
 		await page.mouse.click(VIEWER_CLOSE_X, y, { delay: 40 });
 		await page.waitForTimeout(1200);
-		if (await watchForSwap(page, 8000)) return true; // explorer re-mapped
+		if (await explorerReturned(page, 8000, baseline)) return true; // the viewer closed
 	}
 	return false;
 }
@@ -201,9 +287,9 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 	// --- 3. Open hello.py in IDLE. Try every row band; for each, double-click
 	// with retries until a swap appears. Classify the swapped app:
 	//   - the file viewer (non-Python opener): dismissed via its in-toolbar ✕
-	//     Close (below the Openbox titlebar) — the explorer then reappears
-	//     (the black gap), so skip to the next row;
-	//   - IDLE: the dismissal sweep never produces a black gap (its editor is
+	//     Close (below the Openbox titlebar) — the explorer's title and
+	//     toolbar then return, so skip to the next row;
+	//   - IDLE: the dismissal sweep never returns the explorer (its editor is
 	//     light, and its titlebar ✕ is above the sweep band), so it is never
 	//     closed — the row is classified as IDLE.
 	let bands = await rowBands(page);
@@ -213,6 +299,11 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 	}
 	expect(bands.length, 'the file explorer must show at least one file row').toBeGreaterThan(0);
 
+	// The enabled-explorer band baseline (pointer parked at (640,500), outside
+	// every band). Sample AFTER the pointer sanity checks so the bands are
+	// clean, and right before the scan so the status bar shows "Ready".
+	const baseline = await sampleExplorerBaseline(page);
+
 	let idleUp = false;
 	for (const rowY of bands) {
 		if (idleUp) break;
@@ -220,18 +311,26 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 		for (let r = 0; r < 3 && !swapped; r++) {
 			await page.mouse.dblclick(120, rowY, { delay: 60 });
 			// Generous window: a browser-phase IDLE runs in-process (-n) and
-			// can sit black for 20-40 s while idlelib boots before its window
+			// can sit disabled for 20-40 s while idlelib boots before its window
 			// maps (CI 2026-08-18). watchForSwap's early-return keeps the
 			// nothing-launched case fast.
-			swapped = await watchForSwap(page, 60_000);
-			console.log('idle-diag row', rowY, 'attempt', r, 'swap:', swapped);
-			if (!swapped && (await lightRatio(page)) <= 0.3) {
-				// The screen is black: a launch IS in progress (the explorer
-				// withdrew and the app is still mapping). Wait for it to map
-				// rather than clicking — recovery clicks would corrupt state.
-				swapped = await watchForSwap(page, 60_000);
-				console.log('idle-diag row', rowY, 'black-gap recovery swap:', swapped);
+			let result = await watchForSwap(page, 60_000, baseline);
+			console.log('idle-diag row', rowY, 'attempt', r, 'swap:', result.swapped, 'launch:', result.launching);
+			if (!result.swapped && result.launching) {
+				// The explorer disabled itself: a launch IS in progress — or the
+				// row was a directory (its toolbar re-enables within seconds).
+				// Recovery clicks would corrupt state mid-launch, so wait for
+				// the window to map rather than clicking.
+				if (await explorerReturned(page, 10_000, baseline)) {
+					// The toolbar returned: a directory row, not a launch.
+					result = { swapped: false, launching: false };
+					console.log('idle-diag row', rowY, 'directory navigation (toolbar returned)');
+				} else {
+					result = await watchForSwap(page, 60_000, baseline);
+					console.log('idle-diag row', rowY, 'launch-in-progress recovery swap:', result.swapped);
+				}
 			}
+			swapped = result.swapped;
 			if (!swapped) {
 				await page.mouse.click(DARK_MARGIN.x, DARK_MARGIN.y, { delay: 40 }); // dismiss any menu
 				await page.waitForTimeout(1200);
@@ -243,18 +342,21 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 			await page.waitForTimeout(1500);
 			continue;
 		}
-		// Swap seen: the explorer withdrew and a full-screen window (viewer or
-		// IDLE) took over. Distinguish them by dismissing any STATIC viewer
-		// (never by closing IDLE — its new titlebar ✕ would return the explorer
-		// and fake a "viewer"). A live IDLE's window is just as light as the
-		// explorer, so the dismissal is confirmed by the BLACK GAP (viewer
-		// closed, explorer re-mapping) rather than a light ratio.
+		// Swap seen: the explorer disabled itself and a full-screen window
+		// (viewer or IDLE) took over. Distinguish them by dismissing any STATIC
+		// viewer (never by closing IDLE — its new titlebar ✕ would return the
+		// explorer and fake a "viewer"). A live IDLE's window is just as light
+		// as the explorer, so the dismissal is confirmed by the explorer's
+		// title + toolbar returning (the old black-gap discriminator is gone:
+		// the explorer never un-maps now).
 		await page.waitForTimeout(2000);
-		if (await dismissIfViewer(page)) {
-			// The explorer reappeared -> it was the file viewer, not IDLE.
+		if (await dismissIfViewer(page, baseline)) {
+			// The explorer came back (fully re-enabled — explorerReturned waits
+			// for its toolbar band) -> it was the file viewer, not IDLE.
+			await page.waitForTimeout(500);
 			continue;
 		}
-		// IDLE is up (the dismissal sweep never produced a black gap, so the
+		// IDLE is up (the dismissal sweep never returned the explorer, so the
 		// window is not the viewer). Aliveness is not asserted here — the
 		// cursor-blink signal does not render under CheerpX (§2.10), so the
 		// definitive aliveness gate is the pointer-follow check below (step 4):
