@@ -55,20 +55,23 @@ check-image-backend:
 	fi
 
 ## Start the stack (browser/none: nginx only; samba/webdav: also needs make up-tailnet)
+## `up` is a HARD-NETWORKLESS launch: whatever .env contains, the page boots
+## fully disconnected (empty baked config, no headscale, sidebar Networking
+## crossed out and disabled, zero tailnet connection attempts).
 up: certs check-image-backend
 	@if [ ! -f webvm/custom-disk-images/image-build.txt ]; then \
 		echo "ERROR: no guest image build found. Run 'make build' first (builds the ext2, the frontend and the container images)." >&2; \
 		exit 1; \
 	fi
-	docker compose up -d
+	WEBVM_TAILNET=off docker compose up -d
 
-## Start the stack including the gateway (tailnet modes)
+## Start the stack including the gateway — the ONLY tailnet-capable launch
 up-tailnet: certs check-image-backend
 	@if [ ! -f webvm/custom-disk-images/image-build.txt ]; then \
 		echo "ERROR: no guest image build found. Run 'make build' first (builds the ext2, the frontend and the container images)." >&2; \
 		exit 1; \
 	fi
-	docker compose --profile tailnet up -d
+	WEBVM_TAILNET=on docker compose --profile tailnet up -d
 
 down:
 	docker compose --profile tailnet down

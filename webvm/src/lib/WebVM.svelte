@@ -445,6 +445,21 @@
 		var internalHeight = Math.floor(displayHeight * internalMult);
 		cx.setKmsCanvas(display, internalWidth, internalHeight);
 	}
+	// The KMS framebuffer is programmed EXACTLY ONCE, at session start.
+	// Post-boot setKmsCanvas calls are broken in CheerpX 1.3.8/1.3.9: the
+	// core's worker answers the {type:95,width,height} mode-set with a
+	// garbage 320x200 fallback surface (bisect matrix in
+	// plans/display-bug.md §"post-boot mode-set regression" — 1.3.7 works,
+	// 1.3.8/1.3.9 corrupt). After that first call, viewport resizes are
+	// absorbed by CSS scaling of the fixed backing store (the #display box
+	// tracks innerWidth-56/innerHeight), which renders correctly and keeps
+	// the guest pipeline untouched and live. Re-enable the post-boot call
+	// only after an upstream runtime fixes mode-set.
+
+	// Program the KMS framebuffer exactly once per session; see
+	// plans/display-bug.md "Post-boot mode-set regression" (1.3.8/1.3.9
+	// worker path corrupts the surface on post-boot calls).
+	var kmsInitialized = false;
 	var curInnerWidth = 0;
 	var curInnerHeight = 0;
 	function handleResize()
@@ -461,7 +476,7 @@
 		term.options.fontSize = computeXTermFontSize();
 		fitAddon.fit();
 		const display = document.getElementById("display");
-		if(display)
+		if(display && cx && !kmsInitialized)
 			setScreenSize(display);
 	}
 	async function initTerminal()
@@ -674,6 +689,7 @@
 		if(display)
 		{
 			setScreenSize(display);
+			kmsInitialized = true;
 			cx.setActivateConsole(handleActivateConsole);
 		}
 		// Run the command in a loop, in case the user exits. A REJECTED

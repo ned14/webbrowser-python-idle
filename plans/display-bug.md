@@ -779,3 +779,245 @@ artifacts:
 - If you change the guest base or xorg-server, update
   `plans/webvm_implementation.md` §12/8 (pinned versions) and re-verify its
   §12/21 checklist.
+
+
+## Post-boot mode-set regression in CheerpX 1.3.8/1.3.9 (2026-08-25)
+
+Viewport resizes after session start froze rendering: the frame went static
+and the screen never adjusted (user report on `make up`; reproduced 3/3 on
+the GitHub Pages deployment as python3 core faults ~25 s after first paint —
+"Fault addr …, proc /usr/bin/python3, Fault from Inode N" with per-run inode
+ids).
+
+Runtime bisect (whole-stack paired commits + single-variable swaps, headless
+Chromium probes reading #display backing attrs):
+
+| stack | runtime | post-resize attrs | verdict |
+|---|---|---|---|
+| 474584d (openbox era) | 1.3.7 | 1344x900 -> 1060x768 | modeSet WORKS, live |
+| 474584d | **1.3.8** | frozen 1344x900 | broken |
+| ed711ef (upgrade commit) | 1.3.8 | frozen; also live=false | broken |
+| ed711ef app + 1.3.7 runtime mix | mixed | frozen + core fault | incompatible mix |
+| main | 1.3.9 | frozen 1344x900 | broken |
+
+Mechanism: setKmsCanvas posts {type:95,width,height} to the core worker for
+the KMS mode-set. On 1.3.7 that re-programs the framebuffer correctly. On
+1.3.8/1.3.9 a POST-BOOT call answers with a garbage fallback surface
+("CREATE 320x200x32") and the pipeline wedges (pointer-dead static frame).
+The initial pre-pixels call works fine on every version. Not our caller:
+WebVM.svelte is byte-identical across the boundary; deps identical; guest X
+stack irrelevant (old guest fails identically under the new runtime).
+
+Workaround shipped (WebVM.svelte `kmsInitialized`): program the KMS
+framebuffer EXACTLY ONCE at session start; afterwards viewport resizes are
+absorbed by CSS scaling of the fixed backing store (#display box tracks
+innerWidth-56 sidebar / innerHeight), which renders correctly and keeps the
+guest untouched and live. Guarded by tests/e2e/tests/resize.spec.js
+(CSS-follows-viewport + light-content + pointer-liveness + no-faults across
+three resize steps). Re-enable post-boot calls only after an upstream
+runtime fixes the type:95 path; 1.3.9 is NOT such a fix.
+## Post-boot mode-set regression in CheerpX 1.3.8/1.3.9 (2026-08-25)
+
+Viewport resizes after session start froze rendering: the frame went static
+and the screen never adjusted (user report on `make up`; reproduced 3/3 on
+the GitHub Pages deployment as python3 core faults ~25 s after first paint —
+"Fault addr …, proc /usr/bin/python3, Fault from Inode N" with per-run inode
+ids).
+
+Runtime bisect (whole-stack paired commits + single-variable swaps, headless
+Chromium probes reading #display backing attrs):
+
+| stack | runtime | post-resize attrs | verdict |
+|---|---|---|---|
+| 474584d (openbox era) | 1.3.7 | 1344x900 -> 1060x768 | modeSet WORKS, live |
+| 474584d | **1.3.8** | frozen 1344x900 | broken |
+| ed711ef (upgrade commit) | 1.3.8 | frozen; also live=false | broken |
+| ed711ef app + 1.3.7 runtime mix | mixed | frozen + core fault | incompatible mix |
+| main | 1.3.9 | frozen 1344x900 | broken |
+
+Mechanism: setKmsCanvas posts {type:95,width,height} to the core worker for
+the KMS mode-set. On 1.3.7 that re-programs the framebuffer correctly. On
+1.3.8/1.3.9 a POST-BOOT call answers with a garbage fallback surface
+("CREATE 320x200x32") and the pipeline wedges (pointer-dead static frame).
+The initial pre-pixels call works fine on every version. Not our caller:
+WebVM.svelte is byte-identical across the boundary; deps identical; guest X
+stack irrelevant (old guest fails identically under the new runtime).
+
+Workaround shipped (WebVM.svelte `kmsInitialized`): program the KMS
+framebuffer EXACTLY ONCE at session start; afterwards viewport resizes are
+absorbed by CSS scaling of the fixed backing store (#display box tracks
+innerWidth-56 sidebar / innerHeight), which renders correctly and keeps the
+guest untouched and live. Guarded by tests/e2e/tests/resize.spec.js
+(CSS-follows-viewport + light-content + pointer-liveness + no-faults across
+three resize steps). Re-enable post-boot calls only after an upstream
+runtime fixes the type:95 path; 1.3.9 is NOT such a fix.
+
+
+### CORRECTION + downgrade experiment (2026-08-26)
+
+Two corrections after an attempted revert of the runtime to 1.3.7:
+
+1. The early-boot python3 fault ("Fault addr c014 … proc
+   /usr/bin/python3", "Fault from Inode N" — Inode 1100 =
+   /usr/lib/libpython3.14.so.1.0) is a SPORADIC, VERSION-INDEPENDENT core
+   read-path bug: it struck identically on 1.3.7 across ten consecutive
+   boots with today's image (including with sitecustomize absent, neutered,
+   pyc-stripped and lazy-import variants), while the same tree on 1.3.8
+   booted clean dozens of times — and the user reports seeing the class on
+   all versions. It is NOT sitecustomize-related and NOT deterministic per
+   content; treat every "Fault from Inode" line as this family.
+   Mechanism shape: libpython is the largest cold overlay-read at startup;
+   the core intermittently serves a bad page during its page-in. There is
+   NO shared page cache between guest processes (reads go per-process
+   through the JS device), so a throwaway warmup interpreter does NOT
+   protect later processes — tried in desktop.start, reverted.
+2. The post-boot KMS mode-set breakage table above STANDS separately: it
+   was measured only on boots that succeeded, multi-sample, single-variable
+   runtime swap on a known-good base.
+
+Downgrade to 1.3.7 was therefore REVERTED: against the current tree it
+fails deterministically (0/13 boots reach pixels — libpython cold-read
+fault kills boot-critical python before X), independent of sitecustomize
+state. Shipped configuration remains 1.3.8 + one-shot kmsInitialized guard
++ full select-based sitecustomize sleep patch + delegating sync._sleep.
+Open items: upstream report for BOTH core defects (post-boot type:95
+mode-set; sporadic overlay page-in fault), and re-testing the post-boot
+setKmsCanvas call path when a fixed runtime lands (the kmsInitialized guard
+is the single switch to flip).
+
+
+### DECISION: runtime returned to 1.3.7 (2026-08-26, project-owner direction)
+
+Despite the deterministic headless-Chromium failures documented above
+(0/13 boots reaching pixels across every sitecustomize variant), the
+project owner has directed the runtime be returned to 1.3.7 — the last
+version where post-boot mode-set is known to work, and whose real-browser
+boot record the owner reports as mostly clean (the sporadic Inode-fault is
+version-independent; headless-Chromium may simply expose it more readily
+than a real interactive session — untested hypothesis).
+
+State shipped: pins in scripts/fetch-cheerpx-runtime.sh,
+webvm/src/lib/cheerpx.js and webvm/package.json set to 1.3.7; runtime
+fetched and trampoline-patched (3 trap-report sites); full select-based
+sitecustomize retained per owner instruction (sleep fix kept); sync._sleep
+delegates to time.sleep; WebVM.svelte keeps the one-shot kmsInitialized
+guard (harmless on 1.3.7 — repeat calls were ignored by the modern glue
+anyway). Guest image unchanged (runtime lives browser-side).
+
+Validation status: served-byte hash matches CDN 1.3.7; headless probes
+still hit the early-boot fault locally — real-browser verification pending;
+resize.spec.js remains the contract guard and MUST be re-run against a
+real interactive session before trusting resizes. If the early-boot fault
+reproaches in real use, the recovery lever is the existing fatal-overlay
+Reload path plus the bisect matrix above.
+
+### UPDATE: runtime restored to 1.3.8 (2026-08-26, project-owner direction)
+
+The 1.3.7 re-pin above was REVERSED the same day: the owner restored the
+working tree to the committed 1.3.8 pin (fetch-cheerpx-runtime.sh VERSION,
+webvm/src/lib/cheerpx.js, webvm/package.json, and the fetched/patched
+runtime under webvm/cheerpx/ all back to 1.3.8; verified byte-identical to
+a fresh CDN fetch + trampoline patch). Rationale now supported by the
+repro/mode-set investigation below: the "1.3.7 last-version-where-mode-set-
+works" premise no longer holds — the post-boot mode-set failure was shown to
+be guest-side (our image's X session never completes the disconnect/
+reconnect re-negotiation; the upstream webvm.io image on the SAME 1.3.8
+runtime re-programs correctly), so staying on 1.3.8 no longer trades away
+resize correctness, and 1.3.8 is the version documented to boot headless
+reliably (1.3.7 fails every headless boot with the early-boot fault).
+
+
+### Upstream repro package + root-cause mapping (2026-08-26)
+
+A self-contained repro package for the mode-set defect now lives in
+`repro/mode-set/` (README there). **Primary (submission-ready) repro:
+`upstream.html`** — boots the exact `webvm.io/alpine.html` guest
+(`wss://disks.webvm.io/alpine_20251007.ext2` via CloudDevice, same mounts
+and boot flow as `leaningtech/webvm`), runtime from the CDN by version, then
+fires the post-boot `setKmsCanvas` with the app's exact resize numbers
+(1344×900 → 1060×768). The image is parameterizable (`?img=&type=bytes`),
+so the SAME page boots either the upstream image or our image — that A/B is
+exactly how the regression was isolated. `validate-upstream.mjs` runs the
+headless matrix against local copies (the upstream image served is
+byte-identical to `wss://disks.webvm.io`'s, verified by size + range
+compare). Secondary mechanism repro: `index.html` + the 2 MiB `kms-demo`
+guest (brings the virtual DRM/KMS up via the exact libdrm ioctl sequence),
+plus a bare-Xorg guest variant (`ext2-xorg.img`, no python — immune to the
+early-boot fault).
+
+Repro/validation controls (handy for re-running the bisect):
+
+- `upstream.html` params: `v=` runtime, `img=`/`type=` image backend,
+  `initw/inith/neww/newh=` resize numbers, `burst=1` multi-step resize,
+  `fixresize=1` inject upstream-style `xrandr --off`+`--auto` loop,
+  `ourxconf=1` inject our modesetting/ShadowFB config, `hotplug=1` inject
+  `AutoAddDevices=true` xorg.conf, `ourlaunch=1` direct-root Xorg launch,
+  `auto=1` scripted run.
+- `validate-upstream.mjs` envs: `IMG` (`/reference/alpine_20251007.ext2` or
+  `/custom/webvm-custom-disk.ext2`), `BURST`, `FIXRESIZE`, `OURXCONF`,
+  `HOTPLUG`, `OURLAUNCH`, `KMSDUMP=1` (core KMS ioctl/CREATE trace),
+  `DUMPLOG=1` (page+guest console tail).
+
+**The regression is OUR-IMAGE-SPECIFIC — verified headlessly, deterministically**
+(same page, same CDN runtime, same trigger, same numbers, 2/2 runs each):
+
+| guest | 1.3.8 post-boot setKmsCanvas | core KMS trace |
+|---|---|---|
+| upstream alpine_20251007.ext2 | backing 1344×900 → 1062×770, LIVE | `… CREATE 320x200x32 → CREATE 1062x770x32` |
+| our webvm-custom-disk.ext2 | backing stays 1344×900, frame STATIC | `… CREATE 320x200x32 → (never superseded)` |
+
+The documented "garbage 320×200 fallback" is the core's **intermediate
+placeholder on BOTH images**; the difference is whether the guest completes
+the disconnect/reconnect re-negotiation (RandR event → `xrandr --output
+None-0 --off` → `--auto`) that makes the core program the real surface. In
+our guest, at the RandR event the connector is already reported
+`None-0 disconnected primary 1344x900`; the xrandr `--off` round-trip then
+never completes (no further guest console output, no further `KMS IOCTL`
+lines reach the core) and the frame goes static. The runtime version is NOT
+the driver: the core behaves identically for both images on the same 1.3.8.
+
+Ruled out as the cause, each by single-variable test (rebuilt images and/or
+repro-page injections):
+- **resize-loop script**: upstream's event-driven `xev`+`--off`+`--auto` loop
+  injected AND baked — the RandR event fires, yet no resize (still frozen);
+- **xorg-server version**: pinned 21.1.8-r0 (== upstream's) into our image —
+  same freeze;
+- **AutoAddDevices false → true**: with it true the hotplug/RandR event now
+  arrives deterministically, but the re-negotiation still wedges;
+- **modesetting ShadowFB / AccelMethod none / PageFlip false config**: applied
+  to the upstream image — still works there.
+
+Remaining delta (next bisect step, evidence points here): the **X session
+launch path** — our direct root `Xorg -nolisten tcp -noreset -novtswitch` +
+`su user` child session (a path chosen to dodge Xorg.wrap's console rules and
+the VT-ioctl hang in a VT-less guest) vs upstream's lightdm-launched server +
+DM session chain. The wedge is server-side and pre-ioctl, consistent with a
+server-internal stall during CRTC teardown that a DM-managed server does not
+hit. The first confirmation attempt (upstream image + our launch style via
+`?ourlaunch=1`) was INCONCLUSIVE: the upstream rootfs cannot start X at all
+outside its lightdm scaffolding (Xorg.wrap refuses root; even the real
+`/usr/lib/xorg-server/Xorg` binary produced zero DRM ioctls — never reached
+driver init).
+
+New CheerpX facts mapped while building it (all in `repro/mode-set/README.md`):
+the virtual DRM logs every ioctl as `KMS IOCTL %x`; GETRESOURCES needs the
+two-phase counts-first protocol (single-phase returns EINVAL); **ADDFB2 is
+EINVAL — only legacy ADDFB works** (Xorg's modesetting normally prefers
+ADDFB2, so bare bring-ups must use the legacy path); atomic/planes are
+unimplemented; the runtime resizes the canvas backing via its internal
+type:72 message when a surface is programmed; and the **ext2 reader rejects
+images needing many block groups** ("Invalid disk image": 24 groups mounts,
+96 groups fails — use `mke2fs -g 1024`; 1024-byte blocks are also rejected).
+
+Open items:
+1. **Decisive session-path test**: add lightdm to our image (or replicate
+   lightdm's exact Xorg command line + session chain) and compare — the one
+   variable left between "works upstream" and "freezes here".
+2. **1.3.7 behaviour with the current image is UNVERIFIED** (the "1.3.7
+   resizes" claim in the older docs was never re-tested headless this
+   session; the headless 1.3.7 boot is blocked by the early-boot fault).
+3. **Upstream report package**: mode-set findings above + the ext2 group-count
+   bug + the virtual-DRM ioctl notes, with `repro/mode-set/` as the
+   submission evidence (A/B page + `KMSDUMP` traces).
+4. The **early-boot libpython page-in fault** (the original user report) is
+   unchanged and remains an upstream-reportable core defect.

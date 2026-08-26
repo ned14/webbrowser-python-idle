@@ -27,25 +27,27 @@ CheerpX runtime doesn't implement `/dev/clipboard`, the best we can do is allow
 Todo items:
 
 - Implement paste as if typed by keyboard.
-- Networking icon in left bar should be crossed out and disabled if networking disabled.
 - File manager redraws after opening IDLE, it would look better if it disabled itself
 while another program runs.
+- Has automatic screen resizer broken?
+- Need to do something about that Documents folder in the home dir.
 - After launching and closing IDLE a few times CPU seems to peg to 100%. It still
 works but it's SLOW.
 
-## Try it live
+## Try it **LIVE**
 
 The project website **is the VM**: the latest `main` build runs entirely in your
 browser at
 [**https://ned14.github.io/webbrowser-python-idle/alpine.html**](https://ned14.github.io/webbrowser-python-idle/alpine.html)
 — test-drive it there before running it yourself. The first load streams the
-guest image (~140 MB; later visits reuse the browser cache) and needs a
+guest image (~140 MB, takes about sixty seconds; later visits reuse the browser cache,
+takes less than twenty seconds) and needs a
 standards-compliant browser with SharedArrayBuffer — GitHub Pages cannot set the
 COOP/COEP headers WebVM requires, so the site injects them via a service worker.
 
 Note that due to latency between the guest image hosted by github and your web
-browser performance does suffer -- when running on LAN, the VM loads fully into
-your web browser in _seconds_, even on a relatively limited CPU such as a
+browser, app launch times particularly suffer -- when running on LAN, the VM is
+noticeably more snappy, even on a relatively limited CPU such as a
 Chromebook or a phone.
 
 ## Quick start (browser mode — no tailnet)

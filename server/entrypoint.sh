@@ -8,6 +8,18 @@ set -u
 STORAGE_BACKEND="${STORAGE_BACKEND:-browser}"
 HEADSCALE_ENABLED="${HEADSCALE_ENABLED:-0}"
 HEADSCALE_BOOTSTRAP="${HEADSCALE_BOOTSTRAP:-0}"
+# `make up` is a HARD-NETWORKLESS launch: whatever .env contains, a
+# server-only start has no gateway/control plane, so the page must boot
+# fully disconnected — empty baked config, no headscale, no key validation,
+# sidebar Networking crossed out and disabled, zero tailnet connection
+# attempts. `make up-tailnet` (WEBVM_TAILNET=on) is the ONLY launch that
+# may enable networking.
+if [ "${WEBVM_TAILNET:-on}" = "off" ]; then
+	echo "==> WEBVM_TAILNET=off: networking hard-disabled for this launch (make up)"
+	STORAGE_BACKEND="none"
+	HEADSCALE_ENABLED="0"
+	HEADSCALE_BOOTSTRAP="1"
+fi
 # CONTROL_HOST is the BROWSER-facing control-plane host (baked page config,
 # nginx CSP allowlist, headscale server_url -> DERP map). Default 127.0.0.1 =
 # zero-config single machine; LAN deployments set it (with LAN_IP) to the

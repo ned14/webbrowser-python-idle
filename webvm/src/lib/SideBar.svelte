@@ -8,6 +8,7 @@
 	import GitHubTab from './GitHubTab.svelte';
 	import SmallButton from './SmallButton.svelte';
 	import { cpuActivity, diskActivity } from './activities.js';
+	import { networkReachable, networkingEnabled } from './network.js';
 	const icons = [
 		{ icon: 'fas fa-info-circle', info: 'Information', activity: null },
 		{ icon: 'fas fa-wifi', info: 'Networking', activity: null },
@@ -45,6 +46,10 @@
 	function handleClick(icon) {
 		if(sideBarPinned)
 			return;
+		// Disabled entries (Networking without a tailnet deployment) cannot
+		// open their panel — the icon already suppresses its own events.
+		if(icon.disabled)
+			return;
 		// Hides the panel if the icon is active. Otherwise, shows the panel with info.
 		if (activeInfo === icon.info) {
 			activeInfo = null;
@@ -67,6 +72,8 @@
 					icon={i.icon}
 					info={i.info}
 					activity={i.activity}
+					disabled={i.info === 'Networking' && !$networkReachable}
+					inert={i.info === 'Networking' && !networkingEnabled}
 					on:mouseover={(e) => showInfo(e.detail)}
 					on:click={() => handleClick(i)}
 				/>

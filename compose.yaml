@@ -9,6 +9,12 @@ x-server-env: &server-env
   STORAGE_BACKEND: ${STORAGE_BACKEND:-browser}
   HEADSCALE_ENABLED: ${HEADSCALE_ENABLED:-0}
   HEADSCALE_BOOTSTRAP: ${HEADSCALE_BOOTSTRAP:-0}
+  # `make up` sets off: hard-networkless launch — the entrypoint renders an
+  # EMPTY page config, skips headscale and all key validation, so the page
+  # boots disconnected (sidebar Networking crossed out, zero tailnet
+  # attempts) even when .env carries tailnet secrets. `make up-tailnet`
+  # sets on (the default).
+  WEBVM_TAILNET: ${WEBVM_TAILNET:-on}
   # CONTROL_HOST: the browser-facing control-plane/DERP host (controlUrl in
   # the baked page config, headscale server_url, nginx CSP). Default
   # 127.0.0.1 = zero-config single machine; LAN deployments set it (with

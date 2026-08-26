@@ -19,6 +19,65 @@ let loginPromise = null;
 let connectionState = writable("DISCONNECTED");
 let exitNode = writable(false);
 
+// Capability flag: does THIS DEPLOYMENT have any tailnet support at all
+// (authKey/controlUrl rendered)? browser/none builds do not — their
+// Networking entry is fully INERT (no panel even), unlike the
+// reachable-gateway-down case which stays clickable for Retry.
+export const networkingEnabled = !!(browser && controlUrl);
+
+// networkReachable covers BOTH "deployment has no tailnet capability"
+// (browser/none builds: no authKey/controlUrl rendered) AND "capability
+// present but the control plane is not" — e.g. `make up` (server only, no
+// gateway container): the baked controlUrl points at a dead endpoint, and
+// without a gate the tailscale client would auto-start and hammer it with
+// WebSocket retries forever. The sidebar icon subscribes to this store, so
+// either case gets the SAME crossed-out disabled treatment.
+export const networkReachable = writable(false);
+
+const CONTROL_HEALTH_TIMEOUT_MS = 3000;
+
+async function controlPlaneReachable()
+{
+	if(!controlUrl)
+		return false;
+	try
+	{
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), CONTROL_HEALTH_TIMEOUT_MS);
+		await fetch(new URL("/health", controlUrl).href,
+			{ mode: "no-cors", cache: "no-store", signal: controller.signal });
+		clearTimeout(timer);
+		// Opaque no-cors response: reaching ANYTHING at the origin counts.
+		return true;
+	}
+	catch(e)
+	{
+		return false;
+	}
+}
+
+// Probe the control plane, and only spawn the tailscale client when it is
+// actually reachable (this is what keeps `make up`-without-gateway sessions
+// free of WebSocket retry spam). Returns whether networking started.
+export async function tryStartNetworking()
+{
+	if(!networkingEnabled || !(await controlPlaneReachable()))
+	{
+		connectionState.set("UNREACHABLE");
+		networkReachable.set(false);
+		return false;
+	}
+	// A retry re-enables real control sockets and clears the rejection
+	// streak (the watchdog re-trips on its own if the key is still bad).
+	connectedNow = false;
+	handshakeFailures = 0;
+	suppressControlSockets = false;
+	connectionState.set("DISCONNECTED");
+	networkReachable.set(true);
+	startTailnet();
+	return true;
+}
+
 function resetLoginPromise()
 {
 	loginPromise = new Promise((f,r) => {
@@ -58,10 +117,83 @@ function stateUpdateCb(state)
 	{
 		case 6 /*Running*/:
 		{
+			connectedNow = true;
+			handshakeFailures = 0;
+			suppressControlSockets = false;
 			connectionState.set("CONNECTED");
 			break;
 		}
 	}
+}
+
+// --- Control-plane rejection watchdog -------------------------------------
+// headscale answering /health does NOT mean registration succeeds: a stale/
+// rejected authKey makes the client loop wss://…/ts2021 open→immediate-close
+// forever (~25 attempts/min of console spam) while the sidebar still shows
+// networking as available. Both the driver and the cheerpOSNetInit heal
+// create their control sockets through window.WebSocket, so counting here
+// covers every client instance. After 5 consecutive rejected handshakes
+// (never reaching Running) the session flips to UNREACHABLE — sidebar cross-
+// out, panel explanation + Retry — and further /ts2021 constructions get a
+// silent stand-in socket: the wasm client keeps its internal retry cadence
+// but emits zero network traffic. A later Running (or the panel's Retry)
+// clears the suppression.
+var connectedNow = false;
+var handshakeFailures = 0;
+var suppressControlSockets = false;
+var HANDSHAKE_FAILURE_LIMIT = 5;
+
+function tripUnreachable()
+{
+	if (connectedNow)
+		return;
+	console.warn("tailnet: control plane rejecting handshakes; disabling networking for this session (Retry in the Networking panel re-probes)");
+	handshakeFailures = 0;
+	suppressControlSockets = true;
+	connectionState.set("UNREACHABLE");
+	networkReachable.set(false);
+}
+
+if (browser && networkingEnabled)
+{
+	const RealWebSocket = window.WebSocket;
+	function PatchedWebSocket(url, protocols)
+	{
+		const isControl = typeof url === "string" && url.includes("/ts2021");
+		if (isControl && suppressControlSockets)
+		{
+			// Silent stand-in: never opens, closes cleanly, no traffic.
+			const dummy = new EventTarget();
+			dummy.close = function() {};
+			dummy.send = function() { throw new Error("networking unavailable"); };
+			setTimeout(() => dummy.dispatchEvent(new CloseEvent("close")), 0);
+			return dummy;
+		}
+		const ws = protocols === undefined ? new RealWebSocket(url)
+			: new RealWebSocket(url, protocols);
+		if (isControl)
+		{
+			ws.addEventListener("open", () => { connectedNow = false; });
+			ws.addEventListener("close", () => {
+				if (connectedNow)
+				{
+					// A session that reached Running ended normally.
+					handshakeFailures = 0;
+					return;
+				}
+				handshakeFailures += 1;
+				if (handshakeFailures >= HANDSHAKE_FAILURE_LIMIT)
+					tripUnreachable();
+			});
+		}
+		return ws;
+	}
+	PatchedWebSocket.prototype = RealWebSocket.prototype;
+	PatchedWebSocket.CONNECTING = RealWebSocket.CONNECTING;
+	PatchedWebSocket.OPEN = RealWebSocket.OPEN;
+	PatchedWebSocket.CLOSING = RealWebSocket.CLOSING;
+	PatchedWebSocket.CLOSED = RealWebSocket.CLOSED;
+	window.WebSocket = PatchedWebSocket;
 }
 
 function netmapUpdateCb(map)
@@ -152,6 +284,18 @@ export function updateButtonData(state, handleConnect) {
 				buttonText: "Invalid login URL",
 				isClickable: false,
 				clickHandler: null,
+				clickUrl: null,
+				buttonTooltip: null,
+				rightClickHandler: null
+			};
+		case "UNREACHABLE":
+			// Control plane did not answer /health (gateway down in a
+			// server-only launch). The sidebar icon is crossed out while
+			// this state holds; the button is the retry affordance.
+			return {
+				buttonText: "Control plane unreachable — click to retry",
+				isClickable: true,
+				clickHandler: handleConnect,
 				clickUrl: null,
 				buttonTooltip: null,
 				rightClickHandler: null
@@ -289,7 +433,10 @@ async function startTailnet()
 
 if (browser && controlUrl)
 {
-	startTailnet();
+	// Gated auto-start: probe /health first so a missing/dead gateway never
+	// spawns the client (no WebSocket retry spam); tryStartNetworking sets
+	// the UNREACHABLE state + store for the sidebar icon.
+	tryStartNetworking();
 }
 
 // Build the { opened, closed, close } socket shape for a CONNECTED tun
