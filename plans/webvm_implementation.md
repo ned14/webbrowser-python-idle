@@ -1438,7 +1438,8 @@ exists**; `xterm openbox xprop git ssh nc` present and **`pcmanfm`/
 `open-file-explorer.sh` + `keep-file-explorer.sh`; `desktop.start` starts the
 sync agent as a single process (samba/webdav) and runs the boot-pull before X.
 **In-guest GUI suite** under an in-image `Xvfb`: `file-explorer-tests.py`
-(98 checks incl. the disable→IDLE→re-enable flow), a real IDLE launch, and
+(121 checks incl. the disable→IDLE→re-enable flow and the own-window
+exclusion regression), a real IDLE launch, and
 the keep-alive relaunch check (§12/25). Ext2: `e2fsck -f` clean; `debugfs`
 shows `/sbin/init`, `/usr/bin/idle3.14`, the openbox config, the sync agent.
 
@@ -1835,7 +1836,16 @@ gateway relays).
     itself: the X withdraw round-trip is unreliable under the CheerpX
     runtime (the explorer was observed staying mapped and interactive over
     IDLE) and the re-map on return flickered, so the swap is now pure Tk
-    widget state with no X traffic. A watcher thread decides when IDLE
+    widget state with no X traffic. Every widget also switches to the wait
+    pointer (hourglass, `_set_widget_cursor`) while disabled, restored on
+    re-enable. **Fix (2026-08-26):** the launched-app watchers
+    (`_idle_window_open`/`_viewer_window_open`) now exclude the explorer's
+    OWN window (`_other_windows`, matched by `winfo_id` and by title): its
+    title "Python File Manager" matches IDLE's "Python …" rule, and since
+    the explorer no longer withdraws its window stays in the client list —
+    without the exclusion the watcher would wait forever for an IDLE window
+    to disappear and the file manager would never re-enable after quitting
+    IDLE. A watcher thread decides when IDLE
     is gone by watching the **window manager's client list** (not the
     process): the WM (Openbox) maintains the EWMH `_NET_CLIENT_LIST` root
     property, read in-process by the explorer (`_wm_client_windows`, via
@@ -1864,8 +1874,9 @@ gateway relays).
     extended to cover every function (sorts, wheel scroll, breadcrumbs, go
     up/to-path, text sniffing, rename/create/delete/batch-rename, zip/unzip,
     status bar, the real open_selected dir/.py/.txt paths, the late-release
-    tap, the Ctrl+O/Ctrl+W shortcuts, and the disable→IDLE→re-enable flow —
-    98 checks) and now runs **inside the guest** as part of
+    tap, the Ctrl+O/Ctrl+W shortcuts, and the disable→IDLE→re-enable flow
+    incl. the own-window exclusion and the wait-pointer restore —
+    121 checks) and now runs **inside the guest** as part of
     `tests/rootfs/smoke.sh` under an in-image Xvfb (`xvfb` package added for
      this); the same smoke block runs a REAL IDLE launch and boots Openbox
      under Xvfb to verify the keep-alive relaunches a killed explorer; `tests/unit`

@@ -853,8 +853,10 @@ def test_open_in_viewer_disables_ui(done):
         (0, lambda: check("explorer UI disabled while viewer runs",
                           pane._ui_disabled is True
                           and all(s == "disabled" for s in _toolbar_states())
-                          and "disabled" in lb.state(),
-                          repr((pane._ui_disabled, _toolbar_states(), lb.state())))),
+                          and "disabled" in lb.state()
+                          and root.cget("cursor") == "watch",
+                          repr((pane._ui_disabled, _toolbar_states(),
+                                lb.state(), root.cget("cursor"))))),
         (0, lambda: (lb.selection_set(), _click(0))),
         (50, lambda: check("clicks ignored while viewer runs",
                            not lb.selection(), repr(lb.selection()))),
@@ -862,8 +864,10 @@ def test_open_in_viewer_disables_ui(done):
         # re-enable needs that budget plus margin (as in the lingering test).
         (3500, lambda: check("explorer re-enabled once viewer exits",
                              pane._ui_disabled is False
-                             and all(s == "normal" for s in _toolbar_states()),
-                             repr((pane._ui_disabled, _toolbar_states())))),
+                             and all(s == "normal" for s in _toolbar_states())
+                             and root.cget("cursor") == "",
+                             repr((pane._ui_disabled, _toolbar_states(),
+                                   root.cget("cursor"))))),
         (100, lambda: check("folder reloaded after viewer",
                             pane.current_path == SRC and pane.displayed_paths,
                             pane.current_path)),
@@ -912,6 +916,41 @@ def test_viewer_window_close_returns_when_process_lingers(done):
         pane.__setattr__("_viewer_window_open", orig_open),
         done(),
     ))
+
+@test
+def test_own_window_does_not_block_idle_close(done):
+    # Regression (2026-08-26): the explorer keeps its window in the WM client
+    # list while IDLE runs (it disables its UI instead of withdrawing), and
+    # its own title is "Python File Manager" — which matches the IDLE
+    # watcher's "Python ..." title rule. The watcher must exclude the
+    # explorer's own window, or quitting IDLE would never re-enable the file
+    # manager (it would wait forever for a "Python" window to disappear).
+    _make_fixtures()
+    global _wm_client_windows
+    orig = _wm_client_windows
+    state = {"windows": []}
+    def fake():
+        return state["windows"]
+    _wm_client_windows = fake
+    own_id = root.winfo_id()
+    own = {"id": own_id, "instance": "file-explorer",
+           "class": "file-explorer", "name": "Python File Manager"}
+    shell = {"id": 0x2002, "instance": "Toplevel",
+             "class": "Toplevel", "name": "Python 3.14.7 Shell"}
+    def step1():
+        state["windows"] = [own, shell]
+        check("IDLE window detected alongside the explorer's own",
+              pane._idle_window_open(["hello.py"]) is True,
+              repr(pane._idle_window_open(["hello.py"])))
+        state["windows"] = [own]
+        check("explorer's own window alone is not IDLE",
+              pane._idle_window_open(["hello.py"]) is False)
+        state["windows"] = [own]
+        check("explorer's own window alone is not the viewer",
+              pane._viewer_window_open() is False)
+        _wm_client_windows = orig
+        done()
+    root.after(50, step1)
 
 @test
 def test_rename_item(done):
@@ -1120,8 +1159,10 @@ def test_open_with_idle_disables_ui(done):
             (0, lambda: check("explorer UI disabled while IDLE runs",
                               pane._ui_disabled is True
                               and all(s == "disabled" for s in _toolbar_states())
-                              and "disabled" in lb.state(),
-                              repr((pane._ui_disabled, _toolbar_states(), lb.state())))),
+                              and "disabled" in lb.state()
+                              and root.cget("cursor") == "watch",
+                              repr((pane._ui_disabled, _toolbar_states(),
+                                    lb.state(), root.cget("cursor"))))),
             (0, lambda: (lb.selection_set(), _click(0))),
             (50, lambda: check("clicks ignored while IDLE runs",
                                not lb.selection(), repr(lb.selection()))),
@@ -1129,8 +1170,10 @@ def test_open_with_idle_disables_ui(done):
             # fake process lifetime plus one poll, with a margin.
             (1500, lambda: check("explorer re-enabled once IDLE exits",
                                  pane._ui_disabled is False
-                                 and all(s == "normal" for s in _toolbar_states()),
-                                 repr((pane._ui_disabled, _toolbar_states())))),
+                                 and all(s == "normal" for s in _toolbar_states())
+                                 and root.cget("cursor") == "",
+                                 repr((pane._ui_disabled, _toolbar_states(),
+                                       root.cget("cursor"))))),
             (100, lambda: check("folder reloaded after IDLE",
                                 pane.current_path == SRC and pane.displayed_paths,
                                 pane.current_path)),
@@ -1167,13 +1210,17 @@ def test_idle_window_close_returns_when_process_lingers(done):
                             str(root.state()) == "normal", root.state())),
         (0, lambda: check("explorer UI disabled while IDLE runs",
                           pane._ui_disabled is True
-                          and all(s == "disabled" for s in _toolbar_states()),
-                          repr((pane._ui_disabled, _toolbar_states())))),
+                          and all(s == "disabled" for s in _toolbar_states())
+                          and root.cget("cursor") == "watch",
+                          repr((pane._ui_disabled, _toolbar_states(),
+                                root.cget("cursor"))))),
         (0, lambda: holder.__setitem__("open", False)),  # user closes IDLE
         (3500, lambda: check("explorer re-enabled once IDLE's window is gone",
                              pane._ui_disabled is False
-                             and all(s == "normal" for s in _toolbar_states()),
-                             repr((pane._ui_disabled, _toolbar_states())))),
+                             and all(s == "normal" for s in _toolbar_states())
+                             and root.cget("cursor") == "",
+                             repr((pane._ui_disabled, _toolbar_states(),
+                                   root.cget("cursor"))))),
     ], lambda: (
         subprocess.__setattr__("Popen", orig_popen),
         pane.__setattr__("_idle_window_open", orig_open),

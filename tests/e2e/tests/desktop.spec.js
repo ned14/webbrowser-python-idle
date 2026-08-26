@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { waitForDesktop, lightRatio } from '../lib/desktop.js';
+import { waitForDesktop, waitForLightDesktop } from '../lib/desktop.js';
 
 // Desktop-boot guarantee test (real browser, plan §9.4 boot case, extended).
 // Opens the browser-mode VM in a real Chromium and asserts, against the live
@@ -48,9 +48,7 @@ test('boots to the file explorer: no login prompt, no boot hang', async ({ page 
 	// canvas with light pixels (the Openbox root is solid black via
 	// `xsetroot -solid black`, so nothing else autostarts a full-screen light
 	// window).
-	await expect
-		.poll(() => lightRatio(page), { timeout: 120_000, intervals: [3000] })
-		.toBeGreaterThan(0.35);
+	await waitForLightDesktop(page);
 
 	// --- 2. No login prompt, 1. no boot hang at "Starting local ...".
 	// OpenRC prints " * Starting local ..." then appends its "[ ok ]" status

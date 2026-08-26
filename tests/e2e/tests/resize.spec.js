@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { waitForDesktop, lightRatio, canvasHash } from '../lib/desktop.js';
+import { waitForDesktop, waitForLightDesktop, canvasHash } from '../lib/desktop.js';
 
 // Page-resize regression test: after the BROWSER window is resized the
 // screen must keep rendering CORRECTLY and the VM must NOT hang.
@@ -47,9 +47,7 @@ test('page resizes: screen keeps rendering correctly and the VM stays live', asy
 
 	await page.goto(SITE_URL, { waitUntil: 'domcontentloaded' });
 	await waitForDesktop(page);
-	await expect
-		.poll(() => lightRatio(page), { timeout: 120_000, intervals: [3000] })
-		.toBeGreaterThan(0.35);
+	await waitForLightDesktop(page);
 
 	for (const [w, h] of RESIZES) {
 		await page.setViewportSize({ width: w, height: h });

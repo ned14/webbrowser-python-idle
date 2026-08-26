@@ -189,6 +189,32 @@ def _wm_client_windows():
                         "class": cls, "name": name})
     return windows
 
+def _other_windows(windows):
+    """The WM client list minus the explorer's own window.
+
+    The explorer stays visible (UI disabled) while IDLE/the viewer runs, so
+    its own window remains in _NET_CLIENT_LIST for the whole session and the
+    launched-app watchers must never count it as the app. This is a hard
+    regression trap: the explorer's title is "Python File Manager", which
+    matches IDLE's "Python ..." title rule — with the old withdraw model the
+    explorer left the client list so only IDLE matched, but since the
+    disable model it would make _idle_window_open return True forever and
+    the file manager would never re-enable after quitting IDLE."""
+    own_id = None
+    try:
+        own_id = root.winfo_id()
+    except tk.TclError:
+        pass
+    own_title = root.title()
+    out = []
+    for w in windows:
+        if own_id is not None and w.get("id") == own_id:
+            continue
+        if (w.get("name") or "") == own_title:
+            continue
+        out.append(w)
+    return out
+
 # =========================
 # App Setup
 # =========================
@@ -522,6 +548,7 @@ class SingleTab(ttk.Frame):
         self._more_button = None
         self._active_menu = None
         self._ui_disabled = False  # True while a launched app (IDLE/viewer) runs
+        self._saved_cursors = {}  # per-widget cursors while disabled (wait pointer)
 
         # Root container: the main panel
         split_root = ttk.Frame(self)
@@ -595,11 +622,29 @@ class SingleTab(ttk.Frame):
         the CheerpX runtime (the explorer was observed to stay mapped and
         interactive over IDLE), and the re-map on return flickers. Disabling
         in-process is pure Tk widget state — no X traffic — and re-enabling is
-        a plain widget walk."""
+        a plain widget walk. Every widget also switches to the wait pointer
+        (hourglass) so the inert window reads as busy rather than broken; the
+        per-widget cursors are saved on disable and restored on re-enable."""
         self._ui_disabled = not enabled
         self.file_list._enabled = enabled
         for w in _walk_widgets(root):
             _set_widget_enabled(w, enabled)
+            self._set_widget_cursor(w, enabled)
+
+    def _set_widget_cursor(self, widget, enabled):
+        """Wait-pointer (hourglass) on every widget while a launched app holds
+        the desktop; restores the saved cursor when re-enabling. Widgets
+        created while disabled (toolbar rebuilds) are not in the save map and
+        keep their own cursor."""
+        try:
+            if enabled:
+                if widget in self._saved_cursors:
+                    widget.config(cursor=self._saved_cursors.pop(widget))
+            else:
+                self._saved_cursors[widget] = widget.cget("cursor")
+                widget.config(cursor="watch")
+        except tk.TclError:
+            pass
 
     # -------------------------
     # Selection-mode toolbar
@@ -653,7 +698,7 @@ class SingleTab(ttk.Frame):
             # re-enable buttons while a launched app holds the desktop.
             for w in self.toolbar.winfo_children():
                 if w.winfo_class() == "Button":
-                    w.config(state="disabled")
+                    w.config(state="disabled", cursor="watch")
 
     def clear_selection(self):
         self.file_list.selection_set()
@@ -1086,12 +1131,14 @@ class SingleTab(ttk.Frame):
         """True while the viewer's window is present in the WM's client list.
         The viewer sets class 'FileViewer' and a '<name> — Viewer' title. The
         list is read in-process from Openbox's EWMH _NET_CLIENT_LIST via xprop
-        (_wm_client_windows — no per-poll interpreter spawn). On failure,
-        assume still open so a transient error never kills it prematurely."""
+        (_wm_client_windows — no per-poll interpreter spawn). The explorer's
+        own window is excluded (it stays visible, disabled, while the viewer
+        runs). On failure, assume still open so a transient error never kills
+        it prematurely."""
         windows = _wm_client_windows()
         if windows is None:
             return True
-        for w in windows:
+        for w in _other_windows(windows):
             if w.get("class") == "FileViewer":
                 return True
             name = w.get("name") or ""
@@ -1190,12 +1237,17 @@ class SingleTab(ttk.Frame):
         xprop — _wm_client_windows, no per-poll interpreter spawn). IDLE
         windows report class 'Toplevel' or a 'Python ... Shell' title, or
         contain the opened file's name; a program window (e.g. the snake
-        game's plain Tk root, titled 'tk') does not match. On failure, assume
-        still open so a transient error never kills IDLE prematurely."""
+        game's plain Tk root, titled 'tk') does not match. The explorer's own
+        window is excluded — its title "Python File Manager" would otherwise
+        match the 'Python' rule and, since the explorer no longer withdraws
+        (it disables its UI instead), the watcher would never see IDLE quit
+        and the file manager would stay disabled forever (2026-08-26 fix).
+        On failure, assume still open so a transient error never kills IDLE
+        prematurely."""
         windows = _wm_client_windows()
         if windows is None:
             return True
-        for w in windows:
+        for w in _other_windows(windows):
             name = w.get("name") or ""
             cls = w.get("class") or ""
             if cls == "Toplevel" or "Python" in name:

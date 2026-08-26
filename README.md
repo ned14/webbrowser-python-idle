@@ -35,16 +35,49 @@ works but it's SLOW.
 The project website **is the VM**: the latest `main` build runs entirely in your
 browser at
 [**https://ned14.github.io/webbrowser-python-idle/alpine.html**](https://ned14.github.io/webbrowser-python-idle/alpine.html)
-— test-drive it there before running it yourself. The first load streams the
-guest image (~140 MB, takes about sixty seconds; later visits reuse the browser cache,
-takes less than twenty seconds) and needs a
-standards-compliant browser with SharedArrayBuffer — GitHub Pages cannot set the
-COOP/COEP headers WebVM requires, so the site injects them via a service worker.
+— test-drive it there before running it yourself. The first load takes about sixty
+seconds to boot; later visits reuse the browser cache, then boot takes less than
+twenty seconds. This poor performance is due to Github Pages not honouring HTTP
+Range requests, so we split the ext2 image into 128 Kb chunks, and every page
+fault turns into a whole HTTP GET round trip.
 
-Note that due to latency between the guest image hosted by github and your web
-browser, app launch times particularly suffer -- when running on LAN, the VM is
-noticeably more snappy, even on a relatively limited CPU such as a
-Chromebook or a phone.
+When running on LAN, the VM is noticeably more snappy, even on a relatively
+limited CPU such as a Chromebook or a phone. The Docker image's HTTPS server
+uses HTTP/2 and therefore highly concurrent random i/o performs better than on
+HTTP/1 where pipelining is constrained.
+
+## FAQ
+
+**Why does upstream https://webvm.io/alpine.html load much faster than this project's GitHub Pages site?**
+
+The two sites stream the disk image completely differently:
+
+- **webvm.io uses CheerpX's `CloudDevice`** over one persistent `wss://`
+  connection (`wss://disks.webvm.io/alpine_20251007.ext2`): every block read is
+  a byte-range request pipelined over that single socket — one TLS handshake,
+  no per-request latency.
+- **GitHub Pages cannot do that.** Pages ignores HTTP `Range` headers and
+  cannot serve WebSockets, so the Pages workflow pre-splits the ext2 into
+  128 KiB `.txt` chunks and CheerpX's `GitHubDevice` fetches each block as a
+  *separate* HTTPS request. A desktop boot reads well over a thousand chunks,
+  so per-chunk CDN round-trip latency dominates the load time.
+
+**Is their image smaller?** No — it is literally the same file. webvm.io
+serves the stock `alpine_20251007.ext2` (1.5 GB, the copy in
+`reference_images/`), while this project's guest is far smaller (~163 MB).
+Image size barely matters either way: both runtimes fetch only the blocks the
+boot actually reads, never the whole file. The difference is pure transport,
+not bytes.
+
+**Why is the LAN deployment so much snappier?** Because this project's nginx
+honors HTTP `Range` requests (`diskImageType="bytes"`, `HttpBytesDevice`):
+each block is fetched over a keep-alive connection to a server on your LAN —
+milliseconds per block instead of a CDN round-trip.
+
+**Can the GitHub Pages site be made as fast?** Not on Pages itself. Options:
+host the image where HTTP Range (or a `wss://` Range proxy like Leaning's
+`disks.webvm.io`) is available, or run it on your LAN — which is this
+project's intended deployment anyway.
 
 ## Quick start (browser mode — no tailnet)
 

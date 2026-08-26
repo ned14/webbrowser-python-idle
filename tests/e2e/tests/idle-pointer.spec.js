@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { waitForDesktop, lightRatio, canvasHash } from '../lib/desktop.js';
+import { waitForDesktop, waitForLightDesktop, canvasHash } from '../lib/desktop.js';
 
 // Regression test (plans/display-bug.md §2.11): launching IDLE from the file
 // explorer must not freeze the pointer / wedge the IDLE window.
@@ -261,9 +261,7 @@ test('launching IDLE does not freeze the pointer or wedge the IDLE window', asyn
 	// canvas (Openbox's background is solid black; nothing else autostarts a
 	// full-screen light window).
 	await waitForDesktop(page);
-	await expect
-		.poll(() => lightRatio(page), { timeout: 120_000, intervals: [3000] })
-		.toBeGreaterThan(0.35);
+	await waitForLightDesktop(page);
 
 	// --- 2. Sanity: the pointer follows the mouse BEFORE IDLE is launched
 	// (the canvas hash must change when the mouse moves — the guest draws the

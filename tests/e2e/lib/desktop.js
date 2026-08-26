@@ -60,6 +60,17 @@ export async function lightRatio(page) {
 	});
 }
 
+// The file explorer's light window must fill the canvas — the desktop is not
+// a bare black Openbox root. Budget is 240 s, matching waitForDesktop: on a
+// loaded CI runner the X session + explorer can map well after the canvas
+// first shows pixels (the 120 s windows used historically failed exactly
+// there — X up at 2 % light, explorer still booting, run aborted).
+export async function waitForLightDesktop(page, threshold = 0.35) {
+	return expect
+		.poll(() => lightRatio(page), { timeout: 240_000, intervals: [3000] })
+		.toBeGreaterThan(threshold);
+}
+
 // Hash of the display canvas downscaled to 256x256 (all pixels sampled, so
 // even the guest-drawn mouse pointer's few pixels change the hash). Used to
 // detect that the canvas KEEPS changing while the mouse moves — a frozen
