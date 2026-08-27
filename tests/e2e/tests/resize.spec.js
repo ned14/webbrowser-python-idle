@@ -1,5 +1,5 @@
 import { expect, test } from '../lib/browser.js';
-import { waitForDesktop, waitForLightDesktop, canvasHash } from '../lib/desktop.js';
+import { waitForDesktop, waitForLightDesktop, lightRatio, canvasHash } from '../lib/desktop.js';
 
 // Page-resize regression test: after the BROWSER window is resized the
 // screen must keep rendering CORRECTLY and the VM must NOT hang.
