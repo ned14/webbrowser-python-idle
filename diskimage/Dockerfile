@@ -26,6 +26,14 @@ RUN apk add --no-cache gcc musl-dev
 COPY faccessat-fix.c /tmp/faccessat-fix.c
 RUN gcc -O2 -shared -fPIC -o /tmp/faccessat-fix.so /tmp/faccessat-fix.c
 
+# xsendkeys — the XTEST backend of the paste lane (paste-typer.sh). Built
+# here so no compiler ships in the final image; links libXtst + libX11 only
+# (deliberately NOT xdotool/libxdo — banned, AGENTS.md).
+FROM docker.io/i386/alpine:3.24 AS xsendkeys-build
+RUN apk add --no-cache gcc musl-dev libxtst-dev
+COPY xsendkeys.c /tmp/xsendkeys.c
+RUN gcc -O2 -o /tmp/xsendkeys /tmp/xsendkeys.c -lXtst -lX11
+
 FROM docker.io/i386/alpine:3.24
 
 ARG STORAGE_BACKEND=browser
@@ -56,6 +64,8 @@ EOF
 # would otherwise scrub it — the exec'd openrc-run then crashes on
 # faccessat(-1); diagnosed 2026-08-20). See diskimage/faccessat-fix.c.
 COPY --from=shimbuild /tmp/faccessat-fix.so /usr/local/lib/faccessat-fix.so
+# Paste lane XTEST backend (see paste-typer.sh; xsendkeys-build stage above).
+COPY --from=xsendkeys-build /tmp/xsendkeys /usr/local/bin/xsendkeys
 # Desktop + tooling. python3-tkinter and the idlelib extraction come from
 # community; everything else from main. xvfb is installed for the
 # in-guest GUI test run (tests/rootfs/smoke.sh runs the file-explorer test
@@ -68,7 +78,13 @@ COPY --from=shimbuild /tmp/faccessat-fix.so /usr/local/lib/faccessat-fix.so
 # tcl/tk 8.6.17-r1, xorg-server/xvfb 21.1.24-r0, openbox 3.6.1-r8,
 # git 2.54.0-r0, openssh-client-default 10.3_p1-r0, busybox-extras
 # 1.37.0-r31, dbus 1.16.2-r2, eudev 3.2.14-r6, font-dejavu 2.37-r6,
-# xterm 410-r0, py3-pip 26.1.2-r0.
+# xterm 410-r0, py3-pip 26.1.2-r0, libxtst 1.2.5-r0.
+# The paste lane (paste-typer.sh + xsendkeys): the PAGE cannot inject X
+# keys under CheerpX (the runtime's X key path is value-driven; synthetic
+# events yield zero EV_KEY), so the panel sends a CXCLIP frame over the
+# console tty and the shell typer drives the XTEST extension through
+# xsendkeys (XTestFakeKeyEvent + XSync per command). xdotool is BANNED
+# (breaks the image — AGENTS.md).
 RUN apk add --no-cache \
 	alpine-base \
 	udev-init-scripts \
@@ -84,6 +100,9 @@ RUN apk add --no-cache \
 	openbox \
 	xprop \
 	xsetroot \
+	# XTEST client library, runtime dependency of the paste-lane backend
+	# /usr/local/bin/xsendkeys (NOT xdotool — banned, AGENTS.md).
+	libxtst \
 	font-dejavu \
 	python3 \
 	python3-tkinter \
@@ -300,7 +319,10 @@ COPY rootfs/usr/local/bin/idle3.14-launcher /usr/local/bin/idle3.14-launcher
 # Per-boot loopback verdict for the IDLE launcher (see idle-loopback-cache):
 # computed once at desktop.start, consulted on every IDLE launch.
 COPY rootfs/usr/local/bin/idle-loopback-cache /usr/local/bin/idle-loopback-cache
-RUN chmod +x /usr/local/bin/idle3.14-launcher /usr/local/bin/idle-loopback-cache
+# Paste typer (the paste lane): types CXCLIP frames into the focused X
+# window via xsendkeys (XTEST — xdotool is BANNED, AGENTS.md).
+COPY rootfs/usr/local/bin/paste-typer.sh /usr/local/bin/paste-typer.sh
+RUN chmod +x /usr/local/bin/idle3.14-launcher /usr/local/bin/idle-loopback-cache /usr/local/bin/paste-typer.sh
 # LD_PRELOAD bootstrap for the openrc boot chain (inittab sysinit/boot/
 # default lines run through this wrapper — busybox init cannot set env)
 COPY rootfs/usr/local/sbin/rc-preload /usr/local/sbin/rc-preload

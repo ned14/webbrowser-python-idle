@@ -6,8 +6,9 @@ for what CI cannot reach.
 
 ```
 tests/
-├─ unit/            pytest (sync agent logic + transport, template rendering,
-│                    script hygiene) — seconds, no network, no Docker guest
+├─ unit/            pytest (sync agent logic + transport, paste-typer logic,
+│                    template rendering, script hygiene) — seconds, no
+│                    network, no Docker guest
 ├─ rootfs/          smoke tests against the built guest image (docker run)
 ├─ server/          integration against a booted stack (headers, ext2 ranges,
 │                    WebDAV round-trip, headscale join test)

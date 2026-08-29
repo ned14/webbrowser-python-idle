@@ -100,5 +100,16 @@ echo "    docker compose --profile tailnet up -d — the URL hash, syncrc and ga
 echo "    relays follow the same env vars."
 
 echo ""
+echo "[9] Paste from the device (manual, plans/clipboard-paste.md)"
+echo "  * Open the sidebar Clipboard panel; type a few lines (ASCII) and click"
+echo "    Paste — the text must appear in the FOCUSED guest window (xterm or"
+echo "    the file explorer's Search box) as if typed by hand."
+echo "  * Paste 'café — 日本語' — must be refused with 'cannot be typed as"
+echo "    keys: char U+00E9 …' and nothing sent."
+echo "  * Type 400+ chars — the panel must show the '~4s to type' warning."
+echo "  * Open file… / drag a .txt onto the box — content loads and pastes."
+echo "  * In-VM Ctrl+C / Ctrl+V inside IDLE must still work natively."
+
+echo ""
 echo "== Acceptance checks listed. Visual items (desktop renders, IDLE usable,"
 echo "   canvas resize) require a human in the browser. =="

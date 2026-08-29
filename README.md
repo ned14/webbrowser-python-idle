@@ -20,15 +20,10 @@ file manager in fifteen to twenty seconds. IDLE takes about three to five
 seconds to launch, after that editing Python and running its debugger has
 very reasonable performance.
 
-The only really annoying thing missing is copy & paste integration, and as the
-CheerpX runtime doesn't implement `/dev/clipboard`, the best we can do is allow
-'paste as if typed by keyboard'.
-
-Todo items:
-
-- Implement paste as if typed by keyboard.
-- After launching and closing IDLE a few times CPU seems to peg to 100%. It still
-works but it's SLOW.
+Copy & paste with the host works through the sidebar **Clipboard** panel only
+("paste as if typed by keyboard" — the CheerpX runtime implements no
+`/dev/clipboard`): text is typed into the focused guest window as if you had
+typed it by hand. See [Paste from the device](#paste-from-the-device).
 
 ## Try it **LIVE**
 
@@ -39,7 +34,7 @@ browser at
 seconds to boot; later visits reuse the browser cache, then boot takes less than
 twenty seconds. This poor performance is due to Github Pages not honouring HTTP
 Range requests, so we split the ext2 image into 128 Kb chunks, and every page
-fault turns into a whole HTTP GET round trip.
+fault turns into a whole individual HTTPS GET round trip.
 
 When running on LAN, the VM is noticeably more snappy, even on a relatively
 limited CPU such as a Chromebook or a phone. The Docker image's HTTPS server
@@ -78,6 +73,24 @@ milliseconds per block instead of a CDN round-trip.
 host the image where HTTP Range (or a `wss://` Range proxy like Leaning's
 `disks.webvm.io`) is available, or run it on your LAN — which is this
 project's intended deployment anyway.
+
+**How do I paste content from outside into the VM?** Host → guest text goes
+through the sidebar's **Clipboard** panel (clipboard
+icon). Type or browser-paste (Ctrl+V) text into the box, click **Paste**, and
+it is typed into the **focused guest window** (IDLE, xterm, the file
+explorer's Search box, …) as if you had typed it by hand — the guest
+`paste-typer.sh` drives the XTEST extension via `xsendkeys`
+(XTestFakeKeyEvent), the same key events a human produces.
+
+- **Files:** use the **Open file…** link or drag-and-drop a file onto the box —
+  its text content is loaded and pasted exactly like typed text.
+- **ASCII only:** the paste is literal keystrokes, so only printable ASCII
+  (plus Return/Tab/Backspace) can be typed; anything else (é, “smart quotes”,
+  日本語, emoji, control chars) is refused with a diagnostic naming the
+  offending character — before anything is sent.
+- **Speed warning:** typing is character-by-character (~100 chars/s), so the
+  panel shows a live estimate ("1,234 chars — ~12s to type") once the content
+  is long, and refuses above 10,000 characters.
 
 ## Quick start (browser mode — no tailnet)
 

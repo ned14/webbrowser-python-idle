@@ -8,42 +8,33 @@ version-dependence checklist — verify before pinning).
 
 ## Clipboard bridging between the browser and the guest (2026-08-13)
 
-**Status:** not implemented. Today there is **no** copy/paste path between the
-host browser and the guest desktop, nor any host→guest paste.
+**Status: host→guest paste IMPLEMENTED (2026-08-28) — see
+`plans/clipboard-paste.md`.** guest→host copy is still open.
 
-**Current behavior (verified by tracing the codebase):**
-- `webvm/src/lib/WebVM.svelte` renders a CheerpX KMS `<canvas id="display">`
-  with **no** `paste`/`onpaste` handler; the only `navigator.clipboard` use is
-  `webvm/src/lib/network.js` (copies the Tailscale IP for the sidebar button),
-  unrelated to the VM.
-- The self-hosted CheerpX runtime (`webvm/cheerpx/`, pinned 1.3.7,
-  `cxbridge.js`/`cx.esm.js`) has **no** clipboard/paste handling and exposes no
-  `/dev/clipboard` device.
-- The guest image (`diskimage/Dockerfile`) installs **no** `xclip`/`xsel`/
-  `xdotool`; the CheerpX `mounts` config has no clipboard device.
+**Shipped design (what was built, in one paragraph):** the sidebar Clipboard
+panel sends the text as a `CXCLIP <len> <base64>` frame over the console tty;
+the guest `paste-typer.sh`
+(`diskimage/rootfs/usr/local/bin/paste-typer.sh`, launched by
+`desktop.start`) types it into the X-input-focus window via the **XTEST
+extension directly** (`XTestFakeKeyEvent` through the tiny `xsendkeys`
+backend, compiled in the Dockerfile `xsendkeys-build` stage) and
+answers `CXACK <len>`. The page refuses anything that cannot be typed out as
+keys (non-ASCII, control chars) with a diagnostic, and the panel supports
+Open file… / drag-and-drop plus a length/typing-time warning. **xdotool was
+explicitly rejected and is BANNED** (it breaks this image completely —
+AGENTS.md): the XTEST calls are made directly, and the one real gotcha found
+during validation is that the X server drops every FakeInput after the first
+unless the client `XSync`s once per character.
 
-Result: host→guest Ctrl+V does nothing (the canvas isn't editable and the
-runtime doesn't capture paste); guest→host copy doesn't reach the browser. Only
-**guest-internal** X11 selections work (Tk/xterm use the X PRIMARY selection),
-which never reaches the browser.
+**Why the page itself cannot inject X keys (verified against CheerpX 1.3.8):**
+the runtime's X key path is driven by the capture textarea's VALUE — only
+real keystrokes produce EV_KEY, synthetic events yield zero. A guest-side X
+selection owner (xsel `--input`) traps the CheerpX core. The console tty
+input channel (V1) works and XTEST fake input works cleanly when the target
+window holds the X input focus.
 
-**Proposed design (host→guest paste only, minimal scope):**
-1. Host: add a `paste` listener on the `#display` canvas
-   (`webvm/src/lib/WebVM.svelte`), read `navigator.clipboard.readText()`.
-2. Guest: install `xdotool` (`diskimage/Dockerfile` apk add) and ship a tiny
-   helper the host invokes (via the CheerpX `WebDevice`/`DataDevice` or the
-   console path) to run `xdotool type --delay 1 "<text>"` on the focused X
-   window — making paste work into IDLE, xterm, the file explorer, etc.
-3. Caveats: keyboard layout / special chars (quotes, newlines) must be escaped
-   for `xdotool type`; only targets the currently-focused window; needs the
-   display canvas to actually hold focus for the paste event.
-
-**Not covered (higher effort):** guest→host copy. That needs an X11 selection
-manager + a bridge to the browser clipboard (e.g., read the X PRIMARY/CLIPBOARD
+**Still open (higher effort): guest→host copy.** That needs an X11 selection
+manager + a bridge to the browser clipboard (read the X PRIMARY/CLIPBOARD
 selection and call `navigator.clipboard.writeText()`), which is a larger
-feature.
-
-**Verification before building:** confirm CheerpX 1.3.7 exposes any
-clipboard/input API (it exposes none in this runtime's glue today), and confirm
-`xdotool` works under the patched X stack (see `plans/display-bug.md`). Update
-the plan's §12/21 checklist if any version-dependent claim changes.
+feature; the current design deliberately never touches the host clipboard
+API in either direction.

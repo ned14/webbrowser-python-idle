@@ -8,6 +8,7 @@
 	import { networkInterface, startLogin } from '$lib/network.js'
 	import { cpuActivity, diskActivity, cpuPercentage, diskLatency } from '$lib/activities.js'
 	import { introMessage } from '$lib/messages.js'
+	import { pasteStatus } from '$lib/clipboard.js'
 
 	export let configObj = null;
 	export let processCallback = null;
@@ -306,6 +307,7 @@
 		}
 	}
 	var __bootTextDecoder = null;
+	var __pasteTextDecoder = null;
 	function writeData(buf, vt)
 	{
 		if(vt != 1)
@@ -323,6 +325,12 @@
 				__bootTextDecoder = new TextDecoder();
 			cxBootConsoleTail = (cxBootConsoleTail + __bootTextDecoder.decode(buf)).slice(-4096);
 		}
+		// The paste typer's CXACK/CXFAIL answers ride the console stream;
+		// scan them off (stream:true so multi-byte UTF-8 split across
+		// chunks stays intact — the frames themselves are ASCII).
+		if(__pasteTextDecoder == null)
+			__pasteTextDecoder = new TextDecoder("utf-8", {fatal:false});
+		scanPasteAck(__pasteTextDecoder.decode(buf, {stream:true}));
 		term.write(new Uint8Array(buf));
 	}
 	function readData(str)
@@ -331,6 +339,128 @@
 			return;
 		for(var i=0;i<str.length;i++)
 			cxReadFunc(str.charCodeAt(i));
+	}
+	// ------------------------------------------------------------------
+	// Paste (sidebar Clipboard panel). The text is sent to the guest as a
+	// `CXCLIP <len> <base64>` frame over the console input channel; the
+	// guest paste-typer (/usr/local/bin/paste-typer.py) types it into the
+	// X-input-focus window via xdotool (XTEST fake input) — literally the
+	// same key events as if the user had typed the text by hand — and
+	// answers `CXACK <len>` on the console, which releases the single
+	// in-flight throttle. Because it is real keystroke input, only text
+	// that CAN be typed is accepted: printable ASCII plus \n \t \b;
+	// anything else (control characters, all non-ASCII — é, “smart
+	// quotes”, 日本語, emoji) is REFUSED with a diagnostic naming the
+	// offending character, both here and in the typer.
+	// ------------------------------------------------------------------
+	var PASTE_MAX_TEXT = 10000;
+	var pasteInFlight = false;
+	var pasteTimeout = null;
+	var pasteAckBuf = "";
+	function pasteUntypableReason(text)
+	{
+		for(var i = 0; i < text.length; i++)
+		{
+			var code = text.codePointAt(i);
+			if(code >= 0x20 && code <= 0x7E)
+				continue;
+			var ch = text[i];
+			if(ch === "\n" || ch === "\t" || ch === "\b")
+				continue;
+			return "char U+" + code.toString(16).toUpperCase() +
+				" (" + JSON.stringify(ch) + ") at index " + i;
+		}
+		return null;
+	}
+	// xdotool types at CX_TYPE_DELAY ms per char; the ack timeout scales
+	// with the text length (a 10k-char paste takes a while to type).
+	function pasteAckTimeoutMs(len)
+	{
+		return 5000 + len * 20;
+	}
+	function sendToGuest(str)
+	{
+		for(var i=0;i<str.length;i++)
+			cxReadFunc(str.charCodeAt(i));
+	}
+	function encodePasteFrame(text)
+	{
+		var bytes = new TextEncoder().encode(text);
+		// btoa() takes a string; chunked so a large frame cannot blow the
+		// call stack via Function.prototype.apply argument limits.
+		var bin = "";
+		for(var i = 0; i < bytes.length; i += 8192)
+			bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+		return "CXCLIP " + bytes.length + " " + btoa(bin) + "\n";
+	}
+	function releasePasteThrottle(acked, len)
+	{
+		pasteInFlight = false;
+		if(pasteTimeout)
+		{
+			clearTimeout(pasteTimeout);
+			pasteTimeout = null;
+		}
+		if(acked)
+			pasteStatus.set("Pasted into the VM (" + len + " chars, typed as keys)");
+		else if(acked === false)
+			pasteStatus.set("Paste failed in the VM — see the console for the reason");
+		else
+			pasteStatus.set("");
+	}
+	function scanPasteAck(text)
+	{
+		// The guest typer answers CXACK/CXFAIL on the console; release the
+		// in-flight throttle when they arrive (lines may span chunks, so
+		// reassemble; only CX-prefixed fragments are held back).
+		pasteAckBuf += text;
+		while(true)
+		{
+			var nl = pasteAckBuf.indexOf("\n");
+			if(nl < 0)
+				break;
+			var line = pasteAckBuf.slice(0, nl);
+			pasteAckBuf = pasteAckBuf.slice(nl + 1);
+			if(line.indexOf("CXACK ") === 0)
+			{
+				var n = parseInt(line.slice(6), 10);
+				releasePasteThrottle(true, isNaN(n) ? 0 : n);
+			}
+			else if(line.indexOf("CXFAIL") === 0)
+				releasePasteThrottle(false);
+		}
+		if(pasteAckBuf.length > 64)
+			pasteAckBuf = pasteAckBuf.slice(-64);
+	}
+	function sendPasteText(text)
+	{
+		if(pasteInFlight || text == null || text === "")
+			return;
+		if(text.length > PASTE_MAX_TEXT)
+		{
+			pasteStatus.set("Not pasted — larger than " + PASTE_MAX_TEXT + " characters");
+			return;
+		}
+		var bad = pasteUntypableReason(text);
+		if(bad)
+		{
+			console.warn("clipboard paste refused: cannot be typed as keys: " + bad);
+			pasteStatus.set("Not pasted — cannot be typed as keys: " + bad);
+			return;
+		}
+		if(cxReadFunc == null)
+		{
+			pasteStatus.set("VM not ready — paste again once booted");
+			return;
+		}
+		pasteInFlight = true;
+		pasteStatus.set("Pasting into the VM…");
+		pasteTimeout = setTimeout(releasePasteThrottle, pasteAckTimeoutMs(text.length));
+		sendToGuest(encodePasteFrame(text));
+	}
+	function handleSidebarPaste(e)
+	{
+		sendPasteText(e.detail && e.detail.text || "");
 	}
 	function printMessage(msg)
 	{
@@ -778,7 +908,7 @@
 
 <main class="relative w-full h-full">
 	<div class="absolute top-0 bottom-0 left-0 right-0">
-		<SideBar on:connect={handleConnect} on:reset={handleReset} on:sidebarPinChange={handleSidebarPinChange}>
+		<SideBar on:connect={handleConnect} on:reset={handleReset} on:sidebarPinChange={handleSidebarPinChange} on:paste={handleSidebarPaste}>
 			<slot></slot>
 		</SideBar>
 		{#if configObj.needsDisplay}

@@ -271,6 +271,91 @@ EOF
 	stop_xvfb "$XPID3"
 '
 
+# Paste typer delivery (the "text definitely appears in a text entry box"
+# check): a CXCLIP frame piped to paste-typer.sh must type the text into a
+# FOCUSED Tk Entry via the XTEST extension (xsendkeys — the exact
+# production lane, no xdotool) and ack it. The entry's text is read back
+# in-guest. This is the deterministic rootfs analog of the E2E delivery
+# test: same script, same XTEST path, under Xvfb.
+docker run --rm --platform=linux/i386 --entrypoint /bin/sh "$IMAGE" -c '
+	set -e
+	command -v xsendkeys >/dev/null || { echo "FAIL: xsendkeys missing" >&2; exit 1; }
+	rm -f /tmp/.X96-lock /tmp/.X11-unix/X96
+	Xvfb ":96" -screen 0 1280x800x24 -nolisten tcp >/tmp/xvfb-96.log 2>&1 &
+	XVPID=$!
+	for _i in 1 2 3 4 5 6 7 8 9 10; do
+		[ -e /tmp/.X11-unix/X96 ] && break
+		kill -0 "$XVPID" 2>/dev/null || { echo "FAIL: Xvfb :96 failed to start" >&2; exit 1; }
+		sleep 1
+	done
+	kill -0 "$XVPID" 2>/dev/null || { echo "FAIL: Xvfb :96 died before ready" >&2; exit 1; }
+	export DISPLAY=:96
+	rm -f /tmp/paste-target.log /tmp/paste-typer.log
+	cat > /tmp/paste-target.py <<PYEOF
+import select
+import sys
+import tkinter as tk
+
+root = tk.Tk()
+root.title("paste-target")
+entry = tk.Entry(root, width=80)
+entry.pack(padx=10, pady=10)
+entry.focus_force()
+root.update()
+
+last_value = ""
+stable = 0
+while True:
+    root.update()
+    value = entry.get()
+    if value:
+        if value == last_value:
+            stable += 1
+            if stable >= 15:
+                print("PASTED:" + value, flush=True)
+                root.destroy()
+                sys.exit(0)
+        else:
+            last_value = value
+            stable = 0
+    else:
+        last_value = ""
+        stable = 0
+    select.select([], [], [], 0.05)
+PYEOF
+	python3 /tmp/paste-target.py >/tmp/paste-target.log 2>&1 &
+	TKPID=$!
+	sleep 3
+	printf "CXCLIP 13 aGVsbG8sIHdvcmxkIQ==\n" | \
+		timeout 60 /usr/local/bin/paste-typer.sh \
+		>/tmp/paste-typer.log 2>&1 || true
+	FOUND=""
+	for _i in 1 2 3 4 5 6 7 8 9 10; do
+		if grep -q "PASTED:" /tmp/paste-target.log 2>/dev/null; then
+			FOUND=1
+			break
+		fi
+		sleep 1
+	done
+	FAIL_MSG=""
+	if [ -z "$FOUND" ]; then
+		FAIL_MSG="paste never landed in the Tk Entry"
+	elif ! grep -q "PASTED:hello, world!" /tmp/paste-target.log; then
+		FAIL_MSG="pasted text mismatch ($(cat /tmp/paste-target.log))"
+	elif ! grep -q "CXACK 13" /tmp/paste-typer.log; then
+		FAIL_MSG="typer did not ack the paste frame ($(cat /tmp/paste-typer.log))"
+	fi
+	kill "$TKPID" 2>/dev/null || true
+	if [ -n "$FAIL_MSG" ]; then
+		echo "FAIL: $FAIL_MSG" >&2
+		cat /tmp/paste-target.log /tmp/paste-typer.log >&2 || true
+		kill "$XVPID" 2>/dev/null || true
+		exit 1
+	fi
+	echo "paste-typer typed into the focused Tk Entry and acked (PASTED:hello, world! / CXACK 13)"
+	kill "$XVPID" 2>/dev/null || true
+'
+
 if [ "$BACKEND" = "samba" ] || [ "$BACKEND" = "webdav" ]; then
 	docker run --rm --platform=linux/i386 --entrypoint /bin/sh -e BACKEND="$BACKEND" "$IMAGE" -c '
 		set -e

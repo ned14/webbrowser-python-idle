@@ -30,6 +30,7 @@ SHELL_SCRIPTS = [
     ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "keep-file-explorer.sh",
     ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "idle3.14-launcher",
     ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "idle-loopback-cache",
+    ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "paste-typer.sh",
     ROOT / "diskimage" / "scripts" / "wm-clients.sh",
     ROOT / "tests" / "rootfs" / "smoke.sh",
     ROOT / "tests" / "server" / "integration.sh",

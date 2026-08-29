@@ -27,6 +27,8 @@
 <div
 	class="relative p-3 text-center {$activity ? "text-amber-500 animate-pulse" : ""} {disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:bg-neutral-600 hover:text-gray-100"}"
 	style="animation-duration: 0.5s"
+	aria-label={info}
+	role="button"
 	on:mouseenter={handleMouseover}
 	on:click={handleClick}
 	title={disabled ? `${info} is not available${inert ? " in this deployment" : " until the control plane answers"}` : null}

@@ -9,11 +9,14 @@
 	import SmallButton from './SmallButton.svelte';
 	import { cpuActivity, diskActivity } from './activities.js';
 	import { networkReachable, networkingEnabled } from './network.js';
+	import { filePickerActive } from './clipboard.js';
+	import PasteTab from './PasteTab.svelte';
 	const icons = [
 		{ icon: 'fas fa-info-circle', info: 'Information', activity: null },
 		{ icon: 'fas fa-wifi', info: 'Networking', activity: null },
 		{ icon: 'fas fa-microchip', info: 'CPU', activity: cpuActivity },
 		{ icon: 'fas fa-compact-disc', info: 'Disk', activity: diskActivity },
+		{ icon: 'fas fa-clipboard', info: 'Clipboard', activity: null },
 		null,
 		{ icon: 'fab fa-github', info: 'GitHub', activity: null },
 	];
@@ -30,6 +33,13 @@
 	function hideInfo() {
 		// Never remove the sidebar if pinning is enabled
 		if(sideBarPinned)
+			return;
+		// Keep the panel open while a native file picker is (or may be) up:
+		// the picker flow makes the browser fire a synthetic mouseleave when
+		// it closes, which would otherwise close the panel mid-flow and drop
+		// the chosen file. The flag is cleared shortly after the picker's
+		// change/cancel events, so genuine hover-away still closes normally.
+		if($filePickerActive)
 			return;
 		// Prevents multiple timers and hides the info panel after 400ms unless interrupted.
 		clearTimeout(hideTimeout);
@@ -106,6 +116,8 @@
 			<CpuTab/>
 		{:else if activeInfo === 'Disk'}
 			<DiskTab on:reset/>
+		{:else if activeInfo === 'Clipboard'}
+			<PasteTab on:paste/>
 		{:else if activeInfo === 'GitHub'}
 			<GitHubTab/>
 		{:else}

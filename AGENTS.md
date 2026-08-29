@@ -63,6 +63,15 @@ workflow.
 - `diskImageType="bytes"` (HttpBytesDevice), same-origin ext2 with nginx
   byte-range serving. `CloudDevice`/`GitHubDevice` are reference-WebVM
   variants, not used here.
+- **NEVER add `xdotool` to the guest image — it breaks the image
+  completely. Absolute rule (2026-08-28).** Do not install it, do not let
+  any dependency pull it in (nothing that depends on `libxdo` either). The
+  paste lane types via the XTEST extension through `xsendkeys`
+  (`diskimage/xsendkeys.c` — a tiny C binary built in the Dockerfile
+  `xsendkeys-build` stage, XTestFakeKeyEvent + XSync per command) driven by
+  the shell daemon `diskimage/rootfs/usr/local/bin/paste-typer.sh`; if a
+  future change needs another X input path, pick something that is NOT
+  xdotool.
 
 ## Version-dependent claims
 
