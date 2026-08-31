@@ -95,6 +95,21 @@ async function listRowCount(page) {
 // rendering light bands, so a "rows == 0" assertion never fires (verified
 // 2026-08-30: the paste delivered — the filter ran, the status updated —
 // while the band count stayed constant).
+//
+// The scan is ADAPTIVE to the KMS canvas size, not a fixed row band: the
+// framebuffer is programmed once at session start from the browser window
+// and is NOT 1194x800 in every environment. The first CI run of this test
+// (2026-08-31, ac6a11c) failed 3/3 with "Expected: > 100 / Received: 0"
+// because the fixed band (y 758..795, tuned on a 1194x800 canvas where the
+// status text occupies rows 783..795 — zero margin at the band's bottom
+// edge) sat entirely BELOW a shorter canvas: with a 1280x720 browser
+// window the sizing math caps the width at 1280 before the min-height 768
+// clamp applies, yielding a 1280x752 backing store (reproduced locally;
+// every other E2E probe is resolution-independent — lightRatio, canvasHash
+// or rows < 300 — so only this spec caught it). The status label always
+// sits at the very bottom of the maximized explorer window = the canvas
+// bottom in every working geometry, so the LAST 60 rows of the actual
+// canvas are scanned, with the x range bounded by the canvas width.
 async function statusBarDark(page) {
 	return page.evaluate(() => {
 		const d = document.getElementById('display');
@@ -105,10 +120,13 @@ async function statusBarDark(page) {
 		const c = s.getContext('2d');
 		c.drawImage(d, 0, 0);
 		const data = c.getImageData(0, 0, s.width, s.height).data;
+		const w = s.width;
+		const h = s.height;
+		const xMax = Math.min(700, w - 20);
 		let dark = 0;
-		for (let y = 758; y < 796; y++) {
-			for (let x = 20; x < 700; x++) {
-				const i = (y * s.width + x) * 4;
+		for (let y = Math.max(0, h - 60); y < h; y++) {
+			for (let x = 20; x < xMax; x++) {
+				const i = (y * w + x) * 4;
 				if (data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100) dark++;
 			}
 		}
@@ -143,8 +161,15 @@ test('pasted text definitely appears in a text entry box in the VM (explorer Sea
 
 	// Baseline: the home folder lists entries, so the status bar reads
 	// "Loaded N items…" — a LONG text. After a filter that matches nothing,
-	// it reads "Loaded 0 items…" — much shorter.
-	const baselineStatus = await statusBarDark(page);
+	// it reads "Loaded 0 items…" — much shorter. POLL for the baseline: the
+	// light-ratio wait can resolve on the window's light background a beat
+	// before the status text paints (a loaded CI runner), and the status
+	// text must be there before any comparison makes sense.
+	let baselineStatus = -1;
+	for (let attempt = 0; attempt < 30 && baselineStatus <= 100; attempt++) {
+		baselineStatus = await statusBarDark(page);
+		if (baselineStatus <= 100) await page.waitForTimeout(1000);
+	}
 	expect(baselineStatus).toBeGreaterThan(100);
 
 	// The Search entry is focused IN-GUEST: the explorer claims X input
