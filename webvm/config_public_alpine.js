@@ -3,6 +3,11 @@
 // (set by build.sh / CI).
 export const storageBackend = __WEBVM_MODE__;
 export const imageBuild = __WEBVM_IMAGE_BUILD__;
+// The git commit this build was made from (and its date), injected from the
+// WEBVM_COMMIT / WEBVM_COMMIT_DATE env vars (set by make/CI). Empty on an
+// unversioned dev build (npm run dev / plain npm run build).
+export const commit = __WEBVM_COMMIT__;
+export const commitDate = __WEBVM_COMMIT_DATE__;
 
 // The root filesystem location (served by our nginx, same origin, byte ranges).
 // The ?v=<image-build> query is the CONTENT FINGERPRINT (the same value the

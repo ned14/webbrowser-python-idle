@@ -23,7 +23,7 @@ import urllib.parse
 
 def build_config(control_host, control_port, auth_key, backend, gateway_ip,
                  webdav_port, webdav_user, webdav_pass,
-                 webdav_base_path="/webdav/"):
+                 webdav_base_path="/webdav/", reset_deadline=None):
     config = {
         "controlUrl": f"https://{control_host}:{control_port}",
         "authKey": auth_key,
@@ -32,6 +32,13 @@ def build_config(control_host, control_port, auth_key, backend, gateway_ip,
         config["syncUrl"] = f"http://{gateway_ip}:{webdav_port}{webdav_base_path}"
         config["syncUser"] = webdav_user
         config["syncPass"] = webdav_pass
+    # Optional: epoch-seconds of the NEXT periodic storage reset (the sidebar
+    # countdown). Only rendered when the facility is enabled — the entrypoint
+    # passes it through from the deadline file written by
+    # scripts/reset-cycle.sh. Served to every visitor on purpose (a countdown
+    # is not a secret).
+    if reset_deadline is not None:
+        config["resetDeadline"] = reset_deadline
     return config
 
 
@@ -56,6 +63,22 @@ def render_csp(control_host, control_port):
         f"wss://{control_host}:{control_port} "
         f"https://{control_host}:443 wss://{control_host}:443\" always;\n"
     )
+
+
+def _positive_epoch(value):
+    """argparse type for --reset-deadline: a whole-number epoch > 0 (a
+    deadline of 0/negative/past-the-epoch is a config bug, not a feature)."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid reset deadline {value!r}: not an integer"
+        )
+    if n <= 0:
+        raise argparse.ArgumentTypeError(
+            f"invalid reset deadline {value!r}: must be > 0"
+        )
+    return n
 
 
 def main(argv=None):
@@ -87,6 +110,10 @@ def main(argv=None):
     parser.add_argument("--webdav-port", required=True)
     parser.add_argument("--webdav-user", required=True)
     parser.add_argument("--webdav-pass", required=True)
+    parser.add_argument("--reset-deadline", type=_positive_epoch, default=None,
+                        help="epoch-seconds of the NEXT periodic storage reset "
+                             "(sidebar countdown; the entrypoint passes the "
+                             "deadline file written by scripts/reset-cycle.sh)")
     args = parser.parse_args(argv)
 
     if args.render_csp:
@@ -104,6 +131,7 @@ def main(argv=None):
         args.backend, args.gateway_ip, args.webdav_port,
         args.webdav_user, args.webdav_pass,
         webdav_base_path=args.webdav_base_path or "/webdav/",
+        reset_deadline=args.reset_deadline,
     )
 
     if args.url:

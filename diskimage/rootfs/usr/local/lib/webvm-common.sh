@@ -90,6 +90,19 @@ GIT_HTTP_PORT="${GIT_HTTP_PORT:-8083}"
 # fallbacks (build.sh + the Dockerfile ARG defaults — pinned by the unit
 # test so they cannot drift).
 GATEWAY_TAILNET_IP_DEFAULT="${GATEWAY_TAILNET_IP_DEFAULT:-100.64.0.1}"
+# The periodic storage-reset countdown (OPTIONAL, opt-in): RESET_INTERVAL_HOURS
+# empty (default) = facility OFF. Setting it (e.g. 6) enables the sidebar
+# countdown AND is what scripts/reset-cycle.sh schedules with (the host-driven
+# cycle: stop the stack, wipe the webdav storage, pull the latest commit,
+# rebuild, restore). The NEXT deadline (epoch seconds) is written by
+# reset-cycle.sh into ${RESET_STATE_DIR}/deadline on the host; that directory
+# is bind-mounted into the server container (compose) at the container-side
+# path RESET_DEADLINE_FILE, where the entrypoint reads it and bakes it into
+# /webvm-config.js so the page can count down. Never a secret — it is served
+# to every visitor of a public instance on purpose.
+RESET_INTERVAL_HOURS="${RESET_INTERVAL_HOURS:-}"
+RESET_STATE_DIR="${RESET_STATE_DIR:-./state/reset}"
+RESET_DEADLINE_FILE="${RESET_DEADLINE_FILE:-/etc/webvm/reset/deadline}"
 # Secrets stay empty here — the per-mode fail-closed checks (webvm_require_secret)
 # enforce them where they are used.
 GATEWAY_TAILNET_IP="${GATEWAY_TAILNET_IP:-}"

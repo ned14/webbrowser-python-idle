@@ -29,6 +29,17 @@ runs:
       shell: bash
       run: echo "WEBVM_IMAGE_BUILD=$(cat \"${{ github.workspace }}/${{ inputs.image_build_file }}\")" >> "$GITHUB_ENV"
 
+    - name: Export git commit to the build
+      # The GitHub tab shows the commit this build was made from (SHA + date)
+      # so end users can identify the exact source tree in the repo. Git
+      # commands on the checked-out tree (not ${{ github.sha }}, which can be
+      # a merge SHA on pull_request runs) is the source of truth.
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        echo "WEBVM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+        echo "WEBVM_COMMIT_DATE=$(git show -s --format=%cs HEAD)" >> "$GITHUB_ENV"
+
     - name: npm ci (committed lockfile, pinned cheerpx 1.3.8)
       shell: bash
       working-directory: ${{ github.workspace }}/webvm

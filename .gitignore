@@ -9,6 +9,9 @@ certs/
 # WebDAV data directory
 data/
 
+# Reset-cycle state (next-reset deadline written by scripts/reset-cycle.sh)
+state/
+
 # Guest artifacts baked with real credentials / keys
 diskimage/rootfs/home/user/.ssh/
 diskimage/rootfs/root/.syncrc

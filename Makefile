@@ -31,7 +31,7 @@ DEPLOY_BACKEND := $(STORAGE_BACKEND)
 # ${WEBDAV_ROOT:-/data/webdav}). Resolved from .env for reset-webdav.
 DATA_DIR ?= $(_ENV_DATA_DIR)
 
-.PHONY: certs build check-image-backend check-image-build up up-tailnet down logs test test-unit test-frontend acceptance url clean reset-webdav
+.PHONY: certs build check-image-backend check-image-build up up-tailnet down logs test test-unit test-frontend acceptance url clean reset-webdav reset-cycle
 
 ## Generate the private CA + server cert (once; browser trust is a manual step)
 certs:
@@ -43,7 +43,7 @@ certs:
 build:
 	@echo "==> Building for backend '$(STORAGE_BACKEND)' (deployment mode: $(DEPLOY_BACKEND))"
 	./build.sh $(STORAGE_BACKEND)
-	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/$(WEBVM_IMAGE_DIR)/image-build.txt 2>/dev/null || echo dev) npm run build
+	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/$(WEBVM_IMAGE_DIR)/image-build.txt 2>/dev/null || echo dev) WEBVM_COMMIT=$$(git rev-parse HEAD 2>/dev/null || true) WEBVM_COMMIT_DATE=$$(git show -s --format=%cs HEAD 2>/dev/null || true) npm run build
 	docker compose build
 	@echo ""
 	@echo "==> Built image sizes:"
@@ -147,3 +147,10 @@ reset-webdav: down
 	@rm -rf "$(DATA_DIR)"/* "$(DATA_DIR)"/.[!.]* "$(DATA_DIR)"/..?* 2>/dev/null || true
 	@echo "==> WebDAV storage reset at $(DATA_DIR)"
 	docker compose --profile tailnet up -d
+
+## Run ONE periodic storage-reset cycle for a public instance (host cron):
+## stop the stack, wipe the webdav storage, pull the latest commit, rebuild,
+## record the next countdown deadline, and restore. OPT-IN: requires
+## RESET_INTERVAL_HOURS in .env. See scripts/reset-cycle.sh.
+reset-cycle:
+	./scripts/reset-cycle.sh

@@ -11,6 +11,7 @@
 	import { networkReachable, networkingEnabled } from './network.js';
 	import { filePickerActive } from './clipboard.js';
 	import PasteTab from './PasteTab.svelte';
+	import ResetCountdown from './ResetCountdown.svelte';
 	const icons = [
 		{ icon: 'fas fa-info-circle', info: 'Information', activity: null },
 		{ icon: 'fas fa-wifi', info: 'Networking', activity: null },
@@ -125,6 +126,7 @@
 		{/if}
 
 		<div class="mt-auto text-sm text-gray-300">
+			<ResetCountdown/>
 			<div class="pt-1 pb-1">
 				<a href="https://cheerpx.io/" target="_blank">
 					<span>Powered by CheerpX</span>

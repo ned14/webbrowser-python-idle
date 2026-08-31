@@ -27,6 +27,7 @@ SHELL_SCRIPTS = [
     ROOT / "scripts" / "fetch-cheerpx-runtime.sh",
     ROOT / "scripts" / "rebuild-tailscale-wasm.sh",
     ROOT / "scripts" / "precompress-static.sh",
+    ROOT / "scripts" / "reset-cycle.sh",
     ROOT / "server" / "entrypoint.sh",
     ROOT / "gateway" / "entrypoint.sh",
     ROOT / "diskimage" / "sync" / "sync-home.sh",
@@ -1083,3 +1084,125 @@ def test_webvm_supervise_helpers(tmp_path):
     assert lines[5] == "sleeper2=dead"
     assert lines[6] == "reader=hello-from-fifo"
     assert lines[7] == "reader-status=dead"
+
+
+# --------------------------------------------------------------------------
+# Periodic storage-reset countdown (scripts/reset-cycle.sh + renderer)
+# --------------------------------------------------------------------------
+
+RESET_CYCLE = ROOT / "scripts" / "reset-cycle.sh"
+
+
+def _run_reset_cycle(env, cwd=None):
+    return subprocess.run(
+        [str(RESET_CYCLE)], capture_output=True, text=True,
+        env={**os.environ, "WEBVM_COMMON": str(LIB), **env},
+        cwd=str(cwd) if cwd else None,
+    )
+
+
+def test_reset_cycle_defaults_are_off():
+    """The facility is OPT-IN: the shared lib defaults must leave
+    RESET_INTERVAL_HOURS empty (off) so a deployment that never sets it gets
+    no countdown and reset-cycle.sh refuses to run."""
+    assert _lib_var("RESET_INTERVAL_HOURS") == ""
+    assert _lib_var("RESET_STATE_DIR") == "./state/reset"
+    assert _lib_var("RESET_DEADLINE_FILE") == "/etc/webvm/reset/deadline"
+
+
+def test_reset_cycle_refuses_when_not_enabled(tmp_path):
+    """Without RESET_INTERVAL_HOURS the cycle must refuse to run (opt-in),
+    and a non-numeric / zero interval must fail closed — a wrong cadence must
+    never silently start wiping storage."""
+    res = _run_reset_cycle({"STORAGE_BACKEND": "webdav"}, cwd=tmp_path)
+    assert res.returncode == 1
+    assert "RESET_INTERVAL_HOURS" in res.stderr
+
+    res2 = _run_reset_cycle(
+        {"STORAGE_BACKEND": "webdav", "RESET_INTERVAL_HOURS": "soon"}, cwd=tmp_path)
+    assert res2.returncode == 1
+    assert "positive integer" in res2.stderr
+
+    res3 = _run_reset_cycle(
+        {"STORAGE_BACKEND": "webdav", "RESET_INTERVAL_HOURS": "0"}, cwd=tmp_path)
+    assert res3.returncode == 1
+    assert ">= 1" in res3.stderr
+
+
+def test_reset_cycle_dry_run_writes_deadline(tmp_path):
+    """The dry-run performs the deadline computation + write (the only pure,
+    testable part of the cycle) and lists the real steps without touching
+    docker/git/make. The deadline must be now + interval hours (within a
+    small clock skew), and it must be written to RESET_STATE_DIR/deadline —
+    the file the server entrypoint bakes into /webvm-config.js."""
+    state_dir = tmp_path / "state" / "reset"
+    env = {
+        "STORAGE_BACKEND": "webdav",
+        "RESET_INTERVAL_HOURS": "6",
+        "RESET_STATE_DIR": str(state_dir),
+        "RESET_CYCLE_DRY_RUN": "1",
+    }
+    before = int(time.time())
+    res = _run_reset_cycle(env, cwd=tmp_path)
+    after = int(time.time())
+    assert res.returncode == 0, res.stderr
+    assert "dry-run" in res.stdout
+    assert "stop the stack" in res.stdout
+    assert "git pull" in res.stdout
+    assert "make up-tailnet" in res.stdout
+
+    deadline = int((state_dir / "deadline").read_text().strip())
+    # now + 6h, within the subprocess' wall time
+    assert before + 6 * 3600 <= deadline <= after + 6 * 3600
+
+
+def test_reset_cycle_webdav_wipe_uses_data_dir(tmp_path):
+    """The wipe step must target DATA_DIR (the compose webdav mount), never
+    the state dir holding the deadline — the deadline must survive the wipe
+    and be served to the countdown after the storage is gone."""
+    text = RESET_CYCLE.read_text()
+    assert 'rm -rf "$DATA_DIR"' in text, "wipe must target DATA_DIR"
+    assert "STATE_DIR" in text
+    assert "$DATA_DIR" in text and "STATE_DIR" in text
+
+
+def test_render_config_reset_deadline():
+    """--reset-deadline bakes the epoch into the page config as resetDeadline
+    (the sidebar countdown's source); omitting it must NOT render the key."""
+    base = [
+        "python3", str(ROOT / "server" / "render-webvm-config.py"),
+        "--control-host", "127.0.0.1", "--control-port", "8443",
+        "--auth-key", "k", "--backend", "webdav",
+        "--gateway-ip", "100.64.0.1", "--webdav-port", "8082",
+        "--webdav-user", "u", "--webdav-pass", "p",
+        "--webdav-base-path", "/webdav/", "--alpine-page", "alpine.html",
+    ]
+    without = subprocess.run(base, capture_output=True, text=True, check=True)
+    assert "resetDeadline" not in without.stdout
+
+    with_deadline = subprocess.run(
+        base + ["--reset-deadline", "1750000000"],
+        capture_output=True, text=True, check=True,
+    )
+    assert '"resetDeadline": 1750000000' in with_deadline.stdout
+
+    # A deadline must be a whole epoch > 0: anything else is a config bug.
+    for bad in ("abc", "0", "-5", "1.5", "1e6"):
+        res = subprocess.run(
+            base + ["--reset-deadline", bad], capture_output=True, text=True,
+        )
+        assert res.returncode != 0, f"--reset-deadline {bad} must be rejected"
+
+
+def test_reset_deadline_key_lockstep():
+    """The resetDeadline key must agree across the renderer (server), the
+    entrypoint (server), the shared lib docs, and the frontend reader — a
+    rename on one side silently kills the countdown on the other."""
+    renderer = (ROOT / "server" / "render-webvm-config.py").read_text()
+    entrypoint = (ROOT / "server" / "entrypoint.sh").read_text()
+    frontend = (ROOT / "webvm" / "src" / "lib" / "resetCountdown.js").read_text()
+    assert '"resetDeadline"' in renderer
+    assert "--reset-deadline" in entrypoint
+    assert "resetDeadline" in frontend
+    assert "RESET_INTERVAL_HOURS" in (ROOT / ".env.example").read_text()
+    assert "RESET_INTERVAL_HOURS" in (ROOT / "compose.yaml").read_text()

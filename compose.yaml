@@ -40,6 +40,12 @@ x-server-env: &server-env
   HEADSCALE_PREAUTHKEY: ${HEADSCALE_PREAUTHKEY:-}
   GATEWAY_AUTHKEY: ${GATEWAY_AUTHKEY:-}
   GATEWAY_TAILNET_IP: ${GATEWAY_TAILNET_IP:-}
+  # Periodic storage-reset countdown (optional): RESET_INTERVAL_HOURS empty =
+  # off. scripts/reset-cycle.sh writes the next deadline (epoch seconds) into
+  # the host RESET_STATE_DIR, bind-mounted at RESET_DEADLINE_FILE below; the
+  # entrypoint bakes it into /webvm-config.js so the page shows the countdown.
+  RESET_INTERVAL_HOURS: ${RESET_INTERVAL_HOURS:-}
+  RESET_DEADLINE_FILE: ${RESET_DEADLINE_FILE:-/etc/webvm/reset/deadline}
 
 services:
   # nginx (site + control plane + DERP) + headscale (+ wsgidav in webdav mode)
@@ -89,6 +95,12 @@ services:
       # keeps GATEWAY_TAILNET_IP valid across container recreation.
       - headscale-data:/var/lib/headscale
       - ${DATA_DIR:-./data}:${WEBDAV_ROOT:-/data/webdav}
+      # Reset-cycle state (the deadline file scripts/reset-cycle.sh writes):
+      # a host bind OUTSIDE the webdav share, so it survives the storage wipe
+      # and container recreation (a volume or the DATA_DIR mount would be
+      # wiped with the storage). Docker creates the dir if missing; the
+      # entrypoint only reads it when RESET_INTERVAL_HOURS is set.
+      - ${RESET_STATE_DIR:-./state/reset}:/etc/webvm/reset
     networks:
       webvm-net:
         # The server's static compose-network IP — the ONLY address the

@@ -11,9 +11,14 @@ import { viteStaticCopy } from 'vite-plugin-static-copy';
 //   WEBVM_DISK_IMAGE  — (GitHub Pages build only) the chunked disk image
 //                       basename; when set, the alpine page uses the
 //                       "github" disk device (config_public_alpine_github.js)
+//   WEBVM_COMMIT      — git commit SHA this build was made from (shown in the
+//                       GitHub sidebar tab so end users can identify the build)
+//   WEBVM_COMMIT_DATE — date of that commit (YYYY-MM-DD)
 const webvmMode = process.env.WEBVM_MODE || 'browser';
 const webvmImageBuild = process.env.WEBVM_IMAGE_BUILD || 'dev';
 const webvmDiskImage = process.env.WEBVM_DISK_IMAGE || '';
+const webvmCommit = process.env.WEBVM_COMMIT || '';
+const webvmCommitDate = process.env.WEBVM_COMMIT_DATE || '';
 
 export default defineConfig({
 	resolve: {
@@ -31,7 +36,9 @@ export default defineConfig({
 	define: {
 		__WEBVM_MODE__: JSON.stringify(webvmMode),
 		__WEBVM_IMAGE_BUILD__: JSON.stringify(webvmImageBuild),
-		__WEBVM_DISK_IMAGE__: JSON.stringify(webvmDiskImage)
+		__WEBVM_DISK_IMAGE__: JSON.stringify(webvmDiskImage),
+		__WEBVM_COMMIT__: JSON.stringify(webvmCommit),
+		__WEBVM_COMMIT_DATE__: JSON.stringify(webvmCommitDate)
 	},
 	build: {
 		target: "es2022"

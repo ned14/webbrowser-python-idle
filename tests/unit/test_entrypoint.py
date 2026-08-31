@@ -51,7 +51,23 @@ STUBS = {
     # nginx: -t succeeds; the daemon form sleeps (the supervisor watches it)
     "nginx": "#!/bin/sh\ncase \"$1\" in\n\t-t) exit 0 ;;\n\t*) sleep 60 ;;\nesac\n",
     "wsgidav": "#!/bin/sh\nsleep 60\n",
-    "python3": "#!/bin/sh\necho 'window.__webvmConfig = {};'\n",
+    # Mirrors render-webvm-config.py's resetDeadline rendering: the stub
+    # echoes the deadline VALUE passed after --reset-deadline, so the tests
+    # can assert the entrypoint forwarded the deadline file's content.
+    "python3": """#!/bin/sh
+\tcase " $* " in
+\t\t*" --reset-deadline "*)
+\t\t\td=unknown
+\t\t\tprev=""
+\t\t\tfor a in "$@"; do
+\t\t\t\t[ "$prev" = "--reset-deadline" ] && d=$a
+\t\t\t\tprev=$a
+\t\t\tdone
+\t\t\techo "window.__webvmConfig = {\\"resetDeadline\\": $d};"
+\t\t\t;;
+\t\t*) echo 'window.__webvmConfig = {};' ;;
+\tesac
+""",
     "tailscaled": "#!/bin/sh\nsleep 60\n",
     "tailscale": "#!/bin/sh\nexit 0\n",
     "socat": "#!/bin/sh\nsleep 60\n",
@@ -444,6 +460,115 @@ def test_server_headscale_happy_path_starts_all_services(tmp_path):
             assert "FATAL" not in err, f"no fatal error expected: {err}"
     finally:
         hs_sock.close()
+
+
+# --------------------------------------------------------------------------
+# Periodic storage-reset countdown (resetDeadline baked into /webvm-config.js)
+# --------------------------------------------------------------------------
+
+def _run_server_happy(tmp_path, env_overrides=None, deadline=None):
+    """Start the webdav happy-path server entrypoint (headscale stub + socket,
+    wsgidav, nginx) with the given extra env and an optional deadline file at
+    /etc/webvm/reset/deadline; return (root, proc, baked-config text). The
+    caller must terminate `proc`."""
+    root = build_sandbox(tmp_path)
+    hs_sock = _bind_socket(root, "var/run/headscale/headscale.sock")
+    try:
+        (root / "usr" / "bin" / "headscale").write_text(textwrap.dedent("""\
+            #!/bin/sh
+            case "$1" in
+                serve) sleep 60 ;;
+                users)
+                    if [ "$2" = "create" ]; then exit 0; fi
+                    echo "ID | Name | Namespace"
+                    echo "1 | headscale | headscale" ;;
+                preauthkeys)
+                    echo "hskey-auth-test***"
+                    echo "hskey-auth-gateway***" ;;
+                *) exit 0 ;;
+            esac
+            """))
+        (root / "usr" / "bin" / "headscale").chmod(0o755)
+        if deadline is not None:
+            reset_dir = root / "etc" / "webvm" / "reset"
+            reset_dir.mkdir(exist_ok=True)
+            (reset_dir / "deadline").write_text(deadline)
+        env = {**SERVER_HAPPY_ENV, **(env_overrides or {})}
+        proc = _run_supervised("/usr/local/bin/entrypoint.sh", root, env)
+        try:
+            config = _wait_file(root, "etc/webvm/webvm-config.js", proc,
+                                "rendered baked config")
+            return root, proc, config.read_text()
+        except Exception:
+            _terminate(proc)
+            raise
+    finally:
+        hs_sock.close()
+
+
+def test_reset_countdown_bakes_deadline_when_enabled(tmp_path):
+    """RESET_INTERVAL_HOURS set + a deadline file present (written by
+    scripts/reset-cycle.sh): the entrypoint must forward the FILE'S CONTENT
+    (not a hardcoded value) to the renderer, which bakes it as resetDeadline —
+    the sidebar countdown's source."""
+    root, proc, config_text = _run_server_happy(
+        tmp_path,
+        env_overrides={"RESET_INTERVAL_HOURS": "6"},
+        deadline="1234567890",
+    )
+    try:
+        assert '"resetDeadline": 1234567890' in config_text, config_text
+    finally:
+        _terminate(proc)
+
+
+def test_reset_countdown_omitted_when_disabled(tmp_path):
+    """OPT-IN: with RESET_INTERVAL_HOURS unset the countdown is OFF — even
+    with a deadline file present, the baked config must carry no
+    resetDeadline."""
+    root, proc, config_text = _run_server_happy(tmp_path, deadline="1234567890")
+    try:
+        assert "resetDeadline" not in config_text, config_text
+        assert config_text.strip() == "window.__webvmConfig = {};"
+    finally:
+        _terminate(proc)
+
+
+def test_reset_countdown_invalid_deadline_warns_but_boots(tmp_path):
+    """A countdown is cosmetic, never a boot gate: garbage or missing deadline
+    content with the facility on must WARN and boot without the countdown, not
+    fail closed."""
+    root, proc, config_text = _run_server_happy(
+        tmp_path,
+        env_overrides={"RESET_INTERVAL_HOURS": "6"},
+        deadline="not-a-number",
+    )
+    try:
+        assert "resetDeadline" not in config_text, config_text
+        assert proc.poll() is None, "an invalid deadline must never stop the boot"
+    finally:
+        _terminate(proc)
+        _, err = proc.communicate()
+        assert "WARNING" in err, err
+        assert "reset deadline" in err, err
+
+
+def test_reset_countdown_missing_file_warns_but_boots(tmp_path):
+    """Facility on but no deadline file yet (first boot before reset-cycle.sh
+    has run): warn and boot without the countdown — a public instance must
+    not fail because its countdown file is not there yet."""
+    root, proc, config_text = _run_server_happy(
+        tmp_path,
+        env_overrides={"RESET_INTERVAL_HOURS": "6"},
+    )
+    try:
+        assert "resetDeadline" not in config_text, config_text
+        assert proc.poll() is None
+    finally:
+        _terminate(proc)
+        _, err = proc.communicate()
+        assert "WARNING" in err, err
+        assert "reset-cycle.sh" in err, err
 
 
 def test_gateway_relay_matrix(tmp_path):

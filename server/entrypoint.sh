@@ -91,6 +91,38 @@ fi
 # (never raw envsubst — credentials may contain quotes/backslashes/$). Never
 # render keys before they exist: bootstrap mode (and browser/none builds)
 # serve an empty config, so the page boots disconnected exactly as before.
+
+# --- Reset countdown (optional, opt-in) -------------------------------------
+# A public instance may reset itself on a fixed cadence (scripts/reset-cycle.sh
+# on a host cron: stop the stack, wipe the webdav storage, pull latest, rebuild,
+# restore). RESET_INTERVAL_HOURS is the switch (empty = off); the deadline file
+# (written by reset-cycle.sh into the host RESET_STATE_DIR, bind-mounted at
+# RESET_DEADLINE_FILE) records when the NEXT reset wipes the storage. Rendered
+# into the baked config as resetDeadline (epoch seconds) so the sidebar
+# countdown can show the time remaining. The countdown is NON-essential: a
+# missing/unreadable/invalid deadline only omits the countdown, never fails the
+# boot (this is a cosmetic facility for a public instance, not a security gate).
+RESET_DEADLINE_ARG=""
+if [ -n "${RESET_INTERVAL_HOURS:-}" ]; then
+	if [ -s "${RESET_DEADLINE_FILE:-}" ]; then
+		_reset_deadline=$(cat "$RESET_DEADLINE_FILE")
+		case "$_reset_deadline" in
+			''|*[!0-9]*)
+				echo "WARNING: reset deadline file $RESET_DEADLINE_FILE is not a positive integer; countdown omitted" >&2
+				;;
+			*)
+				if [ "$_reset_deadline" -gt 0 ]; then
+					RESET_DEADLINE_ARG="--reset-deadline $_reset_deadline"
+				else
+					echo "WARNING: reset deadline file $RESET_DEADLINE_FILE is not > 0; countdown omitted" >&2
+				fi
+				;;
+		esac
+	else
+		echo "WARNING: RESET_INTERVAL_HOURS is set but no deadline file at $RESET_DEADLINE_FILE; run scripts/reset-cycle.sh (or write the next reset's epoch-seconds there); countdown omitted" >&2
+	fi
+fi
+
 if [ "$need_headscale" = "1" ] && [ "$HEADSCALE_BOOTSTRAP" != "1" ]; then
 	python3 /etc/webvm/render-webvm-config.py \
 		--control-host "$CONTROL_HOST" --control-port "$CONTROL_PORT" \
@@ -98,6 +130,7 @@ if [ "$need_headscale" = "1" ] && [ "$HEADSCALE_BOOTSTRAP" != "1" ]; then
 		--gateway-ip "${GATEWAY_TAILNET_IP:-}" --webdav-port "$WEBDAV_PORT" \
 		--webdav-user "${WEBDAV_USER:-}" --webdav-pass "${WEBDAV_PASS:-}" \
 		--webdav-base-path "$WEBDAV_BASE_PATH" --alpine-page "$ALPINE_PAGE" \
+		$RESET_DEADLINE_ARG \
 		> /etc/webvm/webvm-config.js
 else
 	echo 'window.__webvmConfig = {};' > /etc/webvm/webvm-config.js
