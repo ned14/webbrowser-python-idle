@@ -11,6 +11,7 @@ exercises the exact production function.
 """
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -163,6 +164,39 @@ class TestNginx:
         assert "https://192.168.1.10:443 wss://192.168.1.10:443" in csp
         assert "wss://192.168.1.10 " not in csp
         assert "127.0.0.1" not in csp
+
+    def test_render_csp_cli_requires_only_host_port(self):
+        # The ENTRYPOINT invokes --render-csp with ONLY --control-host and
+        # --control-port — no deployment secrets exist yet at that point.
+        # Regression (2026-08-31): the deployment args used to be required
+        # at the PARSER level even for --render-csp, so the entrypoint's
+        # render exited 2, the `set -u` entrypoint ignored it and the `>`
+        # redirect left /etc/nginx/csp.conf EMPTY — the site silently
+        # served WITHOUT its Content-Security-Policy (caught by the server-
+        # integration CSP check once the paste E2E fix let the CI run reach
+        # that step).
+        run = subprocess.run(
+            ["python3", str(SERVER / "render-webvm-config.py"), "--render-csp",
+             "--control-host", "127.0.0.1", "--control-port", "8443"],
+            capture_output=True, text=True,
+        )
+        assert run.returncode == 0, run.stderr
+        assert 'add_header Content-Security-Policy "default-src' in run.stdout
+        assert "connect-src 'self' https://127.0.0.1:8443 wss://127.0.0.1:8443" in run.stdout
+
+    def test_config_render_still_requires_deployment_args(self):
+        # The config/--url paths must STILL fail closed on a missing
+        # deployment value (a missing secret must never silently render a
+        # broken baked config).
+        run = subprocess.run(
+            ["python3", str(SERVER / "render-webvm-config.py"),
+             "--control-host", "127.0.0.1", "--control-port", "8443"],
+            capture_output=True, text=True,
+        )
+        assert run.returncode == 2
+        assert "the following arguments are required" in run.stderr
+        assert "--auth-key" in run.stderr
+        assert "--backend" in run.stderr
 
     def test_webvm_config_location_no_store_and_corp(self, nginx):
         # The baked page config carries the preauth key + sync credentials;

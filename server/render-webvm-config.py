@@ -104,12 +104,21 @@ def main(argv=None):
                         help="desktop page route (REQUIRED for --url; pass scripts/lib/webvm-common.sh's ALPINE_PAGE)")
     parser.add_argument("--control-host", required=True)
     parser.add_argument("--control-port", required=True)
-    parser.add_argument("--auth-key", required=True)
-    parser.add_argument("--backend", required=True)
-    parser.add_argument("--gateway-ip", required=True)
-    parser.add_argument("--webdav-port", required=True)
-    parser.add_argument("--webdav-user", required=True)
-    parser.add_argument("--webdav-pass", required=True)
+    # Deployment values: required for the config/--url renderings, but NOT
+    # for --render-csp — the CSP header must render before any secret exists
+    # (the entrypoint calls --render-csp with ONLY host/port). required=True
+    # here used to make the entrypoint's render FAIL at parse_args, which the
+    # entrypoint's set -u (not -e) silently swallowed: > /etc/nginx/csp.conf
+    # truncated the file to EMPTY and the site served without a CSP header
+    # (the 2026-08-31 CI regression). The paths that need these values
+    # enforce them explicitly below (fail closed — a missing value must never
+    # silently render a broken config).
+    parser.add_argument("--auth-key", default=None)
+    parser.add_argument("--backend", default=None)
+    parser.add_argument("--gateway-ip", default=None)
+    parser.add_argument("--webdav-port", default=None)
+    parser.add_argument("--webdav-user", default=None)
+    parser.add_argument("--webdav-pass", default=None)
     parser.add_argument("--reset-deadline", type=_positive_epoch, default=None,
                         help="epoch-seconds of the NEXT periodic storage reset "
                              "(sidebar countdown; the entrypoint passes the "
@@ -119,6 +128,13 @@ def main(argv=None):
     if args.render_csp:
         sys.stdout.write(render_csp(args.control_host, args.control_port))
         return 0
+
+    missing = [f"--{name}" for name in (
+        "auth-key", "backend", "gateway-ip", "webdav-port", "webdav-user",
+        "webdav-pass",
+    ) if getattr(args, name.replace("-", "_")) is None]
+    if missing:
+        parser.error("the following arguments are required: " + ", ".join(missing))
 
     if args.backend == "webdav" and args.webdav_base_path is None:
         parser.error(

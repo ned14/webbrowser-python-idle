@@ -65,10 +65,17 @@ mkdir -p /etc/nginx /etc/headscale /etc/webvm /var/lib/headscale /var/run/headsc
 
 # CSP header: rendered by render-webvm-config.py (the single home of the CSP
 # text — the page's connect-src needs and the header cannot drift; there is
-# no csp.conf.template anymore).
+# no csp.conf.template anymore). Fail CLOSED: an empty csp.conf means the
+# site silently serves WITHOUT its Content-Security-Policy (the 2026-08-31
+# CI regression — the renderer's argparse used to demand deployment secrets
+# that don't exist yet here, the `set -u` entrypoint ignored the failure and
+# the `>` redirect left the file empty).
 python3 /etc/webvm/render-webvm-config.py --render-csp \
 	--control-host "$CONTROL_HOST" --control-port "$CONTROL_PORT" \
-	> /etc/nginx/csp.conf
+	> /etc/nginx/csp.conf || {
+		echo "FATAL: CSP header render failed — refusing to serve without a CSP" >&2
+		exit 1
+	}
 
 envsubst '$CONTROL_HOST $CONTROL_PORT $CONTROL_WSS_PORT $SITE_PORT $WEBVM_IMAGE_DIR $ALPINE_PAGE' \
 	< /etc/webvm/nginx.conf.template > /etc/nginx/nginx.conf
