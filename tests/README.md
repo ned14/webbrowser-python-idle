@@ -32,7 +32,13 @@ tests/
    (needs `HEADSCALE_PREAUTHKEY`/`GATEWAY_AUTHKEY` bootstrapped — see
    `make url` / the README bootstrap section)
 6. E2E (browser mode): `cd tests/e2e && npm ci && npx playwright install chromium`
-   then `E2E_SITE_URL=https://127.0.0.1:8081/alpine.html npx playwright test`
+   then `E2E_SITE_URL=https://127.0.0.1:8081/alpine.html npx playwright test`.
+   Requires **Node 18-22**: the pinned `@playwright/test` 1.48.0 deadlocks its
+   ESM loader on Node >= 24 (`playwright test` hangs forever with zero output —
+   `tests/e2e/package.json` engines + `tests/e2e/.npmrc` `engine-strict` refuse
+   to install on newer Node; the CI server job pins Node 22 for the same
+   reason). The 1.48.0 pin is deliberate: Chromium 130 is the last browser the
+   wasm tailscale client's netmap works on (see `tests/e2e/playwright.config.js`).
 7. E2E (webdav mode): pass the full session hash URL plus the gateway's
    tailnet IP (the `network` spec boots the site ROOT — baked
    `/webvm-config.js` — and verifies the guest data path reaches the gateway

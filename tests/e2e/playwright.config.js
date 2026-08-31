@@ -29,6 +29,12 @@ export default defineConfig({
 				// installed Playwright is newer (local dev with a newer
 				// Node), this override forces the 1.48-era Chromium binary
 				// when it is present.
+				//
+				// NODE VERSION CONSTRAINT: 1.48.0's ESM loader deadlocks on
+				// Node >= 24 (playwright test hangs with zero output). Run
+				// the suite on Node 18-22 (package.json engines + engine-
+				// strict in tests/e2e/.npmrc enforce this); the CI server
+				// job pins node 22 for exactly this reason.
 				...(process.env.PW_OLD_CHROMIUM
 					? { executablePath: process.env.PW_OLD_CHROMIUM }
 					: {}),
