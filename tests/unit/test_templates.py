@@ -4,7 +4,10 @@ entrypoint's fail-closed secret checks.
 
 The templates are rendered with an envsubst-equivalent shim that substitutes
 only the EXPLICIT variable list (mirroring `envsubst '$A $B'` — never bare
-envsubst, which would mangle `$` in credentials and nginx variables).
+envsubst, which would mangle `$` in credentials and nginx variables). The
+CSP header is NOT a template anymore: it is rendered by the production
+renderer itself (server/render-webvm-config.py --render-csp), so the test
+exercises the exact production function.
 """
 
 import re
@@ -22,6 +25,12 @@ TEST_ENV = {
     "STUN_PORT": "3478",
     "WEBDAV_PORT": "8082",
     "WEBDAV_ROOT": "/data/webdav",
+    "WEBDAV_BASE_PATH": "/webdav/",
+    # Rendered by the entrypoint from scripts/lib/webvm-common.sh (the single
+    # home of the deployment constants; the compose-drift test in
+    # test_scripts.py pins the lib values).
+    "ALPINE_PAGE": "alpine.html",
+    "WEBVM_IMAGE_DIR": "custom-disk-images",
     "WEBDAV_USER": "webdav",
     "WEBDAV_PASS": "s3cr$et",
 }
@@ -40,7 +49,23 @@ def envsubst(text, values):
 @pytest.fixture()
 def nginx():
     template = (SERVER / "nginx.conf.template").read_text()
-    return envsubst(template, TEST_ENV)
+    rendered = envsubst(template, TEST_ENV)
+    # The static snippets (shipped to /etc/nginx/ by the Dockerfile) are part
+    # of the served config: inline them so the assertions exercise the FULL
+    # rendered configuration, exactly as nginx would load it.
+    for snippet_name in ("control-location.conf", "site-subresource-headers.conf"):
+        body = (SERVER / snippet_name).read_text()
+        rendered = rendered.replace(
+            f"include /etc/nginx/{snippet_name};", body
+        )
+    return rendered
+
+
+@pytest.fixture()
+def csp(render_webvm_config):
+    # The production renderer is the single home of the CSP text (the
+    # entrypoint renders /etc/nginx/csp.conf from it).
+    return render_webvm_config.render_csp(TEST_ENV["CONTROL_HOST"], TEST_ENV["CONTROL_PORT"])
 
 
 @pytest.fixture()
@@ -55,6 +80,55 @@ def wsgidav():
     return envsubst(template, TEST_ENV)
 
 
+# --------------------------------------------------------------------------
+# Template <-> envsubst-list drift (boot-time failure class): a ${VAR} added
+# to a template but not to its envsubst list ships a LITERAL ${VAR} into the
+# container config and nginx -t / headscale fails at container start.
+# --------------------------------------------------------------------------
+
+def test_template_vars_covered_by_entrypoint_envsubst_lists():
+    entrypoint = (SERVER / "entrypoint.sh").read_text()
+    lines = entrypoint.splitlines()
+
+    # Pair every `envsubst '$A $B'` line with the `< /etc/webvm/<template>`
+    # input redirect (same line or the wrapped next line).
+    lists = {}
+    for i, line in enumerate(lines):
+        m = re.search(r"envsubst '([^']*)'", line)
+        if not m:
+            continue
+        scope = "\n".join(lines[i: i + 2])
+        tm = re.search(r"< /etc/webvm/([^ ]+)", scope)
+        assert tm, f"envsubst call without a template input: {line}"
+        # Each listed var carries its envsubst '$' prefix — strip it.
+        lists[tm.group(1)] = set(v.lstrip("$") for v in m.group(1).split())
+
+    assert "nginx.conf.template" in lists, "nginx envsubst list missing"
+    assert "headscale/config.yaml.template" in lists, "headscale envsubst list missing"
+
+    for template_name in ("nginx.conf.template", "headscale/config.yaml.template",
+                          "wsgidav.yaml.template"):
+        template_path = SERVER / template_name
+        if template_name == "headscale/config.yaml.template":
+            template_path = SERVER / "headscale" / "config.yaml.template"
+        text = template_path.read_text()
+        used = set(re.findall(r"\$\{([A-Z_]+)\}", text))
+        assert used, f"{template_name}: no ${VAR} found to check"
+        missing = used - lists[template_name]
+        assert not missing, (
+            f"{template_name} uses ${{{missing.pop()}}} but the entrypoint's "
+            f"envsubst list for it is '{' '.join(sorted(lists[template_name]))}' — "
+            "a literal ${VAR} would ship into the container config and break "
+            "nginx -t / headscale at startup"
+        )
+
+    # The nginx template additionally renders two lib constants that the
+    # entrypoint passes from the shared lib.
+    assert "WEBVM_IMAGE_DIR" in lists["nginx.conf.template"]
+    assert "ALPINE_PAGE" in lists["nginx.conf.template"]
+    assert "WEBDAV_BASE_PATH" in lists["wsgidav.yaml.template"]
+
+
 class TestNginx:
     def test_site_headers(self, nginx):
         assert 'listen 8081 ssl;' in nginx
@@ -62,30 +136,58 @@ class TestNginx:
         assert 'add_header Cross-Origin-Embedder-Policy "require-corp" always;' in nginx
         assert 'add_header Cross-Origin-Resource-Policy "cross-origin" always;' in nginx
 
-    def test_csp_connect_src_self_and_control_only(self, nginx):
+    def test_csp_connect_src_self_and_control_only(self, nginx, csp):
         # The CSP connect-src must allow only 'self' + the control host:port
         # family (blocks logtail and any other third-party fetch). The scheme-
         # default 443 entries are the wasm client's PORT-DROPPED control-plane
         # URLs (wss://<host>/ts2021, /derp, /derp/probe) — scoped to :443, never
         # portless.
-        csp = [l for l in nginx.splitlines() if "Content-Security-Policy" in l][0]
         assert "connect-src 'self' https://127.0.0.1:8443 wss://127.0.0.1:8443" in csp
         assert "https://127.0.0.1:443 wss://127.0.0.1:443" in csp
         # No portless host entry (would open the whole host to connect-src)
         assert "wss://127.0.0.1 " not in csp
         # script-src covers the self-hosted CheerpX runtime (never the CDN)
         assert "script-src 'self'" in csp
+        # The header text lives ONCE (rendered by render-webvm-config.py
+        # --render-csp) and is included from the site server block and every
+        # location that defines its own add_header (nginx does not inherit
+        # add_header through them).
+        assert nginx.count("include /etc/nginx/csp.conf;") == 3
+
+    def test_csp_lan_host_scoping(self, render_webvm_config):
+        # The LAN deployment's CSP (a hardcoded LAN IP as CONTROL_HOST) must
+        # carry the same scoped allowlist: control host:port + the portless
+        # :443 scheme-default pair, and never a portless host entry.
+        csp = render_webvm_config.render_csp("192.168.1.10", "8443")
+        assert "connect-src 'self' https://192.168.1.10:8443 wss://192.168.1.10:8443" in csp
+        assert "https://192.168.1.10:443 wss://192.168.1.10:443" in csp
+        assert "wss://192.168.1.10 " not in csp
+        assert "127.0.0.1" not in csp
+
+    def test_webvm_config_location_no_store_and_corp(self, nginx):
+        # The baked page config carries the preauth key + sync credentials;
+        # it must never be cached AND must refuse cross-origin loads (CORP
+        # same-origin) so no other webpage can read window.__webvmConfig.
+        assert "location = /webvm-config.js {" in nginx
+        assert 'add_header Cache-Control "no-store";' in nginx
+        assert 'add_header Cross-Origin-Resource-Policy "same-origin";' in nginx
 
     def test_site_redirects(self, nginx):
+        # The desktop route renders from the lib ALPINE_PAGE via envsubst
+        # (single home — the entrypoint passes the value).
         assert "location = / {" in nginx
-        assert "return 302 /alpine.html;" in nginx
+        assert "return 302 alpine.html;" in nginx
         assert "location = /alpine {" in nginx
-        assert "return 301 /alpine.html;" in nginx
+        assert "return 301 alpine.html;" in nginx
 
     def test_ext2_alias_with_absolute_root(self, nginx):
         assert "location /custom-disk-images/ {" in nginx
         assert "alias /srv/webvm/custom-disk-images/;" in nginx
         assert "gzip off;" in nginx
+        # The ext2 is content-fingerprinted (?v=<image-build> in the page
+        # config), so it can be cached immutable — repeat boots must not
+        # revalidate a 137 MiB image.
+        assert 'Cache-Control "public, max-age=31536000, immutable"' in nginx
 
     def test_headscale_catchall_proxy(self, nginx):
         # The control listener is a catch-all reverse proxy to headscale with
@@ -127,6 +229,16 @@ class TestHeadscale:
         # server_url PATH verbatim and headscale's noise router serves it at
         # the root, so server_url MUST be path-less.
         assert 'server_url: "https://127.0.0.1:8443"' in headscale
+
+    def test_server_url_matches_page_control_url(self, headscale, render_webvm_config):
+        # The headscale server_url (envsubst template) and the baked page
+        # config's controlUrl (render-webvm-config.py) are TWO renderings of
+        # the same URL — the page's control-plane WebSocket and the DERP map
+        # headscale derives from server_url must point at the same place.
+        config = render_webvm_config.build_config(
+            "127.0.0.1", "8443", "k", "webdav", "100.64.0.1", "8082", "u", "p",
+        )
+        assert f'server_url: "{config["controlUrl"]}"' in headscale
 
     def test_no_public_derp(self, headscale):
         assert "urls: []" in headscale

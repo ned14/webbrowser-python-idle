@@ -4,20 +4,34 @@ SHELL := /bin/sh
 # build must resolve the same way, or the guest image, frontend and containers
 # silently disagree with the deployment — e.g. a browser-mode guest image in a
 # webdav deployment, where the sync agent never runs (fixed 2026-08-15).
-# Precedence: command line > environment > .env > browser.
-_ENV_BACKEND := $(shell [ -f .env ] && sed -n 's/^[[:space:]]*STORAGE_BACKEND[[:space:]]*=[[:space:]]*//p' .env | tail -1)
-STORAGE_BACKEND ?= $(if $(_ENV_BACKEND),$(_ENV_BACKEND),browser)
+# Precedence: command line > environment > .env > browser. The .env layer is
+# resolved through the SHARED lib (scripts/lib/webvm-common.sh — one loader
+# rules them all: the entrypoints, scripts and this Makefile all use
+# webvm_load_dotenv, which never overrides an explicit environment value, and
+# compose strips .env quotes identically). A make command-line override or
+# exported env var is an explicit environment value and wins; the `?=` below
+# keeps make from clobbering either.
+# ONE shell invocation resolves the backend + data dir + image dir/name (the
+# same values build.sh produces and nginx serves — single home: the lib).
+_ENV_RESOLVED := $(shell WEBVM_COMMON=scripts/lib/webvm-common.sh sh -c '. "$$WEBVM_COMMON"; webvm_load_dotenv; printf "%s|%s|%s|%s" "$$STORAGE_BACKEND" "$$DATA_DIR" "$$WEBVM_IMAGE_DIR" "$$WEBVM_IMAGE_NAME"')
+_ENV_BACKEND := $(word 1,$(subst |, ,$(_ENV_RESOLVED)))
+_ENV_DATA_DIR := $(word 2,$(subst |, ,$(_ENV_RESOLVED)))
+_ENV_IMAGE_DIR := $(word 3,$(subst |, ,$(_ENV_RESOLVED)))
+_ENV_IMAGE_NAME := $(word 4,$(subst |, ,$(_ENV_RESOLVED)))
+STORAGE_BACKEND ?= $(_ENV_BACKEND)
+WEBVM_IMAGE_DIR ?= $(_ENV_IMAGE_DIR)
+WEBVM_IMAGE_NAME ?= $(_ENV_IMAGE_NAME)
 
 # The mode docker compose will actually deploy (it reads .env, never make
-# variables) — used by the up/up-tailnet consistency guard below.
-DEPLOY_BACKEND := $(if $(_ENV_BACKEND),$(_ENV_BACKEND),browser)
+# variables) — used by the up/up-tailnet consistency guard below. Same
+# precedence as STORAGE_BACKEND (an explicit env/CLI value wins over .env).
+DEPLOY_BACKEND := $(STORAGE_BACKEND)
 
 # The server-side WebDAV sync root (compose mount ${DATA_DIR:-./data} ->
 # ${WEBDAV_ROOT:-/data/webdav}). Resolved from .env for reset-webdav.
-_ENV_DATA_DIR := $(shell [ -f .env ] && sed -n 's/^[[:space:]]*DATA_DIR[[:space:]]*=[[:space:]]*//p' .env | tail -1)
-DATA_DIR ?= $(if $(_ENV_DATA_DIR),$(_ENV_DATA_DIR),./data)
+DATA_DIR ?= $(_ENV_DATA_DIR)
 
-.PHONY: certs build check-image-backend up up-tailnet down logs test test-unit acceptance url clean reset-webdav
+.PHONY: certs build check-image-backend check-image-build up up-tailnet down logs test test-unit test-frontend acceptance url clean reset-webdav
 
 ## Generate the private CA + server cert (once; browser trust is a manual step)
 certs:
@@ -29,12 +43,12 @@ certs:
 build:
 	@echo "==> Building for backend '$(STORAGE_BACKEND)' (deployment mode: $(DEPLOY_BACKEND))"
 	./build.sh $(STORAGE_BACKEND)
-	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/custom-disk-images/image-build.txt 2>/dev/null || echo dev) npm run build
+	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/$(WEBVM_IMAGE_DIR)/image-build.txt 2>/dev/null || echo dev) npm run build
 	docker compose build
 	@echo ""
 	@echo "==> Built image sizes:"
-	@echo "   guest ext2:      webvm/custom-disk-images/webvm-custom-disk.ext2 ($$(du -h webvm/custom-disk-images/webvm-custom-disk.ext2 | cut -f1))"
-	@echo "                     The only Linux image served to browsers (same-origin byte-range, /custom-disk-images/)."
+	@echo "   guest ext2:      webvm/$(WEBVM_IMAGE_DIR)/$(WEBVM_IMAGE_NAME) ($$(du -h webvm/$(WEBVM_IMAGE_DIR)/$(WEBVM_IMAGE_NAME) | cut -f1))"
+	@echo "                     The only Linux image served to browsers (same-origin byte-range, /$(WEBVM_IMAGE_DIR)/)."
 	@echo "   guest docker:    webvm-guest ($$(docker image inspect webvm-guest --format '{{.Size}}' | awk '{printf "%.0f MiB\n", $$1/1048576}'))"
 	@echo "                     Docker build artifact only — never served (includes multi-stage shimbuild + layer history)."
 
@@ -42,15 +56,22 @@ build:
 ## mismatch silently disables the mode's guest-side features (e.g. the sync
 ## agent in webdav) — the 2026-08-15 build-consistency fix.
 check-image-backend:
-	@if [ ! -f webvm/custom-disk-images/image-backend.txt ]; then \
-		echo "ERROR: no built guest image marker (webvm/custom-disk-images/image-backend.txt)." >&2; \
+	@if [ ! -f webvm/$(WEBVM_IMAGE_DIR)/image-backend.txt ]; then \
+		echo "ERROR: no built guest image marker (webvm/$(WEBVM_IMAGE_DIR)/image-backend.txt)." >&2; \
 		echo "       This artifact predates the backend-consistency check; run 'make build' first." >&2; \
 		exit 1; \
 	fi
-	@built=$$(cat webvm/custom-disk-images/image-backend.txt); \
+	@built=$$(cat webvm/$(WEBVM_IMAGE_DIR)/image-backend.txt); \
 	if [ "$$built" != "$(DEPLOY_BACKEND)" ]; then \
 		echo "ERROR: the built guest image is for backend '$$built' but the deployment (.env) is '$(DEPLOY_BACKEND)'." >&2; \
 		echo "       Run 'make build' to rebuild the guest image, frontend and containers for '$(DEPLOY_BACKEND)'." >&2; \
+		exit 1; \
+	fi
+
+## Fail unless the built guest image exists (shared by up/up-tailnet)
+check-image-build:
+	@if [ ! -f webvm/$(WEBVM_IMAGE_DIR)/image-build.txt ]; then \
+		echo "ERROR: no guest image build found. Run 'make build' first (builds the ext2, the frontend and the container images)." >&2; \
 		exit 1; \
 	fi
 
@@ -58,19 +79,16 @@ check-image-backend:
 ## `up` is a HARD-NETWORKLESS launch: whatever .env contains, the page boots
 ## fully disconnected (empty baked config, no headscale, sidebar Networking
 ## crossed out and disabled, zero tailnet connection attempts).
-up: certs check-image-backend
-	@if [ ! -f webvm/custom-disk-images/image-build.txt ]; then \
-		echo "ERROR: no guest image build found. Run 'make build' first (builds the ext2, the frontend and the container images)." >&2; \
-		exit 1; \
+up: certs check-image-backend check-image-build
+	@if [ "$(DEPLOY_BACKEND)" = "samba" ] || [ "$(DEPLOY_BACKEND)" = "webdav" ]; then \
+		echo "NOTE: deployment backend is '$(DEPLOY_BACKEND)' but \`make up\` is a HARD-NETWORKLESS" >&2; \
+		echo "      launch (WEBVM_TAILNET=off) — the stack will boot fully disconnected." >&2; \
+		echo "      Use 'make up-tailnet' for the tailnet-capable launch." >&2; \
 	fi
 	WEBVM_TAILNET=off docker compose up -d
 
 ## Start the stack including the gateway — the ONLY tailnet-capable launch
-up-tailnet: certs check-image-backend
-	@if [ ! -f webvm/custom-disk-images/image-build.txt ]; then \
-		echo "ERROR: no guest image build found. Run 'make build' first (builds the ext2, the frontend and the container images)." >&2; \
-		exit 1; \
-	fi
+up-tailnet: certs check-image-backend check-image-build
 	WEBVM_TAILNET=on docker compose --profile tailnet up -d
 
 down:
@@ -82,16 +100,23 @@ logs:
 ## Print the session URL(s) for the current deployment (OPTIONAL: tailnet
 ## modes bake the keys into the served page at container start, so visiting
 ## the site root auto-wires the tailnet; the hash URL is for other devices
-## and explicit overrides)
+## and explicit overrides). The script loads .env itself (environment wins),
+## so no sourcing here — a `VAR=x make url` override must not be clobbered.
 url:
-	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; ./scripts/print-url.sh
+	./scripts/print-url.sh
 
 ## Run the unit tests (compose test profile, no host Python needed)
 test-unit:
 	docker compose --profile test run --rm test-unit
 
-## Run the full local test suite (unit, rootfs, server integration, E2E)
-test: test-unit
+## Run the frontend unit tests (vitest: cacheId/sessionGuard/session seed/
+## network states + watchdog/clipboard paste contract)
+test-frontend:
+	cd webvm && npm test
+
+## Run the full local test suite (unit, frontend unit, rootfs, server
+## integration, E2E)
+test: test-unit test-frontend
 	@echo ""
 	@echo "Layered tests:"
 	@echo "  tests/rootfs/  — docker run webvm-guest (needs a built guest image)"

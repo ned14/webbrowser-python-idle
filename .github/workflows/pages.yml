@@ -52,14 +52,17 @@ jobs:
           rm "$DEPLOY_DIR/$IMAGE_NAME"
 
       - name: Build frontend for GitHub Pages (github disk device)
-        run: |
-          cd webvm
-          npm ci --no-audit --no-fund
-          WEBVM_MODE=browser \
-            WEBVM_IMAGE_BUILD="$(cat ../webvm/custom-disk-images/image-build.txt)" \
-            WEBVM_DISK_IMAGE="$IMAGE_NAME" \
-            npm run build
-          cp -R build/* /tmp/pages/
+        # Shared build-frontend action (same derivation as CI's frontend
+        # job): fingerprint from the locally built guest, WEBVM_DISK_IMAGE
+        # selects the chunked "github" device config.
+        uses: ./.github/actions/build-frontend
+        with:
+          backend: browser
+          image_build_file: webvm/custom-disk-images/image-build.txt
+          disk_image: ${{ env.IMAGE_NAME }}
+
+      - name: Stage the frontend build
+        run: cp -R webvm/build/* /tmp/pages/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

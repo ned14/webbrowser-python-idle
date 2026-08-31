@@ -1,5 +1,19 @@
 import { writable } from 'svelte/store';
 import { browser } from '$app/environment'
+import { siteBase } from './siteBase.js';
+
+// The connection-state names — single source of truth. NetworkingTab.svelte
+// and updateButtonData switch on these literals; never retype them.
+export const NETWORK_STATES = Object.freeze({
+	DISCONNECTED: "DISCONNECTED",
+	DOWNLOADING: "DOWNLOADING",
+	LOGINSTARTING: "LOGINSTARTING",
+	LOGINREADY: "LOGINREADY",
+	LOGINFAILED: "LOGINFAILED",
+	UNREACHABLE: "UNREACHABLE",
+	CONNECTED: "CONNECTED",
+	IPCOPIED: "IPCOPIED",
+});
 
 let authKey = undefined;
 let controlUrl = undefined;
@@ -12,10 +26,17 @@ if(browser)
 	// auto-register with Tailscale's public control server.
 	authKey = controlUrl ? (window.sessionStorage.getItem("authKey") || undefined) : undefined;
 }
-let dashboardUrl = controlUrl ? null : "https://login.tailscale.com/admin/machines";
+// The self-hosted control plane's admin page. NEVER the public
+// login.tailscale.com: this stack is LAN-only by design (no public Tailscale
+// anywhere), so when a controlUrl exists the CONNECTED button links to THIS
+// deployment's headscale web UI; without one there is no tailnet admin at
+// all. (The public-URL inversion this replaces would have shipped users to
+// Tailscale's login page the moment a refactor surfaced it.)
+let dashboardUrl = controlUrl ? new URL("/web", controlUrl).href : null;
 let resolveLogin = null;
 let rejectLogin = null;
 let loginPromise = null;
+// The single writable store; components reach it via networkData.connectionState.
 let connectionState = writable("DISCONNECTED");
 let exitNode = writable(false);
 
@@ -86,7 +107,11 @@ function resetLoginPromise()
 	});
 }
 
-function validateLoginUrl(url)
+// Exported for the vitest suite: the login-URL gate the wasm client's
+// loginUrlCb applies. https/http only — the client navigates the login
+// popup to this URL, so anything else (javascript:, file:, a relative URL)
+// must never reach window.open.
+export function validateLoginUrl(url)
 {
 	const parsedUrl = new URL(url);
 	if(parsedUrl.protocol != "https:" && parsedUrl.protocol != "http:")
@@ -143,6 +168,16 @@ var handshakeFailures = 0;
 var suppressControlSockets = false;
 var HANDSHAKE_FAILURE_LIMIT = 5;
 
+// The pure close-event decision (extracted for tests): a session that
+// reached Running ended normally and resets the streak; anything else is
+// one more rejected handshake that trips the UNREACHABLE gate at the limit.
+export function applyControlSocketClose(connectedNow, handshakeFailures, limit = HANDSHAKE_FAILURE_LIMIT) {
+	if (connectedNow)
+		return { handshakeFailures: 0, shouldTrip: false };
+	const next = handshakeFailures + 1;
+	return { handshakeFailures: next, shouldTrip: next >= limit };
+}
+
 function tripUnreachable()
 {
 	if (connectedNow)
@@ -175,14 +210,9 @@ if (browser && networkingEnabled)
 		{
 			ws.addEventListener("open", () => { connectedNow = false; });
 			ws.addEventListener("close", () => {
-				if (connectedNow)
-				{
-					// A session that reached Running ended normally.
-					handshakeFailures = 0;
-					return;
-				}
-				handshakeFailures += 1;
-				if (handshakeFailures >= HANDSHAKE_FAILURE_LIMIT)
+				const verdict = applyControlSocketClose(connectedNow, handshakeFailures);
+				handshakeFailures = verdict.handshakeFailures;
+				if (verdict.shouldTrip)
 					tripUnreachable();
 			});
 		}
@@ -198,7 +228,11 @@ if (browser && networkingEnabled)
 
 function netmapUpdateCb(map)
 {
-	networkData.currentIp = map.self.addresses[0];
+	// A pre-update netmap can carry an empty/absent address list; the
+	// CONNECTED button must never show "IP: undefined".
+	networkData.currentIp = (map.self && map.self.addresses && map.self.addresses.length)
+		? map.self.addresses[0]
+		: null;
 	var exitNodeFound = false;
 	for(var i=0; i < map.peers.length;i++)
 	{
@@ -216,9 +250,17 @@ function netmapUpdateCb(map)
 
 export async function startLogin()
 {
-	connectionState.set("LOGINSTARTING");
+	// Ordering (fixed 2026-08-29): the wasm client can invoke loginUrlCb
+	// SYNCHRONOUSLY during cx.networkLogin() — i.e. BEFORE startLogin runs —
+	// so setting LOGINSTARTING here would overwrite the LOGINREADY state
+	// already set by loginUrlCb and the sidebar button would stick at
+	// "Starting Login…" until the client reaches Running (the LOGINREADY
+	// clickable state was dead). Set LOGINREADY after the URL is known; the
+	// popup flow (WebVM.svelte handleConnect) consumes the returned URL and
+	// the button shows the clickable login link until Running arrives.
 	const url = await loginPromise;
 	networkData.loginUrl = url;
+	connectionState.set("LOGINREADY");
 	return url;
 }
 
@@ -302,7 +344,7 @@ export function updateButtonData(state, handleConnect) {
 			};
 		case "CONNECTED":
 			return {
-				buttonText: `IP: ${networkData.currentIp}`,
+				buttonText: `IP: ${networkData.currentIp || "…"}`,
 				isClickable: true,
 				clickHandler: null,
 				clickUrl: networkData.dashboardUrl,
@@ -342,11 +384,44 @@ export function updateButtonData(state, handleConnect) {
 // plans/networking-bug.md §15.
 let tunExports = null;
 
+// --- Tailnet stuck-state watchdog ------------------------------------------
+// The pinned wasm client's netmap validation is a RACE: after registration
+// it can stick in "authReconfig: netmap not yet valid. Skipping." forever
+// (a partial netmap push — the tailnet never comes up, the guest sync
+// agent waits in vain; observed repeatedly 2026-08-30, including with a
+// healthy control plane + DERP). A fresh driver start rolls the dice again
+// (new machine key, new registration, new netmap push), so a stuck session
+// self-heals: if the client has not reached Running within STUCK_MS of a
+// start, the driver is restarted — bounded, so a genuinely dead deployment
+// does not churn forever. Re-running autoConf+up is the same operation the
+// core's own net-init heal performs, so it is known-safe under the runtime.
+var tailnetAttempts = 0;
+const TAILNET_MAX_ATTEMPTS = 5;
+// 45s per attempt: the client's registration takes ~2s, so a stuck attempt
+// is detectable well before the guest sync agent's tailnet-wait window
+// (200s) expires — with attempts at t=0/45/90/135/180s a winning roll still
+// syncs inside the agent's window and the E2E's 240s lock poll.
+const TAILNET_STUCK_MS = 45000;
+function scheduleTailnetWatchdog()
+{
+	tailnetAttempts++;
+	setTimeout(() => {
+		if (connectedNow)
+			return; // Running reached — healthy
+		if (tailnetAttempts >= TAILNET_MAX_ATTEMPTS)
+			return;
+		console.warn("tailnet: client did not reach Running; restarting the driver (attempt " + (tailnetAttempts + 1) + ")");
+		startTailnet();
+	}, TAILNET_STUCK_MS);
+}
+
 async function startTailnet()
 {
 	try
 	{
-		const net = await import('/cheerpx/tun/tailscale_tun_auto.js');
+		// siteBase (from cheerpx.js) makes this resolve correctly under a
+		// GitHub Pages base path too; the runtime glue is served same-origin.
+		const net = await import(siteBase + '/cheerpx/tun/tailscale_tun_auto.js');
 		tunExports = await net.autoConf({
 			loginUrlCb: loginUrlCb,
 			stateUpdateCb: stateUpdateCb,
@@ -384,8 +459,11 @@ async function startTailnet()
 		// load), a background watcher keeps looking for a few minutes so a
 		// late injection still heals the session instead of failing silently.
 		const runCoreNetInitHeal = () => {
+			// siteBase, not a root-absolute path: the healer's tun glue URL
+			// must resolve under a GitHub Pages base path exactly like the
+			// driver's import above (a hardcoded /cheerpx/… would 404 there).
 			window.cheerpOSNetInit(
-				'/cheerpx/tun/tailscale_tun_auto.js',
+				siteBase + '/cheerpx/tun/tailscale_tun_auto.js',
 				loginUrlCb,
 				authKey,
 				controlUrl,
@@ -423,6 +501,10 @@ async function startTailnet()
 				}
 			}, 5000);
 		}
+		// The stuck-state watchdog starts once the driver is up (a fresh
+		// start rolls the netmap-validity dice again if Running never
+		// arrives).
+		scheduleTailnetWatchdog();
 	}
 	catch(e)
 	{
@@ -639,7 +721,11 @@ export const networkInterface = {
 							// plans/networking-bug.md §16.9; observed 2026-08-18
 							// as a hard page freeze on ANY bind+listen). Yield
 							// to the event loop and re-poll accept() instead.
-							await new Promise((res) => setTimeout(res, 100));
+							// 250 ms keeps the emulated-vCPU cost of a
+							// long-lived listening socket (~4 crossings/s)
+							// well below the old 100 ms cadence while staying
+							// far under human-perceptible accept latency.
+							await new Promise((res) => setTimeout(res, 250));
 						}
 					},
 					cancel() { try { sock.close(); } catch (e) {} resolveClosed(); },
@@ -679,8 +765,14 @@ export const networkInterface = {
 				if (sock.bind(port) !== 0) { fail(new Error('udp bind failed')); return; }
 				const readable = new ReadableStream({
 					async pull(controller) {
+						// ONE reusable receive buffer per socket: recv fills
+						// it and the enqueued UDPMessage takes a slice COPY
+						// (data: buf.slice(0, n)), so the buffer can be
+						// refilled by the next datagram instead of allocating
+						// 1500 bytes per packet (DNS/tailscale chatter makes
+						// this frequent).
+						const buf = new Uint8Array(1500);
 						for (;;) {
-							const buf = new Uint8Array(1500);
 							const addr = { addr: 0, port: 0 };
 							const n = sock.recv(buf, 0, buf.length, addr);
 							if (n > 0) {

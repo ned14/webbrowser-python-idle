@@ -43,19 +43,83 @@
 # sending; this is the defense-in-depth second gate.
 #
 # Environment overrides (unit tests run without X):
-#   XSENDKEYS_BIN   the backend binary (default xsendkeys)
-#   XSENDKEYS_FIFO  the command FIFO path (default /tmp/xsendkeys.fifo)
-#   DISPLAY         the X display (default :0)
+#   WEBVM_COMMON      the shared lib (guest copy at /usr/local/lib/webvm-common.sh;
+#                     tests point it at the repo copy)
+#   XSENDKEYS_BIN     the backend binary (default xsendkeys)
+#   XSENDKEYS_FIFO    the command FIFO path (default /tmp/xsendkeys.fifo)
+#   XSENDKEYS_PIDFILE the backend pidfile (default: the shared supervisor's)
+#   XSENDKEYS_STATUS  the backend status-marker path (default: the supervisor's)
+#   DISPLAY           the X display (default :0)
 
-MAX_PAYLOAD=1048576
-DELAY_US=10000   # 10 ms per char — the ~100 chars/s typing contract
+MAX_PAYLOAD=${PASTE_MAX_PAYLOAD:-1048576}
+# 5 ms per char (~200 chars/s) — halved from the original 10 ms contract for
+# paste-heavy workloads (validated by the paste E2E: any dropped XTEST key
+# shows up as missing characters there). XSync after every command is the
+# real pacing mechanism (see xsendkeys.c), so the delay is belt-and-braces.
+DELAY_US=${PASTE_DELAY_US:-5000}   # 5 ms per char — the ~200 chars/s typing contract
 XSK_BIN=${XSENDKEYS_BIN:-xsendkeys}
 XSK_FIFO=${XSENDKEYS_FIFO:-/tmp/xsendkeys.fifo}
+# The backend lifecycle uses the SHARED supervisor contract (webvm_common
+# webvm_supervise_start — the SAME marker mechanism the server/gateway
+# entrypoints use): pidfile + status marker under $WEBVM_SUPERVISE_DIR.
+WEBVM_SUPERVISE_DIR="${WEBVM_SUPERVISE_DIR:-/tmp}"
+XSK_PIDFILE=${XSENDKEYS_PIDFILE:-$WEBVM_SUPERVISE_DIR/webvm-xsendkeys.pid}
+XSK_STATUS=${XSENDKEYS_STATUS:-$WEBVM_SUPERVISE_DIR/webvm-xsendkeys.status}
 DISPLAY=${DISPLAY:-:0}
 export DISPLAY
 
+# Shared defaults + helpers (the guest copy of scripts/lib/webvm-common.sh —
+# the server/gateway entrypoints source the SAME file; the drift is pinned by
+# tests/unit/test_scripts.py::test_guest_lib_copy_matches_shared_lib).
+WEBVM_COMMON="${WEBVM_COMMON:-/usr/local/lib/webvm-common.sh}"
+if [ ! -f "$WEBVM_COMMON" ]; then
+	echo "FATAL: shared lib not found at $WEBVM_COMMON" >&2
+	exit 1
+fi
+# shellcheck disable=SC1090
+. "$WEBVM_COMMON"
+
 emit() {
 	printf '%s\n' "$1"
+}
+
+# --------------------------------------------------------------------------
+# Backend lifecycle. The backend is spawned through the SHARED supervisor
+# wrapper (webvm_supervise_start — the same wrapper the server/gateway
+# entrypoints use for headscale/nginx/tailscaled):
+#
+#     webvm_supervise_start xsendkeys /dev/null "$XSK_BIN"
+#
+# runs the backend as its own child, records its real pid in
+# $XSK_PIDFILE and writes the status marker $XSK_STATUS when it exits. The
+# death check therefore reads the MARKER — not `kill -0`. A directly-
+# backgrounded backend would linger as an UNREAPED ZOMBIE in the daemon's
+# process table when it crashes (a C binary can die on an X error), and
+# `kill -0` succeeds on zombies — the crash would never be seen and every
+# later paste would be written into an unread FIFO and silently lost. The
+# wrapper runs to completion (writing the marker) whenever the backend dies,
+# regardless of who reaps what; the pidfile carries the BACKEND's real pid
+# for the EXIT trap (killing the backend, not the wrapper). The wrapper
+# subshell inherits this daemon's fds, so the backend's command FIFO (fd 9)
+# passes through without any extra plumbing.
+spawn_backend() {
+	# stdout of the helper is the marker path; the console stream must not
+	# see it (CXACK/CXFAIL frames live there). The backend's stdin must be
+	# the command FIFO (fd 9): an asynchronous subshell's stdin is /dev/null,
+	# so the shared wrapper duplicates fd 9 to the service's stdin via
+	# WEBVM_SUPERVISE_STDIN_FD (the knob exists for exactly this — a
+	# caller-held fd feeding a supervised service).
+	WEBVM_SUPERVISE_STDIN_FD=9
+	# PASTE_DEBUG=1 also routes the backend's stderr to the console so the
+	# page can see xsendkeys' own diagnostics (XTEST presence, display
+	# errors).
+	if [ "${PASTE_DEBUG:-0}" = "1" ]; then
+		PASTE_DEBUG=1 webvm_supervise_start xsendkeys /dev/console "$XSK_BIN" >/dev/null
+	else
+		webvm_supervise_start xsendkeys /dev/null "$XSK_BIN" >/dev/null
+	fi
+	# shellcheck disable=SC2034 # consumed by webvm_supervise_start (sourced lib)
+	WEBVM_SUPERVISE_STDIN_FD=""
 }
 
 # One-time stdout/stderr flush helper for the awk failure reason file.
@@ -163,9 +227,12 @@ handle() {
 			esac
 			[ "$N" -le "$MAX_PAYLOAD" ] || { emit "CXFAIL toolarge"; return; }
 			# Decode and length-check as a PIPE (command substitution would
-			# strip trailing newlines, which are legal paste content).
+			# strip trailing newlines, which are legal paste content). A
+			# length mismatch or undecodable base64 is a CORRUPT frame —
+			# answered CXFAIL so the page surfaces the failure immediately
+			# instead of waiting out its ack timeout.
 			ACTUAL=$(printf '%s' "$B64" | base64 -d 2>/dev/null | wc -c | tr -d ' ')
-			[ -n "$ACTUAL" ] && [ "$ACTUAL" = "$N" ] || return
+			[ -n "$ACTUAL" ] && [ "$ACTUAL" = "$N" ] || { emit "CXFAIL corrupt"; return; }
 			# Validate + translate (stderr carries the failure reason).
 			CMDS=$(printf '%s' "$B64" | base64 -d 2>/dev/null | od -An -v -tu1 | translate 2>"$BADREASON") ||
 			{
@@ -176,11 +243,11 @@ handle() {
 			}
 			rm -f "$BADREASON"
 			# The backend must be alive before writing (the FIFO write would
-			# otherwise block forever with no reader).
-			if ! kill -0 "$XSK_PID" 2>/dev/null; then
-				( "$XSK_BIN" <&9 >/dev/null 2>&1 ) &
-				XSK_PID=$!
-				sleep 1
+			# otherwise block forever with no reader). Death is signalled by
+			# the wrapper's STATUS MARKER (see spawn_backend) — exact, and
+			# immune to zombie/reaper quirks that make kill -0 lie.
+			if [ -f "$XSK_STATUS" ]; then
+				spawn_backend
 			fi
 			printf '%s\n' "$CMDS" >&9
 			emit "CXACK $N"
@@ -198,12 +265,18 @@ mkfifo "$XSK_FIFO" 2>/dev/null || true
 # keeps fd 9 open for the lifetime of the daemon (the backend never sees
 # EOF, so it never exits on its own).
 exec 9<>"$XSK_FIFO"
-"$XSK_BIN" <&9 >/dev/null 2>&1 &
-XSK_PID=$!
-# Let the backend open the display before the first frame can arrive.
-sleep 1
+spawn_backend
 
-trap 'sleep 0.3; kill "$XSK_PID" 2>/dev/null || true' EXIT
+# Kill the backend on exit. The pidfile is read HERE, at trap time — never
+# at spawn time: the wrapper writes it immediately at spawn, so by exit it
+# is guaranteed present, while a spawn-time read can race a slow wrapper
+# under load and come up empty — `kill 0` would then signal the whole
+# process group instead of the backend, the backend would survive, the
+# wrapper's `wait` would never return, and the wrapper (which inherits a
+# copy of this daemon's stdout pipe) would hold that pipe open forever —
+# a reader waiting for EOF hangs (observed 2026-08-30 under CI load).
+# shellcheck disable=SC2154 # _xsk_pid IS assigned by the $(...) in this trap line
+trap 'sleep 0.3; _xsk_pid=$(cat "$XSK_PIDFILE" 2>/dev/null || echo 0); [ "$_xsk_pid" != "0" ] && kill "$_xsk_pid" 2>/dev/null || true' EXIT
 
 while IFS= read -r LINE; do
 	handle "$LINE"

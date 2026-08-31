@@ -9,14 +9,15 @@
 //
 // The runtime is served at the site base + /cheerpx/, and a GitHub Pages
 // project site lives under a path (e.g. /webbrowser-python-idle/), so the
-// entry URL is resolved against this module's own URL (everything before the
-// SvelteKit /_app/ asset dir) rather than a root-absolute path. The dynamic
+// entry URL is resolved against the site base (computed once in siteBase.js
+// from a module URL — the same value network.js uses for the tun glue)
+// rather than a root-absolute path. The dynamic
 // import goes through `new Function` so the bundler never rewrites the URL
 // (the browser resolves the final string against the page origin).
+import { siteBase } from './siteBase.js';
+
 const VERSION = "1.3.8";
 const dynImport = new Function("x", "return import(x)");
-const appDir = import.meta.url.indexOf("/_app/");
-const siteBase = appDir === -1 ? "" : import.meta.url.slice(0, appDir);
 const CheerpX = await dynImport(siteBase + "/cheerpx/cx.esm.js");
 
 export const Linux = CheerpX.Linux;

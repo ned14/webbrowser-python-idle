@@ -46,7 +46,7 @@ BACKEND=$(cat /etc/webvm-backend 2>/dev/null || echo browser)
 ) &
 
 # Sync boot-pull before the desktop starts (samba/webdav only; best-effort —
-# waits for the tailnet up to ~90s, then returns regardless so a misconfigured
+# waits for the tailnet up to ~75s, then returns regardless so a misconfigured
 # tailnet cannot delay the desktop indefinitely). The push loop then runs as a
 # single background process; it holds the backend lease (a second tab/session
 # is refused).
@@ -77,8 +77,11 @@ chmod 700 /run/user/1000
 
 # Generate the guest SSH keypair on first boot (never baked into the served
 # image). Authorize the public key on any LAN git server to allow pushes.
+# BACKGROUNDED: it is not needed before the desktop maps, and under
+# emulation the first-boot keygen costs ~0.1-0.5 s of the boot critical
+# path for nothing.
 if [ ! -f /home/user/.ssh/id_ed25519 ]; then
-	su user -c 'ssh-keygen -q -t ed25519 -N "" -f /home/user/.ssh/id_ed25519'
+	(su user -c 'ssh-keygen -q -t ed25519 -N "" -f /home/user/.ssh/id_ed25519' >/dev/null 2>&1) &
 fi
 
 # X socket directory: Xorg runs as root here (see below); keep the socket dir
@@ -107,8 +110,11 @@ rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
 Xorg :0 -nolisten tcp -noreset -novtswitch -logfile /var/log/xorg.log </dev/null &
 XPID=$!
 i=0
-while [ ! -S /tmp/.X11-unix/X0 ] && [ "$i" -lt 60 ]; do
-	sleep 1
+# 250 ms poll (was 1 s): Xorg startup is the boot's long pole and the wait
+# is bounded (60 s), so a tighter poll shaves up to ~1 s off boot with no
+# cost while X is still starting (the poll itself is a trivial stat).
+while [ ! -S /tmp/.X11-unix/X0 ] && [ "$i" -lt 240 ]; do
+	sleep 0.25
 	i=$((i + 1))
 done
 if [ ! -S /tmp/.X11-unix/X0 ]; then

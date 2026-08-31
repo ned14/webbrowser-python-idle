@@ -4,8 +4,16 @@
 export const storageBackend = __WEBVM_MODE__;
 export const imageBuild = __WEBVM_IMAGE_BUILD__;
 
-// The root filesystem location (served by our nginx, same origin, byte ranges)
-export const diskImageUrl = "/custom-disk-images/webvm-custom-disk.ext2";
+// The root filesystem location (served by our nginx, same origin, byte ranges).
+// The ?v=<image-build> query is the CONTENT FINGERPRINT (the same value the
+// cacheId embeds): it makes the browser HTTP cache key differ per image
+// build, so nginx can serve the ext2 with Cache-Control immutable and repeat
+// boots hit the cache with zero revalidation, while an image upgrade changes
+// the URL and fetches the new image exactly then (a stale cached base can
+// never be paired with a new-fingerprint overlay — the corruption the
+// fingerprint exists to prevent). nginx ignores the query string and
+// HttpBytesDevice carries it through its range GETs.
+export const diskImageUrl = "/custom-disk-images/webvm-custom-disk.ext2?v=" + imageBuild;
 // The root filesystem backend type
 export const diskImageType = "bytes";
 // Print an introduction message about the technology

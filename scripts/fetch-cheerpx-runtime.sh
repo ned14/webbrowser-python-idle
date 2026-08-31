@@ -7,10 +7,16 @@
 # The files are committed to the repo (webvm/cheerpx/) so the frontend build
 # stays deterministic and offline-safe beyond npm. Re-run this script ONLY to
 # re-pin to a different CheerpX version (then update webvm/package.json and
-# the version below).
+# webvm/src/lib/cheerpx.js — tests/unit/test_scripts.py enforces the lockstep
+# against scripts/versions.env).
 set -eu
 
-VERSION="1.3.8"
+# The pinned version: scripts/versions.env is the single home
+# (CHEERPX_VERSION; the same value must stay in webvm/package.json and
+# webvm/src/lib/cheerpx.js).
+# shellcheck disable=SC1091
+. "$(dirname "$0")/versions.env"
+VERSION="${CHEERPX_VERSION:?versions.env must define CHEERPX_VERSION}"
 BASE="https://cxrtnc.leaningtech.com/${VERSION}"
 DEST="webvm/cheerpx"
 

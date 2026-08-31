@@ -2,32 +2,42 @@
 // display canvas must exist and eventually contain rendered pixels, and the
 // file explorer's light window must fill the canvas. Kept here so the specs
 // cannot drift apart (plan §9.4).
+//
+// The pixel sampling itself is NOT duplicated here: webvm/src/lib/canvasProbe.js
+// is the single implementation — the page's boot watchdog imports it, and this
+// file injects the same source into the page (module script) so the probes run
+// exactly the code the page runs.
 
 import { expect } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const canvasProbeSource = readFileSync(
+	fileURLToPath(new URL('../../../webvm/src/lib/canvasProbe.js', import.meta.url)),
+	'utf8'
+);
+
+const probeInjected = new WeakSet();
+
+async function ensureCanvasProbe(page) {
+	if (probeInjected.has(page)) return;
+	await page.addScriptTag({ content: canvasProbeSource, type: 'module' });
+	probeInjected.add(page);
+}
 
 export async function waitForDesktop(page) {
 	// The display canvas must exist and eventually contain rendered pixels.
 	await expect(page.locator('#display')).toBeVisible({ timeout: 30_000 });
+	await ensureCanvasProbe(page);
 	await expect
 		.poll(
 			async () =>
 				page.evaluate(() => {
-					const display = document.getElementById('display');
-					if (!display || !display.width || !display.height) return false;
-					try {
-						const scratch = document.createElement('canvas');
-						scratch.width = display.width;
-						scratch.height = display.height;
-						const ctx = scratch.getContext('2d');
-						ctx.drawImage(display, 0, 0);
-						const data = ctx.getImageData(0, 0, scratch.width, scratch.height).data;
-						for (let i = 0; i < data.length; i += 4) {
-							if (data[i] || data[i + 1] || data[i + 2]) return true;
-						}
-					} catch (e) {
-						// canvas not readable yet — keep polling
-					}
-					return false;
+					const probe = window.__webvmCanvasProbe;
+					if (!probe) return false;
+					return probe.hasAnyPixel(
+						probe.sampleCanvasPixels(document.getElementById('display'))
+					);
 				}),
 			{ timeout: 240_000, intervals: [5000] }
 		)
@@ -35,28 +45,23 @@ export async function waitForDesktop(page) {
 }
 
 export async function lightRatio(page) {
+	await ensureCanvasProbe(page);
 	return page.evaluate(() => {
-		const display = document.getElementById('display');
-		if (!display || !display.width || !display.height) return 0;
-		const scratch = document.createElement('canvas');
-		scratch.width = display.width;
-		scratch.height = display.height;
-		const ctx = scratch.getContext('2d');
-		ctx.drawImage(display, 0, 0);
-		try {
-			const data = ctx.getImageData(0, 0, scratch.width, scratch.height).data;
-			let light = 0;
-			const total = scratch.width * scratch.height;
-			for (let i = 0; i < data.length; i += 4) {
-				const r = data[i],
-					g = data[i + 1],
-					b = data[i + 2];
-				if (r > 150 && g > 150 && b > 150) light++;
-			}
-			return light / total;
-		} catch (e) {
-			return 0;
+		const probe = window.__webvmCanvasProbe;
+		const sample = probe
+			? probe.sampleCanvasPixels(document.getElementById('display'))
+			: null;
+		if (!sample) return 0;
+		const data = sample.data;
+		let light = 0;
+		const total = sample.width * sample.height;
+		for (let i = 0; i < data.length; i += 4) {
+			const r = data[i],
+				g = data[i + 1],
+				b = data[i + 2];
+			if (r > 150 && g > 150 && b > 150) light++;
 		}
+		return light / total;
 	});
 }
 
@@ -76,23 +81,18 @@ export async function waitForLightDesktop(page, threshold = 0.35) {
 // detect that the canvas KEEPS changing while the mouse moves — a frozen
 // pointer means the hash stops changing.
 export async function canvasHash(page) {
+	await ensureCanvasProbe(page);
 	return page.evaluate(() => {
-		const display = document.getElementById('display');
-		if (!display || !display.width || !display.height) return null;
-		const scratch = document.createElement('canvas');
-		scratch.width = Math.min(display.width, 256);
-		scratch.height = Math.min(display.height, 256);
-		const ctx = scratch.getContext('2d');
-		ctx.drawImage(display, 0, 0, scratch.width, scratch.height);
-		try {
-			const data = ctx.getImageData(0, 0, scratch.width, scratch.height).data;
-			let hash = 0;
-			for (let i = 0; i < data.length; i += 4) {
-				hash = (hash * 31 + data[i] + data[i + 1] + data[i + 2]) | 0;
-			}
-			return hash;
-		} catch (e) {
-			return null;
+		const probe = window.__webvmCanvasProbe;
+		const sample = probe
+			? probe.sampleCanvasPixels(document.getElementById('display'))
+			: null;
+		if (!sample) return null;
+		const data = sample.data;
+		let hash = 0;
+		for (let i = 0; i < data.length; i += 4) {
+			hash = (hash * 31 + data[i] + data[i + 1] + data[i + 2]) | 0;
 		}
+		return hash;
 	});
 }

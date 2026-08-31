@@ -14,15 +14,32 @@ suite under Xvfb.
 import base64
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-TYPER_SH = Path(__file__).resolve().parents[2] / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "paste-typer.sh"
+ROOT = Path(__file__).resolve().parents[2]
+TYPER_SH = ROOT / "diskimage" / "rootfs" / "usr" / "local" / "bin" / "paste-typer.sh"
 
 FAKE_XSK = """#!/bin/sh
 while IFS= read -r LINE; do
 	echo "$LINE" >> "$XSENDKEYS_LOG"
+done
+"""
+
+# Fake backend that CRASHES after XSK_MAX_LINES commands (a crashed
+# xsendkeys — a C binary can die on an X error): write the line, then a
+# short settle so the reaper can reap it, then exit.
+FAKE_XSK_CRASHY = """#!/bin/sh
+n=0
+while IFS= read -r LINE; do
+	echo "$LINE" >> "$XSENDKEYS_LOG"
+	n=$((n + 1))
+	if [ "$n" -ge "${XSK_MAX_LINES:-9999}" ]; then
+		sleep 0.5
+		exit 0
+	fi
 done
 """
 
@@ -34,6 +51,11 @@ def env(tmp_path):
     fake.chmod(0o755)
     return {
         "PATH": "/usr/bin:/bin",
+        # The typer sources the SHARED lib (webvm_supervise_start is the
+        # backend lifecycle); point it at the repo copy and sandbox the
+        # supervisor's pidfile/marker paths like every other path.
+        "WEBVM_COMMON": str(ROOT / "scripts" / "lib" / "webvm-common.sh"),
+        "WEBVM_SUPERVISE_DIR": str(tmp_path),
         "XSENDKEYS_BIN": str(fake),
         "XSENDKEYS_FIFO": str(tmp_path / "xsk.fifo"),
         "XSENDKEYS_LOG": str(tmp_path / "xsk.log"),
@@ -48,7 +70,7 @@ def clip_frame(text):
 
 def run_typer(frames, env):
     return subprocess.run(
-        [sys.executable and "/bin/sh", str(TYPER_SH)],
+        ["/bin/sh", str(TYPER_SH)],
         input=frames,
         capture_output=True,
         env=env,
@@ -75,14 +97,41 @@ class TestProtocol:
         assert res.stdout == b"CXACK 3\nCXACK 3\n"
 
     def test_malformed_lines_ignored(self, env):
+        # Non-frames and non-numeric lengths are silently ignored; a frame
+        # whose DECLARED length does not match its payload is CORRUPT and
+        # answered CXFAIL (the page surfaces it immediately instead of
+        # waiting out its ack timeout).
         res = run_typer(b"not a frame\nCXCLIP oops\nCXCLIP 3 aGk=\n", env)
         assert res.returncode == 0
-        assert res.stdout == b""
+        assert res.stdout == b"CXFAIL corrupt\n"
 
     def test_oversize_refused(self, env):
         big = "x" * 1048577
         res = run_typer(clip_frame(big), env)
         assert res.stdout == b"CXFAIL toolarge\n"
+
+    def test_max_payload_boundary(self, env):
+        # The exact MAX_PAYLOAD boundary, without the 1 MiB cost: the script
+        # accepts a PASTE_MAX_PAYLOAD override (same pattern as the
+        # XSENDKEYS_* overrides) — the boundary logic is identical.
+        env["PASTE_MAX_PAYLOAD"] = "4"
+        res = run_typer(clip_frame("abcd"), env)
+        assert res.stdout == b"CXACK 4\n"
+        res = run_typer(clip_frame("abcde"), env)
+        assert res.stdout == b"CXFAIL toolarge\n"
+
+    def test_length_mismatch_fails_corrupt(self, env):
+        # Declared length != decoded length: a CORRUPT frame — the typer
+        # answers CXFAIL so the page surfaces the failure immediately
+        # instead of waiting out its ack timeout.
+        res = run_typer(b"CXCLIP 99 " + base64.b64encode(b"abc") + b"\n", env)
+        assert res.stdout == b"CXFAIL corrupt\n"
+        assert Path(env["XSENDKEYS_LOG"]).exists() is False
+
+    def test_invalid_base64_fails_corrupt(self, env):
+        # Undecodable base64: same corrupt-frame handling.
+        res = run_typer(b"CXCLIP 3 !!!\n", env)
+        assert res.stdout == b"CXFAIL corrupt\n"
 
     def test_untypable_refused_with_reason(self, env):
         res = run_typer(clip_frame("café"), env)
@@ -116,27 +165,27 @@ class TestCommandStream:
     def test_lowercase_and_digits(self, env):
         run_typer(clip_frame("ab 12"), env)
         assert self.commands(env) == [
-            "usleep 10000", "key a",
-            "usleep 10000", "key b",
-            "usleep 10000", "key space",
-            "usleep 10000", "key 1",
-            "usleep 10000", "key 2",
+            "usleep 5000", "key a",
+            "usleep 5000", "key b",
+            "usleep 5000", "key space",
+            "usleep 5000", "key 1",
+            "usleep 5000", "key 2",
         ]
 
     def test_uppercase_uses_shift_l(self, env):
         run_typer(clip_frame("Ab"), env)
         assert self.commands(env) == [
-            "usleep 10000", "down Shift_L", "key a", "up Shift_L",
-            "usleep 10000", "key b",
+            "usleep 5000", "down Shift_L", "key a", "up Shift_L",
+            "usleep 5000", "key b",
         ]
 
     def test_symbols_shift_table(self, env):
         run_typer(clip_frame("!{<~"), env)
         assert self.commands(env) == [
-            "usleep 10000", "down Shift_L", "key 1", "up Shift_L",
-            "usleep 10000", "down Shift_L", "key bracketleft", "up Shift_L",
-            "usleep 10000", "down Shift_L", "key comma", "up Shift_L",
-            "usleep 10000", "down Shift_L", "key grave", "up Shift_L",
+            "usleep 5000", "down Shift_L", "key 1", "up Shift_L",
+            "usleep 5000", "down Shift_L", "key bracketleft", "up Shift_L",
+            "usleep 5000", "down Shift_L", "key comma", "up Shift_L",
+            "usleep 5000", "down Shift_L", "key grave", "up Shift_L",
         ]
 
     def test_unshifted_punctuation(self, env):
@@ -172,3 +221,46 @@ class TestAllPrintableAscii:
         # One `key` per character (the shift pairs wrap each char's key).
         key_lines = [k for k in keys if k.startswith("key ")]
         assert len(key_lines) == 95
+
+
+# --------------------------------------------------------------------------
+# Backend crash recovery: a dead xsendkeys must be respawned before the next
+# frame (a direct child would linger as an un-reaped zombie, kill -0 would
+# succeed on it, and every later paste would be written into an unread FIFO
+# and silently lost — the daemon double-forks so the real backend is
+# reparented and reaped, making kill -0 truthful).
+# --------------------------------------------------------------------------
+
+class TestBackendRespawn:
+    def test_respawns_dead_backend_before_next_frame(self, env, tmp_path):
+        crashy = tmp_path / "fake-xsendkeys-crashy"
+        crashy.write_text(FAKE_XSK_CRASHY)
+        crashy.chmod(0o755)
+        env["XSENDKEYS_BIN"] = str(crashy)
+        env["XSK_MAX_LINES"] = "4"  # one frame ("ab" = usleep,key,usleep,key)
+
+        proc = subprocess.Popen(
+            ["/bin/sh", str(TYPER_SH)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        try:
+            proc.stdin.write(clip_frame("ab"))
+            proc.stdin.flush()
+            assert proc.stdout.readline() == b"CXACK 2\n"
+            # Let the fake consume its 4 commands, exit and get reaped.
+            time.sleep(2)
+            proc.stdin.write(clip_frame("cd"))
+            proc.stdin.flush()
+            assert proc.stdout.readline() == b"CXACK 2\n"
+        finally:
+            proc.stdin.close()
+            proc.wait(timeout=10)
+
+        lines = Path(env["XSENDKEYS_LOG"]).read_text().splitlines()
+        # Both frames' command streams must reach a (re)spawned backend:
+        # 4 lines for "ab" + 4 for "cd". Without the respawn the second
+        # frame would be written into an unread FIFO and vanish.
+        assert len(lines) == 8, f"expected 8 typed commands, got: {lines}"

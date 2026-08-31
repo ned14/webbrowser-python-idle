@@ -267,6 +267,20 @@ EOF
 	done
 	[ "$ALIVE" = "1" ] || { echo "FAIL: keep-alive did not relaunch the explorer" >&2; exit 1; }
 	echo "keep-alive relaunched the explorer"
+	# SECOND-generation kill (2026-08-30 regression): the relaunched explorer
+	# is a DIRECT child of the keep-alive shell, so a SIGKILL leaves an
+	# UNREAPED ZOMBIE — kill -0 keeps succeeding on it and a naive pidfile
+	# guard would never relaunch again (the pidfile is removed by the
+	# force-kill path + the zombie-aware webvm-pidfile.sh guard). Kill it
+	# again and verify the desktop heals a second time.
+	pkill -9 -f "file-explorer.py"
+	ALIVE=0
+	for _i in 1 2 3 4 5 6 7 8 9 10; do
+		sleep 2
+		if pgrep -f "file-explorer.py" >/dev/null 2>&1; then ALIVE=1; break; fi
+	done
+	[ "$ALIVE" = "1" ] || { echo "FAIL: keep-alive did not relaunch the second-generation explorer (zombie pidfile regression)" >&2; exit 1; }
+	echo "keep-alive relaunched the second-generation explorer (zombie-safe)"
 	kill "$OBPID" 2>/dev/null || true
 	stop_xvfb "$XPID3"
 '

@@ -1,15 +1,15 @@
 <script>
 	import { createEventDispatcher } from 'svelte';
 	import PanelButton from './PanelButton.svelte';
-	import { pasteStatus, pasteText, filePickerActive } from '$lib/clipboard.js';
+	import { pasteStatus, pasteText, filePickerActive, PASTE_MAX_CHARS, CX_TYPE_DELAY_MS } from '$lib/clipboard.js';
 	var dispatch = createEventDispatcher();
 	var fileInput = null;
 
-	// The guest types at CX_TYPE_DELAY=10 ms per char (paste-typer.py), so
+	// The guest types at CX_TYPE_DELAY_MS per char (paste-typer.sh), so
 	// a long paste takes a while; warn the user with a time estimate before
-	// they commit. 10000 is the page-side hard cap (WebVM.svelte).
+	// they commit. PASTE_MAX_CHARS is the page-side hard cap — the SAME
+	// constant WebVM.svelte enforces (exported from clipboard.js).
 	var LONG_WARN_CHARS = 300;
-	var MAX_PASTE_CHARS = 10000;
 
 	// This page NEVER claims the host browser's clipboard API
 	// (navigator.clipboard is untouched). Pasting into the VM goes through
@@ -74,9 +74,10 @@
 	}
 
 	// --- Length warning ---
-	// ~100 chars/sec at the guest's 10 ms/char typing delay.
+	// The guest types at CX_TYPE_DELAY_MS per char; ~200 chars/sec at the
+	// current 5 ms/char delay (CX_CHARS_PER_SEC in clipboard.js).
 	function typingSeconds(n) {
-		return Math.max(1, Math.round(n / 10) / 10);
+		return Math.max(1, Math.round((n * CX_TYPE_DELAY_MS) / 100) / 10);
 	}
 	// Pure: takes the length so the reactive statement below can pass
 	// `$pasteText.length` as an EXPLICIT dependency — a bare call in the
@@ -85,8 +86,8 @@
 	// file-open.
 	function lengthNote(n) {
 		if (n === 0) return "";
-		if (n > MAX_PASTE_CHARS)
-			return n.toLocaleString() + " chars — too long (max " + MAX_PASTE_CHARS + "), won't paste";
+		if (n > PASTE_MAX_CHARS)
+			return n.toLocaleString() + " chars — too long (max " + PASTE_MAX_CHARS + "), won't paste";
 		if (n > LONG_WARN_CHARS)
 			return n.toLocaleString() + " chars — ~" + typingSeconds(n) + "s to type";
 		return "";

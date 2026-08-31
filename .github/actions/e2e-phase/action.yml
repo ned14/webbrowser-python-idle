@@ -1,0 +1,57 @@
+name: 'E2E phase setup'
+description: >-
+  Clean + download the guest/frontend artifacts for one backend, write the
+  deployment .env, build the server image and bring it up. Shared by the
+  browser and webdav phases of the CI server job so the two phases cannot
+  drift apart.
+
+inputs:
+  backend:
+    description: 'Storage backend for the phase (browser|webdav)'
+    required: true
+  env_extra:
+    description: 'Extra .env lines appended after the shared ones (multiline)'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Start from a clean tree: download-artifact@v8 MERGES into the
+    # destination, and the server Dockerfile COPYs the whole dirs — leftover
+    # files from a previous phase would otherwise be baked into the image.
+    - name: Clean phase artifact dirs
+      shell: bash
+      run: rm -rf webvm/build webvm/custom-disk-images
+
+    - name: Download guest ext2 + fingerprint
+      uses: actions/download-artifact@v8
+      with:
+        name: guest-${{ inputs.backend }}
+        path: webvm/custom-disk-images/
+
+    - name: Download frontend build
+      uses: actions/download-artifact@v8
+      with:
+        name: frontend-${{ inputs.backend }}
+        path: webvm/build/
+
+    - name: Deployment .env
+      shell: bash
+      run: |
+        cat > .env <<EOF
+        CONTROL_HOST=127.0.0.1
+        LAN_IP=127.0.0.1
+        STORAGE_BACKEND=${{ inputs.backend }}
+        ${{ inputs.env_extra }}
+        EOF
+
+    - name: Build server image
+      shell: bash
+      run: docker compose build server
+
+    - name: Bring up the server
+      # --wait gates on the compose healthcheck so a slow/failed start fails
+      # here deterministically instead of surfacing as Playwright timeouts.
+      shell: bash
+      run: docker compose up -d server --wait --wait-timeout 120

@@ -47,6 +47,15 @@ http {
 	# serving cannot use a compressed representation.
 	brotli_static on;
 
+	# File metadata cache: the boot issues ~1100 sequential range GETs
+	# against the ext2 plus the immutable asset tree; caching open file
+	# metadata (existence + stat) removes a syscall+lookup per request.
+	# The immutable-cache headers already kill revalidation; this kills the
+	# per-request metadata work.
+	open_file_cache max=1024 inactive=120s;
+	open_file_cache_valid 30s;
+	open_file_cache_min_uses 1;
+
 	map $http_upgrade $connection_upgrade {
 		default upgrade;
 		''      close;
@@ -88,17 +97,23 @@ http {
 		# the scheme-default 443 (CONTROL_WSS_PORT, relayed by the gateway in
 		# tailnet modes) must be allowed too. Scoped to :443 explicitly — never
 		# portless, which would open the WHOLE host to connect-src.
-		add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT} https://${CONTROL_HOST}:443 wss://${CONTROL_HOST}:443" always;
+		# The header text itself lives in /etc/nginx/csp.conf (rendered by the
+		# entrypoint from server/render-webvm-config.py --render-csp — the CSP's
+		# single home) so all three sites that need it share one source — a
+		# location defining its own add_header does NOT inherit the server-level
+		# ones.
+		include /etc/nginx/csp.conf;
 
 		root /srv/webvm/build;
 
 		# The stock Debian terminal route must never load (it fetches a public
-		# disk image); always land on the Alpine desktop.
+		# disk image); always land on the Alpine desktop. The route name comes
+		# from the shared lib (ALPINE_PAGE) via the entrypoint's envsubst.
 		location = / {
-			return 302 /alpine.html;
+			return 302 ${ALPINE_PAGE};
 		}
 		location = /alpine {
-			return 301 /alpine.html;
+			return 301 ${ALPINE_PAGE};
 		}
 
 		# Baked networking/sync config (entrypoint-rendered): the page seeds
@@ -119,9 +134,25 @@ http {
 
 		# Guest ext2 image. Explicit absolute alias (never `root .`, which
 		# resolves against the nginx prefix dir). Byte-range serving is native
-		# to nginx; gzip is off for the image.
-		location /custom-disk-images/ {
-			alias /srv/webvm/custom-disk-images/;
+		# to nginx; gzip is off for the image. The directory name comes from
+		# the shared lib (WEBVM_IMAGE_DIR) via the entrypoint's envsubst —
+		# build.sh produces the image into the same value.
+		#
+		# Cache-Control: the image is content-fingerprinted — the page loads it
+		# as /custom-disk-images/webvm-custom-disk.ext2?v=<image-build> (the
+		# fingerprint baked into config_public_alpine.js), so every image
+		# upgrade changes the URL and a fresh fetch happens exactly then.
+		# immutable makes repeat boots hit the browser HTTP cache with NO
+		# revalidation (a 137 MiB range-streamed image must not round-trip
+		# 304s per boot; without this header caching is heuristic, so repeat
+		# boots within hours re-validate and cold boots after that re-download
+		# the whole image). The add_header here suppresses the server-level
+		# security headers on this same-origin subresource — COOP/CORP are
+		# meaningless on an image fetch and COEP require-corp only applies to
+		# CROSS-origin resources, which this never is.
+		location /${WEBVM_IMAGE_DIR}/ {
+			alias /srv/webvm/${WEBVM_IMAGE_DIR}/;
+			add_header Cache-Control "public, max-age=31536000, immutable" always;
 			# Byte-range serving requires the RAW body: disable the runtime
 			# compressor AND the static-sibling filters (both inherit from
 			# http{} scope) so a stray .br/.gz beside the ext2 can never
@@ -132,25 +163,18 @@ http {
 			gzip_static off;
 		}
 
-		# Self-hosted CheerpX runtime (versioned by the pinned 1.3.7 in
+		# Self-hosted CheerpX runtime (versioned by the pinned 1.3.8 in
 		# webvm/cheerpx) and the SvelteKit hashed chunks: immutable, cached
 		# hard — the runtime is ~21 MB and must not be re-downloaded per load.
-		# (The security add_headers are repeated here because a location that
-		# defines its own add_header does NOT inherit the server-level ones.)
+		# (The security headers live in /etc/nginx/site-subresource-headers.conf
+		# — shared by both locations, since a location that defines its own
+		# add_header does NOT inherit the server-level ones.)
 		location /cheerpx/ {
-			add_header Cross-Origin-Opener-Policy "same-origin" always;
-			add_header Cross-Origin-Embedder-Policy "require-corp" always;
-			add_header Cross-Origin-Resource-Policy "cross-origin" always;
-			add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT} https://${CONTROL_HOST}:443 wss://${CONTROL_HOST}:443" always;
-			add_header Cache-Control "public, max-age=31536000, immutable";
+			include /etc/nginx/site-subresource-headers.conf;
 			try_files $uri =404;
 		}
 		location /_app/immutable/ {
-			add_header Cross-Origin-Opener-Policy "same-origin" always;
-			add_header Cross-Origin-Embedder-Policy "require-corp" always;
-			add_header Cross-Origin-Resource-Policy "cross-origin" always;
-			add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://${CONTROL_HOST}:${CONTROL_PORT} wss://${CONTROL_HOST}:${CONTROL_PORT} https://${CONTROL_HOST}:443 wss://${CONTROL_HOST}:443" always;
-			add_header Cache-Control "public, max-age=31536000, immutable";
+			include /etc/nginx/site-subresource-headers.conf;
 		}
 
 		location / {
@@ -172,58 +196,10 @@ http {
 		# (issued in CORS mode by the pinned wasm client; belt-and-braces).
 		add_header Cross-Origin-Resource-Policy "cross-origin" always;
 
-		# CORS for the browser-side Tailscale client (CheerpX wasm): it fetches
-		# the control-plane /key endpoint cross-origin (page origin on
-		# SITE_PORT -> control plane on CONTROL_PORT), and headscale only
-		# answers /derp/probe with Access-Control-Allow-Origin — every other
-		# control-plane response lacks it, so the fetch is blocked and the
-		# guest tailnet never starts. Echo the request Origin (the browser
-		# fetch is non-credentialed; a LAN-only personal control plane) with
-		# Vary: Origin for correct caching. WebSockets (/ts2021, /derp) are
-		# not subject to CORS, but the header is harmless on them too.
-		#
-		# NB the echo is CONDITIONAL on a non-empty Origin: headscale already
-		# answers /derp/probe with ACAO: * and the wasm client's DERP probe
-		# (HEAD, no Origin header) must NOT receive an empty
-		# "Access-Control-Allow-Origin: " alongside it — a second invalid ACAO
-		# value makes the browser reject the probe (net::ERR_FAILED) and the
-		# client never finishes its DERP selection.
-		# Catch-all reverse proxy to headscale (its v0.29.x control protocol is
-		# PATH-LESS: /key, /ts2021 (Noise upgrade), /derp, /bootstrap-dns and
-		# the legacy /machine/register are all served at the root — the
-		# server_url carries no path. The embedded-DERP relay URL headscale
-		# derives is https://${CONTROL_HOST}:${CONTROL_PORT}/derp, which the
-		# bare /derp path here must match (a trailing-slash location alone
-		# would not).
-		#
-		# All locations need the same WebSocket handling as /headscale/
-		# (headscale's DERP handler answers 426 Upgrade Required and its
-		# TS2021 handler answers 500 to any non-upgraded request).
-		location / {
-			# Echo the request Origin ONLY when present, and HIDE headscale's
-			# own ACAO (it answers /derp/probe with ACAO: *): two
-			# Access-Control-Allow-Origin values ("*" + the echoed origin)
-			# make the browser reject the wasm client's DERP probe with
-			# net::ERR_FAILED (MultipleAllowOriginValues) and the client never
-			# finishes its DERP selection.
-			proxy_hide_header Access-Control-Allow-Origin;
-			if ($http_origin) {
-				add_header Access-Control-Allow-Origin $http_origin always;
-				add_header Vary Origin always;
-			}
-			proxy_http_version 1.1;
-			proxy_set_header Upgrade $http_upgrade;
-			proxy_set_header Connection $connection_upgrade;
-			proxy_set_header Host $host;
-			proxy_set_header True-Client-IP $remote_addr;
-			proxy_set_header X-Real-IP $remote_addr;
-			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-			proxy_set_header X-Forwarded-Proto $scheme;
-			proxy_buffering off;
-			proxy_read_timeout 3600s;
-			proxy_send_timeout 3600s;
-			proxy_pass http://127.0.0.1:8080;
-		}
+		# Catch-all reverse proxy to headscale with the WebSocket + CORS
+		# handling — shared with the CONTROL_WSS_PORT listener via
+		# /etc/nginx/control-location.conf (the two must never drift).
+		include /etc/nginx/control-location.conf;
 	}
 
 	# ----------------------------------------------------------------------
@@ -242,30 +218,6 @@ http {
 
 		add_header Cross-Origin-Resource-Policy "cross-origin" always;
 
-		location / {
-			# Echo the request Origin ONLY when present, and HIDE headscale's
-			# own ACAO (it answers /derp/probe with ACAO: *): two
-			# Access-Control-Allow-Origin values ("*" + the echoed origin)
-			# make the browser reject the wasm client's DERP probe with
-			# net::ERR_FAILED (MultipleAllowOriginValues) and the client never
-			# finishes its DERP selection.
-			proxy_hide_header Access-Control-Allow-Origin;
-			if ($http_origin) {
-				add_header Access-Control-Allow-Origin $http_origin always;
-				add_header Vary Origin always;
-			}
-			proxy_http_version 1.1;
-			proxy_set_header Upgrade $http_upgrade;
-			proxy_set_header Connection $connection_upgrade;
-			proxy_set_header Host $host;
-			proxy_set_header True-Client-IP $remote_addr;
-			proxy_set_header X-Real-IP $remote_addr;
-			proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-			proxy_set_header X-Forwarded-Proto $scheme;
-			proxy_buffering off;
-			proxy_read_timeout 3600s;
-			proxy_send_timeout 3600s;
-			proxy_pass http://127.0.0.1:8080;
-		}
+		include /etc/nginx/control-location.conf;
 	}
 }

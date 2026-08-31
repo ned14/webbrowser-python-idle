@@ -1,0 +1,50 @@
+name: 'Build frontend (with image fingerprint)'
+description: >-
+  npm ci + frontend unit tests (vitest) + the SvelteKit build for one storage
+  backend, with the guest image fingerprint exported from the given
+  image-build.txt path. Shared by the CI frontend job and the GitHub Pages
+  workflow so the env-var names, the fingerprint read and the build order
+  cannot drift apart (a third copy used to live inline in both workflows).
+
+inputs:
+  backend:
+    description: 'Storage backend for the build (browser|samba|webdav|none)'
+    required: true
+  image_build_file:
+    description: >-
+      Path (relative to the workspace root) of the image-build.txt produced
+      by build.sh — the cacheId fingerprint must match the served image.
+    required: true
+  disk_image:
+    description: >-
+      (GitHub Pages build only) the chunked disk image basename; when set the
+      alpine page uses the "github" disk device. Leave empty otherwise.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Export guest fingerprint to the build
+      shell: bash
+      run: echo "WEBVM_IMAGE_BUILD=$(cat \"${{ github.workspace }}/${{ inputs.image_build_file }}\")" >> "$GITHUB_ENV"
+
+    - name: npm ci (committed lockfile, pinned cheerpx 1.3.8)
+      shell: bash
+      working-directory: ${{ github.workspace }}/webvm
+      run: npm ci --no-audit --no-fund
+
+    - name: Frontend unit tests (vitest)
+      # cacheId/sessionGuard/network/clipboard suites — run in CI, not just
+      # locally (the pytest `test-unit` service covers the Python suite).
+      shell: bash
+      working-directory: ${{ github.workspace }}/webvm
+      run: npm test
+
+    - name: Build frontend with matching cacheId fingerprint
+      shell: bash
+      working-directory: ${{ github.workspace }}/webvm
+      env:
+        WEBVM_MODE: ${{ inputs.backend }}
+        WEBVM_DISK_IMAGE: ${{ inputs.disk_image }}
+      run: npm run build

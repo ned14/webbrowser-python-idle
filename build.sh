@@ -17,7 +17,28 @@ set -eu
 # the guest image can silently disagree with the deployment — e.g. a
 # browser-mode image in a webdav deployment, where desktop.start never starts
 # the sync agent and the guest never touches the network (fixed 2026-08-15).
-# Precedence: command line > environment > .env > default (browser).
+# Precedence: command line > environment > .env > default (browser). The
+# shared loader (scripts/lib/webvm-common.sh) applies the .env layer with the
+# same semantics as every other script: an explicit env var always wins, and
+# surrounding quotes are stripped (compose strips them too).
+WEBVM_COMMON="${WEBVM_COMMON:-scripts/lib/webvm-common.sh}"
+if [ ! -f "$WEBVM_COMMON" ]; then
+	echo "FATAL: shared lib not found at $WEBVM_COMMON" >&2
+	exit 1
+fi
+# shellcheck disable=SC1090
+. "$WEBVM_COMMON"
+webvm_load_dotenv
+
+# CWD guard: the pipeline writes rootfs.tar, image.ext2 and webvm/
+# custom-disk-images relative to the repo root, and webvm_load_dotenv reads
+# ./.env — a wrong working directory would silently build from/into the
+# wrong tree (or read a foreign .env). Fail with a clear message instead.
+if [ ! -d diskimage ] || [ ! -d scripts ] || [ ! -f scripts/lib/webvm-common.sh ]; then
+	echo "FATAL: build.sh must run from the repo root (no diskimage/scripts tree here)." >&2
+	exit 1
+fi
+
 BACKEND_SOURCE="default (browser)"
 if [ -n "${1:-}" ]; then
 	BACKEND_SOURCE="command line"
@@ -25,24 +46,6 @@ elif [ -n "${STORAGE_BACKEND:-}" ]; then
 	BACKEND_SOURCE="environment"
 elif [ -f .env ] && grep -q '^[[:space:]]*STORAGE_BACKEND=' .env; then
 	BACKEND_SOURCE=".env"
-fi
-if [ -f .env ]; then
-	# Export .env values that are NOT already in the environment (an explicit
-	# env var or make-passed value wins). Keys are validated so a stray line
-	# cannot become an arbitrary shell assignment.
-	while IFS='=' read -r key rest || [ -n "$key" ]; do
-		case "$key" in
-			''|'#'*) continue ;;
-		esac
-		key=$(printf '%s' "$key" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-		case "$key" in
-			[A-Za-z_][A-Za-z0-9_]*) ;;
-			*) continue ;;
-		esac
-		if ! env | grep -q "^${key}="; then
-			export "$key=$rest"
-		fi
-	done <.env
 fi
 
 STORAGE_BACKEND="${1:-${STORAGE_BACKEND:-browser}}"
@@ -54,8 +57,11 @@ echo "==> Backend: $STORAGE_BACKEND (from $BACKEND_SOURCE)"
 
 IMAGE_TAG="webvm-guest"
 HELPER_TAG="webvm-ext2-helper"
-OUT_DIR="webvm/custom-disk-images"
-OUT_IMAGE="$OUT_DIR/webvm-custom-disk.ext2"
+# Image name + serving dir come from the shared lib (single home — nginx
+# aliases the same values via the entrypoint's envsubst; the frontend
+# literal is pinned by tests/unit/test_scripts.py).
+OUT_DIR="webvm/${WEBVM_IMAGE_DIR}"
+OUT_IMAGE="$OUT_DIR/$WEBVM_IMAGE_NAME"
 FINGERPRINT_FILE="$OUT_DIR/image-build.txt"
 
 # Clean up the credential-bearing export tarball and the export container even
@@ -72,10 +78,10 @@ trap cleanup EXIT
 # (the server's wsgidav credentials — the baked /root/.syncrc must match them,
 # or the no-injection fallback is guaranteed wrong); SYNC_* overrides exist
 # for share-specific values.
-SYNC_URL_EFF="${SYNC_URL:-http://100.64.0.1:8082/webdav/}"
+SYNC_URL_EFF="${SYNC_URL:-http://${GATEWAY_TAILNET_IP_DEFAULT}:${WEBDAV_PORT}${WEBDAV_BASE_PATH}}"
 SYNC_USER_EFF="${SYNC_USER:-${WEBDAV_USER:-webdav}}"
 SYNC_PASS_EFF="${SYNC_PASS:-${WEBDAV_PASS:-changeme}}"
-SAMBA_HOST_EFF="${SAMBA_HOST:-${GATEWAY_TAILNET_IP:-100.64.0.1}}"
+SAMBA_HOST_EFF="${SAMBA_HOST:-${GATEWAY_TAILNET_IP:-$GATEWAY_TAILNET_IP_DEFAULT}}"
 SAMBA_SHARE_EFF="${SAMBA_SHARE:-share}"
 SAMBA_USER_EFF="${SAMBA_USER:-user}"
 SAMBA_PASS_EFF="${SAMBA_PASS:-changeme}"
@@ -105,11 +111,16 @@ docker export "$CID" > rootfs.tar
 docker rm -f webvm-guest-export >/dev/null
 
 # --- 3. Build the ext2 helper image (e2fsprogs, cached) --------------------
+# Skip the (idempotent) build when the tag already exists: the image is
+# pinned by content (ubuntu:26.04 + e2fsprogs) and `docker build` of an
+# unchanged Dockerfile is pure overhead per `make build`.
 echo "==> Preparing ext2 helper"
-docker build -t "$HELPER_TAG" - >/dev/null <<'EOF'
+if ! docker image inspect "$HELPER_TAG" >/dev/null 2>&1; then
+	docker build -t "$HELPER_TAG" - >/dev/null <<'EOF'
 FROM ubuntu:26.04
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs && rm -rf /var/lib/apt/lists/*
 EOF
+fi
 
 # --- 4. Untar + mkfs.ext2 -d on a container-local path ---------------------
 # size = rootfs + ~20% headroom, min 100 MiB, max 2 GiB.
@@ -211,6 +222,6 @@ echo ""
 echo "==> Done"
 echo "   backend:     $STORAGE_BACKEND"
 echo "   ext2:        $OUT_IMAGE ($(du -h "$OUT_IMAGE" | cut -f1))"
-echo "   fingerprint: $FINGERPRINT  (cacheId = blocks_alpine_$FINGERPRINT)"
+echo "   fingerprint: $FINGERPRINT  (cacheId = ${CACHE_ID_PREFIX}$FINGERPRINT)"
 echo ""
 echo "Next: cd webvm && WEBVM_MODE=$STORAGE_BACKEND WEBVM_IMAGE_BUILD=$FINGERPRINT npm run build"

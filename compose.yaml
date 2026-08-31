@@ -32,6 +32,9 @@ x-server-env: &server-env
   WEBDAV_PORT: ${WEBDAV_PORT:-8082}
   STUN_PORT: ${STUN_PORT:-3478}
   WEBDAV_ROOT: ${WEBDAV_ROOT:-/data/webdav}
+  # The WebDAV URL base path (single home: scripts/lib/webvm-common.sh; the
+  # entrypoint renders the wsgidav mount and the baked syncUrl from it).
+  WEBDAV_BASE_PATH: ${WEBDAV_BASE_PATH:-/webdav/}
   WEBDAV_USER: ${WEBDAV_USER:-}
   WEBDAV_PASS: ${WEBDAV_PASS:-}
   HEADSCALE_PREAUTHKEY: ${HEADSCALE_PREAUTHKEY:-}
@@ -52,13 +55,19 @@ services:
     # Surface container health (docker compose ps / `up --wait`). This does NOT
     # trigger restarts on its own — auto-recovery lives in the entrypoint
     # supervisor, which exits the container when headscale/wsgidav/nginx die so
-    # `restart: unless-stopped` re-creates it.
+    # `restart: unless-stopped` re-creates it. The healthcheck mirrors the
+    # supervisor's MARKER mechanism (webvm_supervise_start writes
+    # /tmp/webvm-nginx.status when the supervised nginx exits): `kill -0` on
+    # nginx's own pidfile alone would lie about a crashed-but-zombie master
+    # (PID 1 never reaps), so a marker file is the primary signal.
     healthcheck:
-      test: ["CMD-SHELL", "kill -0 $$(cat /var/run/nginx.pid 2>/dev/null) 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "if [ -f /tmp/webvm-nginx.status ]; then exit 1; fi; kill -0 $$(cat /var/run/nginx.pid 2>/dev/null) 2>/dev/null || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      # Cold first boot renders templates + waits for headscale's socket and
+      # user namespace (up to ~60s) before nginx starts.
+      start_period: 30s
     ports:
       # Ports are published ONLY on LAN_IP (never all interfaces). Default
       # 127.0.0.1 = zero-config single machine. LAN use sets LAN_IP=<lan-ip>.
@@ -82,13 +91,22 @@ services:
       - ${DATA_DIR:-./data}:${WEBDAV_ROOT:-/data/webdav}
     networks:
       webvm-net:
-        ipv4_address: 172.28.0.10
+        # The server's static compose-network IP — the ONLY address the
+        # gateway/join-test client use for the control plane. The value is
+        # interpolated from GATEWAY_CONTROL_IP (shared-lib default
+        # 172.28.0.10) so an .env override reaches the actual interface —
+        # a bare literal here would silently orphan a remapped gateway
+        # (its --login-server follows the env var, the container stays on
+        # the literal). The subnet (172.28.0.0/16) must cover the value.
+        ipv4_address: ${GATEWAY_CONTROL_IP:-172.28.0.10}
 
   # tailscaled (userspace networking) + socat relays in one container.
   # Started only for tailnet modes: `make up-tailnet` (compose profile).
   gateway:
     build:
-      context: ./gateway
+      # Repo-root context so the shared lib (scripts/lib/) can be COPY'd.
+      context: .
+      dockerfile: gateway/Dockerfile
     profiles: ["tailnet"]
     restart: unless-stopped
     # The default WSS port (443) is published HERE, on the tailnet profile
@@ -114,6 +132,7 @@ services:
       WEBDAV_PORT: ${WEBDAV_PORT:-8082}
       SAMBA_LAN_IP: ${SAMBA_LAN_IP:-}
       GIT_SSH_LAN_IP: ${GIT_SSH_LAN_IP:-}
+      GIT_SSH_PORT: ${GIT_SSH_PORT:-2222}
       GIT_HTTP_LAN_IP: ${GIT_HTTP_LAN_IP:-}
       GIT_HTTP_PORT: ${GIT_HTTP_PORT:-8083}
       # Trust the private CA for control-plane/DERP TLS (Go honors this)
@@ -122,18 +141,23 @@ services:
       - ./certs:/certs:ro
       - gateway-state:/var/lib/tailscale
     depends_on:
-      - server
+      # Wait for the server to be HEALTHY (nginx serving — the entrypoint
+      # brings nginx up only after headscale's socket/users/key checks), so
+      # the gateway's un-retried `tailscale up` never races a cold start.
+      server:
+        condition: service_healthy
     networks:
       - webvm-net
 
-  # Unit tests (pytest) — no host Python packages needed
+  # Unit tests (pytest) — no host Python packages needed. openssl is the
+  # gen-certs.sh SAN/coverage test's only external dependency.
   test-unit:
     image: python:3.14-alpine
     profiles: ["test"]
     working_dir: /work
     volumes:
       - .:/work
-    command: sh -c "pip install --no-cache-dir --break-system-packages pytest >/dev/null && pytest -q /work/tests/unit"
+    command: sh -c "apk add --no-cache openssl >/dev/null 2>&1; pip install --no-cache-dir --break-system-packages pytest >/dev/null && pytest -q /work/tests/unit"
 
 networks:
   webvm-net:

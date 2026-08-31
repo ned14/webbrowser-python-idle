@@ -70,13 +70,30 @@ LEASE_RETRY_S = 15
 # (`.sync-owned` marker) retries indefinitely.
 LEASE_RETRY_ATTEMPTS = 6  # 6 * LEASE_RETRY_S = 90s ~= LEASE_EXPIRY_S
 POLL_S = 5
+# The idle backoff: after POLL_IDLE_CYCLES consecutive change-free scans the
+# daemon polls at POLL_IDLE_S instead of POLL_S (a full-tree emulated stat
+# walk every 5s is pure vCPU cost on a quiet home). Any detected change
+# re-arms the fast cadence.
+POLL_IDLE_S = 30
+POLL_IDLE_CYCLES = 4
 # Debounce disabled: every guest-side wait primitive is unreliable under
 # CheerpX (time.sleep never fires; subprocess sleep is flaky; busy-waits
 # starve the guest clock; socket-timeout sleeps hang too — verified
 # 2026-08-15, plans/networking-bug.md §16). A first sync has nothing to tear
 # (the home is what it is), and the push loop re-checks mtimes each cycle.
 DEBOUNCE_S = 0
-TAILNET_WAIT_ATTEMPTS = 12  # 12 * (3s ping + 5s) ~= 96s; keep the boot pull bounded
+# The guest's tailnet wait must survive the SLOWEST cold-boot join: the
+# browser-side wasm client connects 30-90s after page load under load (its
+# probes starve on the main thread while the emulated VM boots + the boot
+# resources download), and the tailnet data path follows ~30s later — and
+# the join is SLOWER still when the netmap is small (the pinned wasm
+# client's netmap validation needs several registered nodes; the E2E suite
+# accumulates them across boots — verified 2026-08-30). 789253a's window
+# was 12 * 8s = 96s; a 120s window still missed the slow mid-suite joins
+# (the network-spec regression). 33 * (1s ping + 5s) ~= 200s keeps the
+# boot pull bounded (the agent runs backgrounded — the desktop is never
+# blocked) and fits under the E2E's 240s lock poll.
+TAILNET_WAIT_ATTEMPTS = 33  # 33 * (1s ping + 5s) ~= 200s; keep the boot pull bounded
 TAILNET_WAIT_S = 5
 
 # Never sync volatile/private state. The .ssh keypair stays in the guest.
@@ -217,6 +234,14 @@ def _parse_http_date(value):
 
 
 class WebDAVTransport:
+    # Large data-path operations (get/put and the recursive PROPFIND listing)
+    # use a LONG timeout: the tailnet relay + CheerpX emulation make big
+    # transfers slow, and the 30 s default aborted mid-transfer (the E2E
+    # big-put-probe exists because of it). ping() stays at 1 s — the
+    # tailnet-wait loop calls it up to 12 times and must give up quickly
+    # when the guest's data path is unusable.
+    _OP_TIMEOUT_S = 120
+
     def __init__(self, url, user="", password=""):
         self.base = url.rstrip("/") + "/"
         self.user = user
@@ -272,7 +297,7 @@ class WebDAVTransport:
         req.add_header("Depth", "infinity")
         req.add_header("Content-Type", "application/xml")
         try:
-            body = self._open(req).read()
+            body = self._open(req, timeout=self._OP_TIMEOUT_S).read()
         except FileNotFoundError:
             return {}
         ns = {"d": "DAV:"}
@@ -302,11 +327,11 @@ class WebDAVTransport:
 
     def get(self, path):
         req = urllib.request.Request(self.base + path, method="GET")
-        return self._open(req).read()
+        return self._open(req, timeout=self._OP_TIMEOUT_S).read()
 
     def put(self, path, data):
         req = urllib.request.Request(self.base + path, data=data, method="PUT")
-        self._open(req).read()
+        self._open(req, timeout=self._OP_TIMEOUT_S).read()
 
     def mkdir(self, path):
         # MKCOL (WebDAV) — creates one collection; callers create ancestors
@@ -325,15 +350,16 @@ class WebDAVTransport:
             pass
 
     def ping(self):
-        # Short timeout: the tailnet-wait loop calls this up to 18 times and
+        # Short timeout: the tailnet-wait loop calls this up to 12 times and
         # must give up quickly when the guest's data path is unusable (the
         # CheerpX guest network is currently broken upstream — a connect()
         # to a tailnet IP hangs rather than failing — see
-        # plans/networking-bug.md §15). 5s keeps the boot pull bounded.
+        # plans/networking-bug.md §15). 1s keeps the boot pull bounded (the
+        # target is a LAN/loopback relay, so 1s is generous).
         req = urllib.request.Request(self.base, method="PROPFIND")
         req.add_header("Depth", "0")
         try:
-            self._open(req, timeout=3).read()
+            self._open(req, timeout=1).read()
             return True
         except Exception:
             return False
@@ -705,12 +731,37 @@ def ensure_remote_parents(transport, rel):
 def make_snapshot(home):
     import io
 
+    # tarfile.add(recursive=True) has NO per-part exclusion hook, so the
+    # top-level EXCLUDE_NAMES filter alone would leak nested excluded names
+    # (docs/.ssh/id_ed25519, a project's .cache dir, ...) into the uploaded
+    # snapshot — the exact state scan_local and extract_snapshot refuse. Walk
+    # the tree manually with the same per-part read_excluded filter, so the
+    # three functions share one exclusion contract.
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for child in sorted(home.iterdir()):
-            if child.name in EXCLUDE_NAMES:
-                continue
-            tf.add(child, arcname=child.name, recursive=True)
+        def add_tree(directory, arc_prefix):
+            try:
+                children = sorted(directory.iterdir())
+            except OSError:
+                return
+            for child in children:
+                if child.name in EXCLUDE_NAMES:
+                    continue
+                # Symlinks are SKIPPED — the same contract as scan_local and
+                # extract_snapshot: the agent may run as root, so following a
+                # link could upload files outside the home tree, and the
+                # extractor refuses link members anyway (a snapshot carrying
+                # them would restore nothing and leak what it linked to).
+                if child.is_symlink():
+                    continue
+                arc = "%s/%s" % (arc_prefix, child.name) if arc_prefix else child.name
+                if child.is_dir():
+                    tf.add(child, arcname=arc, recursive=False)
+                    add_tree(child, arc)
+                else:
+                    tf.add(child, arcname=arc, recursive=False)
+
+        add_tree(home, "")
     return buf.getvalue()
 
 
@@ -748,6 +799,11 @@ def compute_pull_plan(remote_entries, manifest, local_existing=frozenset()):
     locally (fresh restore), or when the backend copy is newer than the
     backend mtime recorded at last push (same clock). Existing local files
     with no record are never overwritten (first-sync protection).
+
+    HTTP/WebDAV dates have 1s resolution: two uploads of the SAME file
+    within one second (mtime unchanged) are distinguished by the content
+    length, so a same-second overwrite with different content is still
+    pulled on the next boot.
     """
     plan = []
     files = manifest.get("files", {})
@@ -756,9 +812,20 @@ def compute_pull_plan(remote_entries, manifest, local_existing=frozenset()):
             continue
         info = remote_entries[rel]
         record = files.get(rel)
-        if record and float(info["mtime"]) <= float(record.get("backend_mtime", 0)):
-            continue
-        if not record and rel in local_existing:
+        if record:
+            backend_mtime = float(record.get("backend_mtime", 0))
+            if float(info["mtime"]) < backend_mtime:
+                continue
+            if float(info["mtime"]) == backend_mtime:
+                recorded_size = record.get("backend_size")
+                # Legacy records (pre-size manifests) keep the old
+                # same-mtime-skip behaviour; a size mismatch with a recorded
+                # size is a same-second overwrite -> pull.
+                if recorded_size is None:
+                    continue
+                if int(info.get("size", 0)) == int(recorded_size):
+                    continue
+        elif rel in local_existing:
             continue
         plan.append(rel)
     return plan
@@ -797,6 +864,7 @@ def pull_home(home, transport, manifest, log=print):
         local_mtime = write_local(home, rel, data)
         manifest["files"][rel] = {
             "backend_mtime": info["mtime"],
+            "backend_size": info["size"],
             "local_mtime": local_mtime,
         }
         log("pull: %s" % rel)
@@ -815,6 +883,7 @@ def pull_home(home, transport, manifest, log=print):
             if rel in local_before and target.exists() and not target.is_dir():
                 manifest["files"][rel] = {
                     "backend_mtime": info["mtime"],
+                    "backend_size": info["size"],
                     "local_mtime": 0,
                 }
     if plan or (not manifest["files"] and remote_files):
@@ -861,6 +930,7 @@ def push_home(home, transport, manifest, log=print):
             info = remote.get(rel)
             manifest["files"][rel] = {
                 "backend_mtime": info["mtime"] if info else time.time(),
+                "backend_size": info["size"] if info else 0,
                 "local_mtime": local[rel],
             }
         # Files removed locally since the last push keep their record (their
@@ -970,13 +1040,21 @@ def _run_push_loop(home, transport, manifest, node, stop, log=print):
     refresh_lease), so the caller re-acquires instead of writing without the
     lease. The final push + lease release run only on a clean shutdown — never
     when the lease was lost to another session.
+
+    Poll cadence is ADAPTIVE: every scan is a full emulated stat walk of the
+    home, so after a few change-free cycles the loop slows from POLL_S to
+    POLL_IDLE_S; any change re-arms the fast cadence.
     """
     last_refresh = 0.0
+    idle_cycles = 0
+    poll_s = POLL_S
     while not stop["flag"]:
         try:
             local = scan_local(home)
             plan = compute_push_plan(local, manifest)
             if plan:
+                idle_cycles = 0
+                poll_s = POLL_S
                 # Debounced push: let the write settle before uploading
                 # (editors can write a file over >1s; pushing mid-write would
                 # upload a torn copy).
@@ -987,6 +1065,10 @@ def _run_push_loop(home, transport, manifest, node, stop, log=print):
                 changed = push_home(home, transport, manifest, log=log)
                 if changed:
                     log("sync: pushed changes")
+            else:
+                idle_cycles += 1
+                if idle_cycles >= POLL_IDLE_CYCLES:
+                    poll_s = POLL_IDLE_S
             if time.time() - last_refresh >= LEASE_HEARTBEAT_S:
                 refresh_lease(transport, node)  # LeaseRefused propagates
                 last_refresh = time.time()
@@ -994,7 +1076,7 @@ def _run_push_loop(home, transport, manifest, node, stop, log=print):
             raise
         except Exception as exc:
             log("sync: push error: %s" % exc)
-        for _ in range(POLL_S):
+        for _ in range(poll_s):
             if stop["flag"]:
                 break
             _sleep(1)

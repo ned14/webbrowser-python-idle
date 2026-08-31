@@ -87,6 +87,35 @@ async function listRowCount(page) {
 	});
 }
 
+// The explorer's STATUS BAR text ("Loaded N items in …") at the bottom of
+// the window. THE delivery signal for the paste test: when the Search
+// filter empties the file list, the status text shrinks dramatically
+// ("Loaded 0 items" vs the multi-entry baseline). The treeview's own pixel
+// row-count cannot be used — the empty treeview + window chrome keep
+// rendering light bands, so a "rows == 0" assertion never fires (verified
+// 2026-08-30: the paste delivered — the filter ran, the status updated —
+// while the band count stayed constant).
+async function statusBarDark(page) {
+	return page.evaluate(() => {
+		const d = document.getElementById('display');
+		if (!d || !d.width || !d.height) return -1;
+		const s = document.createElement('canvas');
+		s.width = d.width;
+		s.height = d.height;
+		const c = s.getContext('2d');
+		c.drawImage(d, 0, 0);
+		const data = c.getImageData(0, 0, s.width, s.height).data;
+		let dark = 0;
+		for (let y = 758; y < 796; y++) {
+			for (let x = 20; x < 700; x++) {
+				const i = (y * s.width + x) * 4;
+				if (data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100) dark++;
+			}
+		}
+		return dark;
+	});
+}
+
 test('untypable text is refused with a diagnostic and nothing is sent', async ({
 	page,
 }) => {
@@ -112,20 +141,22 @@ test('pasted text definitely appears in a text entry box in the VM (explorer Sea
 	await page.goto(SITE_URL, { waitUntil: 'domcontentloaded' });
 	await waitForLightDesktop(page);
 
-	// The home folder lists at least one entry ("examples"): baseline rows.
-	const baseline = await listRowCount(page);
-	expect(baseline).toBeGreaterThan(0);
+	// Baseline: the home folder lists entries, so the status bar reads
+	// "Loaded N items…" — a LONG text. After a filter that matches nothing,
+	// it reads "Loaded 0 items…" — much shorter.
+	const baselineStatus = await statusBarDark(page);
+	expect(baselineStatus).toBeGreaterThan(100);
 
-	// Focus the explorer's Search entry (click well right of the sidebar
-	// panel zone — x=700 is safely inside the entry and outside the panel
-	// overlay). The entry's y is swept across the search row because the
-	// exact pixel height depends on fonts; the first hit sticks.
+	// The Search entry is focused IN-GUEST: the explorer claims X input
+	// focus for it at startup (focus_force — the emulated X server's
+	// click-to-focus is unreliable), and xsendkeys sets the X input focus
+	// to the top-level window before typing. NO page-side click is needed
+	// (a synthetic click cannot reliably move the X focus under the
+	// emulated X server — verified 2026-08-30).
 	const SEARCH_TEXT = 'zzzz-no-match-xyz'; // matches nothing -> list empties
-	const attempts = [150, 158, 166, 174];
 	let delivered = false;
-	for (const y of attempts) {
+	for (let attempt = 0; attempt < 4 && !delivered; attempt++) {
 		await closeClipboardPanel(page);
-		await page.mouse.click(700, y, { delay: 40 });
 		await openClipboardPanel(page);
 		await page
 			.locator('textarea[placeholder="Type, paste, or drop a file here, then click Paste"]')
@@ -141,13 +172,18 @@ test('pasted text definitely appears in a text entry box in the VM (explorer Sea
 		if (!acked) continue;
 
 		// THE delivery assertion: the Search box received the typed text,
-		// so the file list filtered down to nothing.
-		const rows = await expect
-			.poll(async () => listRowCount(page), { timeout: 20_000, intervals: [1000] })
-			.toBe(0)
+		// so the file list filtered down to nothing and the status text
+		// shrank. The threshold is generous: the "Loaded 0 items" text is
+		// under a third of the baseline's pixel count.
+		const filtered = await expect
+			.poll(
+				async () => (await statusBarDark(page)) < baselineStatus * 0.4,
+				{ timeout: 20_000, intervals: [1000] }
+			)
+			.toBe(true)
 			.then(() => true)
 			.catch(() => false);
-		if (rows) {
+		if (filtered) {
 			delivered = true;
 			break;
 		}
@@ -180,9 +216,11 @@ test('file content can be loaded into the paste box (Open file… and drag-and-d
 	await expect(box).toHaveValue('dropped by drag');
 
 	// 3. Long content shows the typing-time warning (no paste click needed).
+	// The estimate is computed from CX_TYPE_DELAY_MS (5 ms/char since
+	// 2026-08-29): 500 chars = ~2.5s.
 	await box.fill('x'.repeat(500));
 	await expect(page.locator('p.text-amber-400, span.text-amber-400').last()).toContainText(
-		'chars — ~5s to type'
+		'chars — ~2.5s to type'
 	);
 });
 
@@ -336,12 +374,13 @@ test('length warning updates immediately while typing and after opening a file',
 
 	// Typing past the threshold shows the warning IMMEDIATELY (the note is
 	// reactive — a bare template call would never re-render here).
+	// Estimates use CX_TYPE_DELAY_MS (5 ms/char since 2026-08-29).
 	await box.fill('x'.repeat(500));
-	await expect(warning).toContainText('500 chars — ~5s to type');
+	await expect(warning).toContainText('500 chars — ~2.5s to type');
 
 	// It updates as the content grows.
 	await box.fill('x'.repeat(900));
-	await expect(warning).toContainText('900 chars — ~9s to type');
+	await expect(warning).toContainText('900 chars — ~4.5s to type');
 
 	// Over the hard cap: the too-long note.
 	await box.fill('x'.repeat(10001));
@@ -364,7 +403,7 @@ test('length warning updates immediately while typing and after opening a file',
 		buffer: Buffer.from('y'.repeat(600), 'utf-8'),
 	});
 	await expect(box).toHaveValue('y'.repeat(600));
-	await expect(warning).toContainText('600 chars — ~6s to type');
+	await expect(warning).toContainText('600 chars — ~3s to type');
 });
 
 test('Ctrl+V during boot is left to the guest: no error, no crash, desktop comes up', async ({

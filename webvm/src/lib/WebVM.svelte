@@ -1,14 +1,14 @@
 <script>
 	import { onMount, tick } from 'svelte';
-	import { get } from 'svelte/store';
 	import SideBar from '$lib/SideBar.svelte';
 	import '$lib/global.css';
 	import '@xterm/xterm/css/xterm.css'
 	import '@fortawesome/fontawesome-free/css/all.min.css'
 	import { networkInterface, startLogin } from '$lib/network.js'
+	import { sampleCanvasPixels, hasAnyPixel } from '$lib/canvasProbe.js'
 	import { cpuActivity, diskActivity, cpuPercentage, diskLatency } from '$lib/activities.js'
 	import { introMessage } from '$lib/messages.js'
-	import { pasteStatus } from '$lib/clipboard.js'
+	import { pasteStatus, pasteUntypableReason, encodePasteFrame, pasteAckTimeoutMs, consumePasteAcks, PASTE_MAX_CHARS } from '$lib/clipboard.js'
 
 	export let configObj = null;
 	export let processCallback = null;
@@ -215,6 +215,12 @@
 	// framebuffer rendered anything non-black yet? (256x256 downscale.)
 	// Terminal-only VMs have no canvas — the caller gates on needsDisplay,
 	// so this probes nothing there.
+	// The watchdog's pixel probe uses ONE reused scratch canvas (a fresh
+	// 256x256 canvas per tick is allocation + GC churn on the boot critical
+	// path; the probe itself only needs a readable downscale). The sampling
+	// itself is the SHARED canvasProbe.js implementation — the E2E probes
+	// run the same code (tests/e2e/lib/desktop.js injects the module).
+	var watchdogScratchCanvas = null;
 	function hasDisplayPixels()
 	{
 		if (!configObj.needsDisplay)
@@ -222,25 +228,9 @@
 		var display = document.getElementById("display");
 		if (!display || !display.width || !display.height)
 			return false;
-		try
-		{
-			var scratch = document.createElement("canvas");
-			scratch.width = Math.min(display.width, 256);
-			scratch.height = Math.min(display.height, 256);
-			var ctx = scratch.getContext("2d");
-			ctx.drawImage(display, 0, 0, scratch.width, scratch.height);
-			var data = ctx.getImageData(0, 0, scratch.width, scratch.height).data;
-			for(var i = 0; i < data.length; i += 4)
-			{
-				if(data[i] || data[i+1] || data[i+2])
-					return true;
-			}
-		}
-		catch(e)
-		{
-			// canvas not readable yet — not an error
-		}
-		return false;
+		if (watchdogScratchCanvas == null)
+			watchdogScratchCanvas = document.createElement("canvas");
+		return hasAnyPixel(sampleCanvasPixels(display, { scratch: watchdogScratchCanvas }));
 	}
 
 	// Boot watchdog: a boot that makes no progress (no guest console
@@ -254,7 +244,31 @@
 	// page while the E2E definition would accept it.
 	var STUCK_SILENT_MS = 200000; // continuous silence, no floor yet included
 	var STUCK_FLOOR_MS = 270000;  // never declare stuck before this since the run started
-	var WATCHDOG_INTERVAL_MS = 2000;
+	// 5 s tick (was 2 s): each tick does a full-canvas getImageData readback
+	// when the display is up, and the boot phase is the heaviest guest load —
+	// a slower tick costs nothing on the stuck verdict (the thresholds are
+	// 200/270 s) while cutting the GPU readback churn in half.
+	var WATCHDOG_INTERVAL_MS = 5000;
+
+	// Repeat-boot warm (post-boot, idle): after the desktop is up, stream the
+	// ENTIRE image into the browser HTTP cache (immutable-cached, so no
+	// revalidation) — a later session on this machine then reads EVERY block
+	// from the disk cache, not just the boot-critical leading bytes warmed in
+	// startEarlyBootFetch. One low-priority request; any failure just means
+	// the next boot reads from the network as before. bytes-mode only (the
+	// GitHub Pages deployment streams chunks via GitHubDevice instead).
+	var fullWarmDone = false;
+	function maybeWarmFullImage()
+	{
+		if(fullWarmDone || !configObj || configObj.diskImageType !== "bytes" || !configObj.diskImageUrl)
+			return;
+		fullWarmDone = true;
+		try
+		{
+			fetch(configObj.diskImageUrl, { priority: "low" }).catch(function() {});
+		}
+		catch(e) { /* ignore: the warm fetch is an optimization only */ }
+	}
 
 	function watchdogTick()
 	{
@@ -272,13 +286,17 @@
 			try { sessionStorage.removeItem("webvm-trap-reload"); } catch(e) {}
 			clearInterval(watchdogTimer);
 			watchdogTimer = null;
+			// The desktop is up and the engine is idle-ish: warm the whole
+			// image for the next session (one low-priority fetch, never on
+			// the boot critical path).
+			maybeWarmFullImage();
 			return;
 		}
 		if (bootStarted)
 		{
 			var now = Date.now();
 			bootElapsed = Math.floor((now - bootStartTs) / 1000);
-			if (configObj.needsDisplay && !pixelSeen && now - lastPixelCheckAt > 3000)
+			if (configObj.needsDisplay && !pixelSeen && now - lastPixelCheckAt > 5000)
 			{
 				lastPixelCheckAt = now;
 				if (hasDisplayPixels())
@@ -321,9 +339,12 @@
 		guestOutputTs = Date.now();
 		if(!pixelSeen && !bootedOnce && !fatal)
 		{
+			// stream:true — a multi-byte UTF-8 char split across console
+			// chunks must not decode as U+FFFD in the fatal-overlay tail
+			// (same streaming treatment the paste-ack scanner below gets).
 			if(__bootTextDecoder == null)
-				__bootTextDecoder = new TextDecoder();
-			cxBootConsoleTail = (cxBootConsoleTail + __bootTextDecoder.decode(buf)).slice(-4096);
+				__bootTextDecoder = new TextDecoder("utf-8", {fatal:false});
+			cxBootConsoleTail = (cxBootConsoleTail + __bootTextDecoder.decode(buf, {stream:true})).slice(-4096);
 		}
 		// The paste typer's CXACK/CXFAIL answers ride the console stream;
 		// scan them off (stream:true so multi-byte UTF-8 split across
@@ -343,8 +364,8 @@
 	// ------------------------------------------------------------------
 	// Paste (sidebar Clipboard panel). The text is sent to the guest as a
 	// `CXCLIP <len> <base64>` frame over the console input channel; the
-	// guest paste-typer (/usr/local/bin/paste-typer.py) types it into the
-	// X-input-focus window via xdotool (XTEST fake input) — literally the
+	// guest paste-typer (/usr/local/bin/paste-typer.sh) types it into the
+	// X-input-focus window via xsendkeys (XTEST fake input) — literally the
 	// same key events as if the user had typed the text by hand — and
 	// answers `CXACK <len>` on the console, which releases the single
 	// in-flight throttle. Because it is real keystroke input, only text
@@ -353,46 +374,14 @@
 	// quotes”, 日本語, emoji) is REFUSED with a diagnostic naming the
 	// offending character, both here and in the typer.
 	// ------------------------------------------------------------------
-	var PASTE_MAX_TEXT = 10000;
+	// The wire contract (typability gate, frame encoding, ack timeout and
+	// ack-line scanning) lives in clipboard.js — the SAME module PasteTab
+	// uses for PASTE_MAX_CHARS/CX_TYPE_DELAY_MS — so the page-side protocol
+	// is unit-tested against the guest contract (tests/unit/test_paste_typer.py
+	// pins the guest side).
 	var pasteInFlight = false;
 	var pasteTimeout = null;
 	var pasteAckBuf = "";
-	function pasteUntypableReason(text)
-	{
-		for(var i = 0; i < text.length; i++)
-		{
-			var code = text.codePointAt(i);
-			if(code >= 0x20 && code <= 0x7E)
-				continue;
-			var ch = text[i];
-			if(ch === "\n" || ch === "\t" || ch === "\b")
-				continue;
-			return "char U+" + code.toString(16).toUpperCase() +
-				" (" + JSON.stringify(ch) + ") at index " + i;
-		}
-		return null;
-	}
-	// xdotool types at CX_TYPE_DELAY ms per char; the ack timeout scales
-	// with the text length (a 10k-char paste takes a while to type).
-	function pasteAckTimeoutMs(len)
-	{
-		return 5000 + len * 20;
-	}
-	function sendToGuest(str)
-	{
-		for(var i=0;i<str.length;i++)
-			cxReadFunc(str.charCodeAt(i));
-	}
-	function encodePasteFrame(text)
-	{
-		var bytes = new TextEncoder().encode(text);
-		// btoa() takes a string; chunked so a large frame cannot blow the
-		// call stack via Function.prototype.apply argument limits.
-		var bin = "";
-		for(var i = 0; i < bytes.length; i += 8192)
-			bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
-		return "CXCLIP " + bytes.length + " " + btoa(bin) + "\n";
-	}
 	function releasePasteThrottle(acked, len)
 	{
 		pasteInFlight = false;
@@ -413,32 +402,18 @@
 		// The guest typer answers CXACK/CXFAIL on the console; release the
 		// in-flight throttle when they arrive (lines may span chunks, so
 		// reassemble; only CX-prefixed fragments are held back).
-		pasteAckBuf += text;
-		while(true)
-		{
-			var nl = pasteAckBuf.indexOf("\n");
-			if(nl < 0)
-				break;
-			var line = pasteAckBuf.slice(0, nl);
-			pasteAckBuf = pasteAckBuf.slice(nl + 1);
-			if(line.indexOf("CXACK ") === 0)
-			{
-				var n = parseInt(line.slice(6), 10);
-				releasePasteThrottle(true, isNaN(n) ? 0 : n);
-			}
-			else if(line.indexOf("CXFAIL") === 0)
-				releasePasteThrottle(false);
-		}
-		if(pasteAckBuf.length > 64)
-			pasteAckBuf = pasteAckBuf.slice(-64);
+		pasteAckBuf = consumePasteAcks(pasteAckBuf + text, {
+			onAck: function(len) { releasePasteThrottle(true, len); },
+			onFail: function() { releasePasteThrottle(false); },
+		});
 	}
 	function sendPasteText(text)
 	{
 		if(pasteInFlight || text == null || text === "")
 			return;
-		if(text.length > PASTE_MAX_TEXT)
+		if(text.length > PASTE_MAX_CHARS)
 		{
-			pasteStatus.set("Not pasted — larger than " + PASTE_MAX_TEXT + " characters");
+			pasteStatus.set("Not pasted — larger than " + PASTE_MAX_CHARS + " characters");
 			return;
 		}
 		var bad = pasteUntypableReason(text);
@@ -456,7 +431,9 @@
 		pasteInFlight = true;
 		pasteStatus.set("Pasting into the VM…");
 		pasteTimeout = setTimeout(releasePasteThrottle, pasteAckTimeoutMs(text.length));
-		sendToGuest(encodePasteFrame(text));
+		// readData is the console-input writer (the same loop the terminal's
+		// own onData uses) — one send path, not a copied second loop.
+		readData(encodePasteFrame(text));
 	}
 	function handleSidebarPaste(e)
 	{
@@ -531,11 +508,20 @@
 	{
 		diskActivity.set(state != "ready");
 	}
+	// Coalesce the disk-latency average: latencyCallback fires per block read
+	// (dense during boot); recompute the 30-entry average + store update at
+	// most every 500 ms — far finer than the sidebar UI needs (same pattern
+	// as the CPU-percentage coalescing above).
+	var diskLatencyLastComputeAt = 0;
 	function latencyCallback(latency)
 	{
 		diskLatencies.push(latency);
 		if(diskLatencies.length > 30)
 			diskLatencies.shift();
+		var curTime = Date.now();
+		if(curTime - diskLatencyLastComputeAt < 500)
+			return;
+		diskLatencyLastComputeAt = curTime;
 		// Average the latency over at most 30 blocks
 		var total = 0;
 		for(var i=0;i<diskLatencies.length;i++)
@@ -543,6 +529,15 @@
 		var avg = total / diskLatencies.length;
 		diskLatency.set(Math.ceil(avg));
 	}
+	// Coalesce the CPU-percentage recomputation: cpuCallback fires on EVERY
+	// engine scheduling event, and each call used to re-walk the whole 10 s
+	// sample window plus churn the 2 s cleanup interval — a busy guest
+	// triggered this hundreds of times per second. The percentage is now
+	// recomputed at most every 500 ms (cleanupEvents still recomputes on its
+	// 2 s tick), which is far finer than the sidebar UI needs. The cleanup
+	// timer is armed ONCE (guarded): the old clearInterval+setInterval per
+	// event was itself timer churn on the boot critical path.
+	var cpuLastComputeAt = 0;
 	function cpuCallback(state)
 	{
 		cpuActivity.set(state != "ready");
@@ -550,11 +545,14 @@
 		var limitTime = curTime - 10000;
 		expireEvents(cpuActivityEvents, curTime, limitTime);
 		cpuActivityEvents.push({t: curTime, state: state});
-		computeCpuActivity(curTime, limitTime);
+		if(curTime - cpuLastComputeAt >= 500)
+		{
+			cpuLastComputeAt = curTime;
+			computeCpuActivity(curTime, limitTime);
+		}
 		// Start an interval timer to cleanup old samples when no further activity is received
-		if(activityEventsInterval != 0)
-			clearInterval(activityEventsInterval);
-		activityEventsInterval = setInterval(cleanupEvents, 2000);
+		if(activityEventsInterval == 0)
+			activityEventsInterval = setInterval(cleanupEvents, 2000);
 	}
 	function computeXTermFontSize()
 	{
@@ -571,6 +569,18 @@
 			internalMult = minWidth / displayWidth;
 		if(displayHeight < minHeight)
 			internalMult = Math.max(internalMult, minHeight / displayHeight);
+		// Cap the KMS backing store: EVERYTHING in the guest scales with the
+		// framebuffer (Xorg ShadowFB blits during boot, Tk/IDLE rendering,
+		// the runtime's per-frame canvas transfer) — an uncapped 1920x1080
+		// window is ~2.6x the pixels of 1024x768. The #display CSS box
+		// scales the canvas up to the window, so a capped internal
+		// resolution is invisible to the user (verified by the resize E2E).
+		var maxWidth = 1280;
+		var maxHeight = 800;
+		if(displayWidth * internalMult > maxWidth)
+			internalMult = maxWidth / displayWidth;
+		if(displayHeight * internalMult > maxHeight)
+			internalMult = Math.min(internalMult, maxHeight / displayHeight);
 		var internalWidth = Math.floor(displayWidth * internalMult);
 		var internalHeight = Math.floor(displayHeight * internalMult);
 		cx.setKmsCanvas(display, internalWidth, internalHeight);
@@ -737,6 +747,36 @@
 					throw new Error("Unrecognized device type");
 			}
 		}));
+		// Cold-boot overlap: the ext2's actual block reads only start at
+		// cx.run() (after the engine worker + wasm compile), so on a cold
+		// cache the network sits idle while the engine initializes, then the
+		// guest's first reads trigger ~1100 sequential range GETs that
+		// compete with the emulator's critical path. Warm the image's
+		// LEADING bytes into the HTTP cache during engine init instead: the
+		// boot-critical blocks (bootloader, init, openrc, Xorg, the Python
+		// stdlib the explorer/IDLE import) live at the start of the image,
+		// and the browser HTTP cache serves the guest's overlapping range
+		// requests from a cached 206 — first reads become cache hits.
+		// 32 MiB (was 16): the boot-critical read set measurably extends
+		// past the first 16 MiB on the emulated i386; one low-priority range
+		// request costs nothing when the image is cached. Same URL (incl.
+		// the ?v= fingerprint) so the cache key is shared with
+		// HttpBytesDevice's reads. Fire-and-forget: any failure just means
+		// the guest reads from the network as before. (Chrome supports fetch
+		// priority hints; other engines ignore it.) Kept at 32 MiB — a
+		// larger warm competed with the wasm client's own cold-boot
+		// download on the shared connection (2026-08-30).
+		if(configObj.diskImageType === "bytes" && configObj.diskImageUrl)
+		{
+			try
+			{
+				fetch(configObj.diskImageUrl, {
+					headers: { Range: "bytes=0-33554432" },
+					priority: "low",
+				}).catch(function() {});
+			}
+			catch(e) { /* ignore: the warm fetch is an optimization only */ }
+		}
 	}
 	async function initCheerpX()
 	{
@@ -829,6 +869,7 @@
 			{
 				await cx.run(configObj.cmd, configObj.args, configObj.opts);
 				bootedOnce = true;
+				maybeWarmFullImage();
 			}
 		}
 		catch(e)
@@ -871,7 +912,18 @@
 	});
 	async function handleConnect()
 	{
+		// The panel dispatches 'connect' only while the sidebar is
+		// interactive, but a click can still land while the VM is booting
+		// (or after a fatal): cx.networkLogin() would throw on a null cx and
+		// the login popup would be stranded on "Loading network code…".
+		if(!cx)
+		{
+			console.warn("network login unavailable while the VM is not running");
+			return;
+		}
 		const w = window.open("login.html", "_blank");
+		if(!w)
+			return;
 		cx.networkLogin();
 		try
 		{
@@ -896,6 +948,16 @@
 		await blockCache.reset();
 		location.reload();
 	}
+	// The fatal overlay's Reload is RECOVERY, not factory reset: a plain
+	// reload (exactly what the trap auto-reload path does). Wiping the
+	// IndexedDB overlay here — the ONLY persistence in browser mode — would
+	// silently delete the user's files on every engine hiccup (the old
+	// handleReset path). The sidebar Disk-tab Reset keeps the documented
+	// cache wipe.
+	function handleReload()
+	{
+		location.reload();
+	}
 	async function handleSidebarPinChange(event)
 	{
 		sideBarPinned = event.detail;
@@ -913,7 +975,7 @@
 		</SideBar>
 		{#if configObj.needsDisplay}
 			<div class="absolute top-0 bottom-0 {sideBarPinned ? 'left-[23.5rem]' : 'left-14'} right-0">
-				<canvas class="w-full h-full cursor-none" id="display"></canvas>
+				<canvas class="w-full h-full cursor-none outline-none" id="display" tabindex="0"></canvas>
 			</div>
 		{/if}
 		<div class="absolute top-0 bottom-0 {sideBarPinned ? 'left-[23.5rem]' : 'left-14'} right-0 p-1 scrollbar" id="console">
@@ -952,7 +1014,7 @@
 				<div class="flex gap-3">
 					<button
 						class="px-4 py-2 bg-red-500 hover:bg-red-600 rounded font-semibold"
-						on:click={handleReset}
+						on:click={handleReload}
 					>
 						Reload
 					</button>

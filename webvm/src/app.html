@@ -25,11 +25,36 @@
 		<meta name="apple-mobile-web-app-status-bar-style" content="black" />
 		<link rel="shortcut icon" href="tower.ico">
 		<link rel='stylesheet' href='scrollbar.css'>
+		<!-- Start the CheerpX runtime download during HTML parse instead of
+		     waiting for the app bundle to import it. cx.esm.js is only a
+		     605-byte loader; the real weight is cx_esm.js (the ES module the
+		     loader imports), cxcore.js (the engine worker) and cxcore.wasm
+		     (fetched by the worker). All four are preloaded so the boot path
+		     overlaps the fetch of the runtime with the app bundle itself.
+		     RELATIVE on purpose: the GitHub Pages deployment lives under
+		     /<repo>/, where a root-absolute href would 404 on every load
+		     (the dynamic import resolves through siteBase, which equals the
+		     document base — so the relative hrefs hit the same URLs). -->
+		<link rel="modulepreload" href="cheerpx/cx.esm.js">
+		<link rel="modulepreload" href="cheerpx/cx_esm.js">
+		<link rel="preload" as="worker" href="cheerpx/cxcore.js">
+		<!-- crossorigin (anonymous) matches the worker's plain fetch():
+		     same-origin, CORS mode, same-origin credentials — the preload
+		     and the real request share one cache entry. -->
+		<link rel="preload" as="fetch" href="cheerpx/cxcore.wasm" crossorigin>
+		<!-- workerclock.js is fetched by cx_esm.js (plain same-origin fetch,
+		     then wrapped into a Worker via a Blob URL) right at engine
+		     startup; preloading it overlaps that fetch with the app bundle,
+		     exactly like the cxcore.wasm preload above. crossorigin matches
+		     the runtime's CORS-mode fetch. -->
+		<link rel="preload" as="fetch" href="cheerpx/workerclock.js" crossorigin>
 		<!-- Baked networking/sync config (entrypoint-rendered on the server,
 		     same-origin): supplies authKey/controlUrl/syncUrl/... so visiting
 		     the site root works with NO hash URL. Absent (GitHub Pages) or
-		     empty (browser/none mode) it is simply a no-op. -->
-		<script src="/webvm-config.js"></script>
+		     empty (browser/none mode) it is simply a no-op. Relative on
+		     purpose: the GitHub Pages deployment lives under /<repo>/, and a
+		     root-absolute src would 404 there on every load. -->
+		<script src="./webvm-config.js"></script>
 		<script>
 			// Move network/sync secrets out of the URL hash into sessionStorage,
 			// then strip the hash via history.replaceState so no secrets persist
@@ -71,6 +96,27 @@
 					sessionStorage.setItem("webvm-explicit-session", "1");
 					window.history.replaceState(null, "", window.location.pathname + window.location.search);
 				}
+			})();
+		</script>
+		<script>
+			// Tailnet boot overlap (tailnet builds only — gated on controlUrl,
+			// so browser/none builds pay nothing): warm the control-plane
+			// connection with a /health probe at HTML parse (sessionStorage
+			// is already seeded above). The tailscale.wasm preload that used
+			// to live here was REMOVED (2026-08-30): the wasm client fetches
+			// the file with a DIFFERENT credentials mode than a plain link
+			// preload, so the preload was never used — on a cold boot the
+			// browser downloaded the 32 MB wasm TWICE, competing with the
+			// emulated VM boot and delaying the tailnet join past the guest
+			// sync agent's wait window (the network-spec regression).
+			(function () {
+				var controlUrl = sessionStorage.getItem("controlUrl");
+				if (!controlUrl) return;
+				try {
+					fetch(new URL("/health", controlUrl).href,
+						{ mode: "no-cors", cache: "no-store" })
+						.catch(function () {});
+				} catch (e) {}
 			})();
 		</script>
 		%sveltekit.head%

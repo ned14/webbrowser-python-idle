@@ -59,6 +59,12 @@
 
 set -u
 
+# Shared pidfile-liveness guard (same helper open-file-explorer.sh uses, so
+# the single-instance contract lives in one file). Overridable for tests.
+WEBVM_PIDFILE_SH="${WEBVM_PIDFILE_SH:-/usr/local/lib/webvm-pidfile.sh}"
+# shellcheck disable=SC1090
+. "$WEBVM_PIDFILE_SH"
+
 STUCK_SECONDS=30
 SESSION_SECONDS=60
 POLL_SECONDS=2
@@ -68,12 +74,20 @@ EXPLORER_PIDFILE=/tmp/explorer.pid
 IDLE_PIDFILE=/tmp/idle.pid
 VIEWER_PIDFILE=/tmp/viewer.pid
 COUNT_FILE=/tmp/.keep-alive-count
-
-# True if the pid recorded in $1 is a live process.
-pidfile_alive() {
-	[ -f "$1" ] || return 1
-	kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null
-}
+# X session liveness: if the X server socket disappears (Xorg died mid-
+# session), the desktop is gone and relaunching the explorer would just
+# churn (it cannot open a dead display — every launch fails). The daemon
+# then makes NO decisions until X returns. The socket is derived from
+# $DISPLAY (":99" -> /tmp/.X11-unix/X99) — the production desktop runs :0,
+# but the rootfs smoke drives the daemon on :99 (and any non-default
+# display must not be misread as a dead X). Overridable for tests.
+X_DISPLAY_NUM=$(printf '%s' "${DISPLAY:-:0}" | sed 's/^://; s/\..*$//')
+X_SOCKET="${X_SOCKET:-/tmp/.X11-unix/X${X_DISPLAY_NUM:-0}}"
+X_DOWN_REPORTED=0
+# The hex-window-id counting contract lives in wm-clients.sh --count-line
+# (the spy pipes each xprop line into it — no per-line execve chain beyond
+# the one wm-clients invocation). Overridable for tests.
+WM_CLIENTS_BIN="${WM_CLIENTS_BIN:-/usr/local/bin/wm-clients.sh}"
 
 explorer_running() {
 	pidfile_alive "$EXPLORER_PIDFILE"
@@ -104,6 +118,17 @@ launch() {
 apply_window_count() {
 	WINS=$1
 	NOW=$2
+	# X gone: the desktop session ended — no relaunch, no force-kill (every
+	# launch would fail against the dead display). Report once, then pause
+	# decisions until the socket is back.
+	if [ -n "$X_SOCKET" ] && [ ! -S "$X_SOCKET" ]; then
+		if [ "$X_DOWN_REPORTED" != "1" ]; then
+			echo "keep-alive: X socket missing ($X_SOCKET) — desktop session ended; pausing keep-alive" >&2
+			X_DOWN_REPORTED=1
+		fi
+		return
+	fi
+	X_DOWN_REPORTED=0
 	# Clock glitch (date failed -> NOW=0): skip the tick entirely — a stale
 	# timestamp must never arm a false force-kill, and the next good tick
 	# re-evaluates reality anyway.
@@ -122,15 +147,26 @@ apply_window_count() {
 			   [ "$WINDOWLESS_SINCE" != "0" ] && \
 			   [ "$NOW" -gt "$WINDOWLESS_SINCE" ] && \
 			   [ $((NOW - WINDOWLESS_SINCE)) -ge "$STUCK_SECONDS" ]; then
-				kill -9 "$(cat "$EXPLORER_PIDFILE" 2>/dev/null)" 2>/dev/null
+				# The pidfile holds "pid starttime" (the recycled-pid guard);
+				# only the first field is the pid.
+				kill -9 "$(awk '{print $1}' "$EXPLORER_PIDFILE" 2>/dev/null)" 2>/dev/null
 				sleep 1
+				# The SIGKILLed explorer is (or will be) an un-reaped zombie
+				# child of this shell — kill -0 keeps succeeding on it, so
+				# the stale pidfile must be removed BEFORE the relaunch
+				# guard is consulted again (open-file-explorer.sh would
+				# otherwise refuse to start a second explorer forever).
+				rm -f "$EXPLORER_PIDFILE"
 				launch
 				WINDOWLESS_SINCE=$NOW
 			elif [ "$WINDOWLESS_SINCE" = "0" ]; then
 				WINDOWLESS_SINCE=$NOW
 			fi
 		else
-			# No explorer at all (closed or crashed): relaunch now.
+			# No explorer at all (closed or crashed): relaunch now. The
+			# stale pidfile (a crashed explorer that never removed it) is
+			# removed first — the single-instance guard would refuse.
+			rm -f "$EXPLORER_PIDFILE"
 			launch
 			WINDOWLESS_SINCE=$NOW
 		fi
@@ -142,17 +178,15 @@ apply_window_count() {
 rm -f "$COUNT_FILE"
 
 # Parse-and-publish loop for ONE spy session (runs as its own shell via sh -c
-# below, so it cannot use the parent's functions): parse each xprop line and
+# below, so it cannot use the parent's functions): pipe each xprop line into
+# wm-clients.sh --count-line (the ONE place the hex-id counting lives) and
 # write ONLY the resulting client-window count to COUNT_FILE. Unreadable
-# lines are skipped entirely — never published as zero.
+# lines exit non-zero there and are skipped entirely — never published as
+# zero.
 SPY_READER='
 	xprop -spy -root _NET_CLIENT_LIST 2>/dev/null |
 	while IFS= read -r LINE; do
-		case "$LINE" in
-			""|*"not found"*|*[Nn]o\ [Ss]uch\ [Aa]tom*) continue ;;
-		esac
-		printf "%s\n" "$LINE" \
-			| grep -o "0x[0-9a-fA-F]\+" | wc -l | tr -d " " > "$COUNT_FILE"
+		printf "%s\n" "$LINE" | "$WM_CLIENTS_BIN" --count-line > "$COUNT_FILE" 2>/dev/null || true
 	done
 '
 
@@ -165,7 +199,8 @@ while :; do
 	# hard kill fires even if no further property update would ever trigger
 	# a SIGPIPE); the session also ends the moment xprop itself dies (X
 	# restarted / connection dropped) — the reader then sees EOF.
-	COUNT_FILE="$COUNT_FILE" timeout "$SESSION_SECONDS" sh -c "$SPY_READER" &
+	COUNT_FILE="$COUNT_FILE" WM_CLIENTS_BIN="$WM_CLIENTS_BIN" \
+		timeout "$SESSION_SECONDS" sh -c "$SPY_READER" &
 	SPY_PID=$!
 	GRACE_END=$(($(date +%s 2>/dev/null || echo 0) + STARTUP_GRACE_SECONDS))
 

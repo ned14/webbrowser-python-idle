@@ -12,7 +12,12 @@
 # of a process still being set up traps the emulator — see
 # diskimage/faccessat-fix.c; the guest shim now returns EOF for cmdline reads,
 # so the full command line is never available and pgrep -f cannot be used).
-if [ -f /tmp/explorer.pid ] && kill -0 "$(cat /tmp/explorer.pid 2>/dev/null)" 2>/dev/null; then
+# The guard itself is the shared pidfile_alive helper (webvm-pidfile.sh),
+# the same one the keep-alive daemon uses.
+# shellcheck disable=SC1090
+. /usr/local/lib/webvm-pidfile.sh
+
+if pidfile_alive /tmp/explorer.pid; then
 	exit 0
 fi
 exec python3 /usr/local/bin/file-explorer.py

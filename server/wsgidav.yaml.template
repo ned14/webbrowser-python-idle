@@ -8,7 +8,9 @@ host: "0.0.0.0"
 port: ${WEBDAV_PORT}
 
 provider_mapping:
-  "/webdav/": "${WEBDAV_ROOT}"
+  # The URL base path comes from the shared lib (WEBDAV_BASE_PATH, the same
+  # value the baked syncUrl renders and the guest syncrc defaults to).
+  "${WEBDAV_BASE_PATH}": "${WEBDAV_ROOT}"
 
 http_authenticator:
   domain_controller: wsgidav.dc.simple_dc.SimpleDomainController

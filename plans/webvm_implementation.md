@@ -2205,7 +2205,265 @@ gateway relays).
     starts the sync agent) — with a correctly-backend-built guest the data
     path works end to end (verified 2026-08-21).
 
-No open questions remain. Anything still marked "at implementation time"
+35. **Correctness/de-dup/perf round (2026-08-29).** One pass over the whole
+    repo for correctness, duplication, low-effort test gaps and performance:
+    - **Shared shell lib** `scripts/lib/webvm-common.sh` (COPY'd to
+      `/etc/webvm/lib/` in both container images): the deployment defaults
+      (`CONTROL_HOST`/`LAN_IP`/ports/`GATEWAY_CONTROL_IP`) now live in ONE
+      place — server+gateway entrypoints, build.sh, gen-certs.sh, print-url.sh,
+      acceptance.sh, integration.sh and join-test-client.sh source it (the
+      drift test asserts every consumer sources it). Helpers:
+      `webvm_wait_until`, `webvm_require_secret`, `webvm_supervise`,
+      `webvm_load_dotenv` (environment > .env > defaults, quotes stripped —
+      fixing the Makefile `STORAGE_BACKEND=webdav make up` mismatch and
+      acceptance.sh's empty samba/webdav credentials). `build.sh`'s inline
+      .env parser was deleted in favour of the loader; `make url` no longer
+      sources .env itself (the script does, so `VAR=x make url` overrides
+      survive). `SERVER_IP` unified into `GATEWAY_CONTROL_IP` (cert SAN,
+      compose, gateway, tests — one value, documented in `.env.example`).
+    - **Version lockstep:** `scripts/versions.env` is the single source for
+      the tailscale (1.102.2) + Go (1.26.6) pins — gateway image,
+      join-test-client and rebuild-tailscale-wasm.sh agree (unit-tested);
+      the stale "1.3.7" nginx comment corrected to 1.3.8.
+    - **Compose:** gateway now uses `depends_on: server: condition:
+      service_healthy` (the healthcheck existed but was never wired — the
+      un-retried `tailscale up` could race a cold headscale start).
+    - **nginx:** the identical CSP header (3 copies) moved to
+      `server/csp.conf.template` rendered to `/etc/nginx/csp.conf` and
+      `include`d from the site block + `/cheerpx/` + `/_app/immutable/`;
+      the ext2 location now sends `Cache-Control: public, max-age=31536000,
+      immutable` — safe because the page loads the image with a
+      `?v=<image-build>` fingerprint query (config_public_alpine.js), so
+      repeat boots hit the browser HTTP cache with zero revalidation while
+      an image upgrade changes the URL (a stale cached base can never pair
+      with a new overlay).
+    - **Frontend de-dup:** `$lib/cacheId.js` (shared/ephemeral derivation),
+      `$lib/siteBase.js` (cheerpx.js + network.js share one base-path
+      derivation; app.html's `/webvm-config.js` is now relative — the Pages
+      deployment was 404-ing it), `clipboard.js` exports the paste cap +
+      per-char delay (WebVM.svelte + PasteTab.svelte share them),
+      `NETWORK_STATES` const (NetworkingTab no longer retypes the literals;
+      the duplicate store export dropped), the wasm-client tun import uses
+      siteBase (Pages-safe). Fixes: `handleConnect` guards a null `cx`
+      (popup no longer stranded pre-boot), `startLogin` sets LOGINREADY
+      *after* the URL resolves (the clickable login state was dead — the
+      button stuck at "Starting Login…"), `pasteUntypableReason` emits the
+      4-digit `U+%04X` format the guest typer uses (the E2E refusal text
+      was mismatched). Boot watchdog pixel sampling 2 s → 5 s (halves the
+      full-canvas readback churn during the heaviest phase); the KMS canvas
+      is focusable (`tabindex="0"`).
+    - **Guest:** `99-screen-resize.sh` poll is adaptive (2 s while the
+      output changes, 10 s steady — no more perpetual `xrandr --auto`
+      every 3 s); the Dockerfile's stdlib compileall+trim layer moved
+      BEFORE the rootfs/config/scripts COPYs (a guest-file edit no longer
+      re-runs the emulated-i386 compileall — minutes saved per local
+      iteration on Apple Silicon) with a small post-COPY compileall for the
+      few guest scripts; `paste-typer.sh`'s backend-respawn is now exact
+      (a wrapper writes a status marker on backend exit — kill -0 lied on
+      un-reaped zombies, silently dropping later pastes); `wm-clients.sh`
+      gained `--count-line` (the keep-alive spy pipes into it — the
+      hex-count contract lives in ONE file, case-insensitive "no such atom"
+      guard) and the explorer single-instance guard moved to
+      `webvm-pidfile.sh` shared by open-file-explorer.sh and
+      keep-file-explorer.sh.
+    - **Tests (+63):** vitest added to the frontend (23 tests: the
+      networking button-state machine, the session guard with fake
+      localStorage/BroadcastChannel/fake timers, the app.html seed script
+      executed for real, cacheId); `tests/unit/test_entrypoint.py` executes
+      BOTH entrypoints in a chroot sandbox with stub binaries (fail-closed
+      per mode, `WEBVM_TAILNET=off` renders the empty baked config); the
+      sync agent's orphan paths covered (load_config precedence, transport
+      error paths, the auth-dropping redirect handler, wait_for_tailnet,
+      the push loop's final push + lease release, cmd_daemon under a real
+      SIGTERM, main() argparse, skip_existing extraction, symlink scan
+      skip, SMB reconnect-on-failure); paste-typer backend-respawn test;
+      drift guards (versions.env lockstep, app.html seed-key list vs the
+      renderer, banned-hostname list extended to the new files, shellcheck
+      now covers the shared lib + paste-typer + wm-clients); the keep-alive
+      tests sandbox the shared lib + wm-clients. CI: browser phase now runs
+      `tests/server/integration.sh` too (join test self-skips without
+      headscale), and the webdav E2E URL comes from `scripts/print-url.sh`
+      instead of a hand-rebuilt hash (one derivation, drift-tested).
+    - **Still-open local finding:** the `paste.spec.js` "pasted text
+      definitely appears…" E2E fails in THIS environment (headless macOS)
+      because page clicks on the KMS canvas never move the page/guest focus
+      — the page's console textarea keeps focus, so neither native typing
+      nor the XTEST lane reaches the explorer's Search box (the failure
+      predates this round; the in-guest Xvfb paste test passes:
+      `ENTRY_CONTENT=hello paste`). The guest focus path is a CheerpX
+      core/browser-input integration question, not a regression of this
+      round.
+    Verified: 155 pytest + 23 vitest green, shellcheck/yamllint/compose
+    clean, the webdav stack rebuilt end-to-end (new guest fingerprint
+    `97c67052be58`, immutable ext2 header live, gateway healthy-joined,
+    integration.sh PASS incl. the join-test client), E2E idle-pointer +
+    resize + untypable-refusal pass. The round's still-open E2E focus-path
+    finding (paste delivery in this environment) is a CheerpX input-
+    integration investigation, tracked in §12/35.
+
+36. **Correctness/de-dup/perf round 2 (2026-08-29).** Follow-up pass on the
+    same axes:
+    - **Correctness fixes:** `gen-certs.sh` `is_ip_literal` now treats only
+      dot/colon-bearing tokens as IPs (a hex-only hostname like `dead` was
+      silently dropped from the DNS SAN — TLS mismatch); the server cert is
+      REUSED when its SAN already covers the env (was: regenerated every
+      `make up` while running containers serve the old mounted cert);
+      `build.sh` fails fast outside the repo root (wrong-tree builds read a
+      foreign `.env`); `make up` warns when the deployment backend is
+      samba/webdav (it is a HARD-NETWORKLESS launch by design — the warning
+      points at `make up-tailnet`); paste-typer answers `CXFAIL corrupt` for
+      length-mismatched/undecodable frames (was: silent, page waited out the
+      ack timeout).
+    - **De-duplication (single sources):** the shared lib now owns
+      `WEBDAV_BASE_PATH` (`/webdav/` — wsgidav mount, baked syncUrl, guest
+      syncrc default), `ALPINE_PAGE`, `WEBVM_IMAGE_DIR`/`WEBVM_IMAGE_NAME`
+      (build.sh + nginx envsubst + Makefile; the frontend literals are
+      drift-pinned by unit tests), `CACHE_ID_PREFIX`, `GIT_SSH_PORT` (was
+      2222 in two places) and the `webvm_require_mode_secrets` per-mode
+      fail-closed matrix (server entrypoint + print-url.sh now enforce ONE
+      matrix — the entrypoint adds `--gateway-key`). `render-webvm-config.py`
+      switched from 8 positional args to named options and gained
+      `--render-csp` — the CSP header's single home (the old
+      `csp.conf.template` is deleted; the entrypoint renders
+      `/etc/nginx/csp.conf` from the same Python that derives controlUrl, so
+      the page's connect-src and the control-plane URLs cannot drift).
+      `scripts/versions.env` gained `CHEERPX_VERSION=1.3.8` (fetch script
+      consumes it; package.json + cheerpx.js pinned by lockstep test).
+      The 8 identical "source webvm-common.sh" preambles were kept as-is:
+      the existence check must run BEFORE the source, so the check itself
+      cannot live in the lib (each consumer's fallback path differs).
+    - **New unit tests (208 pytest + 43 vitest green, all in CI):**
+      template-vars ↔ entrypoint-envsubst-list drift (a `${VAR}` added to a
+      template but not its list ships a literal into the container config —
+      the boot-time `nginx -t` failure class); compose.yaml inline defaults
+      vs the lib (comment-excluded); `_href_to_rel` listing sanitizer
+      (absolute URLs, base-path strip, `../`/`//` rejection,
+      percent-decoding, foreign-host hrefs), `_parse_http_date`
+      invalid/naive dates, `wait_for_tailnet` raising transport,
+      `acquire_or_wait` backend-error branch, `cmd_pull` tailnet-down path,
+      `compute_pull_plan` local-existing protection, `ensure_remote_parents`
+      MKCOL chain; entrypoint fail-closed variants (samba preauth key,
+      nginx `-t` rejection, webdav artifacts absent in networkless mode);
+      gateway samba `SAMBA_LAN_IP` check moved BEFORE tailscaled starts
+      (fail fast) + tested; gen-certs SAN/CA-reuse/coverage-skip (openssl
+      added to the test-unit image); paste-typer corrupt-frame + exact
+      MAX_PAYLOAD boundary (via `PASTE_MAX_PAYLOAD` override); keep-alive
+      viewer-protection variant; supervise marker contract;
+      `--url` no-authKey plain URL; build.sh unknown-backend rejection.
+    - **Performance:** cold boot — a background low-priority 16 MiB range
+      warm-fetch of the ext2's leading bytes overlaps the image download
+      with engine init (the guest's first reads become HTTP-cache hits);
+      KMS internal resolution capped at 1280×800 (uncapped 1920×1080 ≈ 2.6×
+      the pixels — X blits, Tk and per-frame canvas transfer all scale;
+      the CSS box scales the canvas up); tailnet builds probe `/health` and
+      preload `tailscale.wasm` from the app.html inline script (the ~5 MB
+      download no longer waits for hydration + the 3 s probe); the CheerpX
+      runtime import starts before the session lock settles (`SETTLE_MS`
+      200 → 50). Guest — `rc_parallel="YES"` in rc.conf (default-runlevel
+      services start concurrently; `local` has no dep on dbus/
+      udev-postmount), fontconfig cache re-baked after the trim (first Tk
+      app no longer rebuilds it on the overlay), ssh-keygen backgrounded,
+      X socket poll 250 ms, screen-resize steady cadence 10 s → 30 s with
+      a cheaper geometry signature. Operation — paste typing delay 10 ms →
+      5 ms (~200 chars/s; the ack timeout is a conservative bound either
+      way — the paste E2E is the validation gate), idle accept poll 100 →
+      250 ms, UDP receive buffers pooled, CPU-percentage recomputation
+      coalesced to ≤1/500 ms. NOT changed: the CloudDevice gzip-chunk path
+      (biggest structural cold-boot win, but the pinned 1.3.8 contract
+      needs an E2E boot-budget validation before adopting — the warm fetch
+      delivers most of it) and the paste delay below 5 ms (the emulated
+      XSync round trip is the real pacing; further cuts need on-device
+      validation).
+
+37. **Correctness/de-dup/perf round 3 (2026-08-30).** Third pass on the
+    same axes:
+    - **Correctness fixes:** the 2026-08-29 paste-delay halving
+      (5 ms/char) had left the E2E typing-estimate literals, PasteTab's
+      comment, README and acceptance on the OLD 10 ms math — `paste.spec.js`
+      would have failed CI on the next push; all four are now on the
+      5 ms model (500 → ~2.5s, 900 → ~4.5s, 600 → ~3s) and
+      `clipboard.js` exports `CX_CHARS_PER_SEC` as the derived rate.
+      **`make_snapshot` leaked NESTED excluded names** (a project's
+      `.ssh`/`.cache` under a synced subdirectory was uploaded in the
+      first-sync tarball — `tarfile.add(recursive=True)` filtered only
+      top-level names); the snapshot now walks the tree with the same
+      per-part exclusion contract as `scan_local`/`extract_snapshot`
+      (test added that fails on the old code). `compose.yaml` now
+      interpolates the server's static IP from
+      `GATEWAY_CONTROL_IP` (`ipv4_address: ${GATEWAY_CONTROL_IP:-172.28.0.10}` —
+      a bare literal silently orphaned a remapped gateway) and forwards
+      `GIT_SSH_PORT` to the gateway (an override previously did nothing).
+      `.env.example` clarifies `CONTROL_WSS_PORT` (the wasm client always
+      dials the scheme-default 443 via the gateway relay; the value only
+      remaps the server listener + relay target — the relay path is what
+      makes remapping work) and documents `GIT_SSH_PORT`. **Keep-alive
+      pidfile zombie fix:** a SIGKILLed second-generation explorer is an
+      un-reaped direct child of the keep-alive shell, `kill -0` succeeds
+      on zombies, and the stale pidfile pinned the single-instance guard
+      forever — `webvm-pidfile.sh` now treats `/proc/<pid>/stat` state Z
+      as dead (kill -0 fallback where /proc is absent), the explorer and
+      viewer remove their pidfiles at exit, the keep-alive removes the
+      pidfile before every relaunch, and the rootfs smoke suite kills the
+      RELAUNCHED (second-generation) explorer to prove the desktop heals.
+      `join-test-client.sh` derives the compose network from `docker
+      network ls` instead of a hand-written literal. `rc-preload` (boot
+      path) added to shellcheck + the parse list. Stale `csp.conf.template`
+      comment in nginx.conf.template corrected to
+      `render-webvm-config.py --render-csp`.
+    - **De-duplication (single sources):** `render-webvm-config.py` no
+      longer re-defaults the lib constants — `--site-port`,
+      `--webdav-base-path`, `--alpine-page` are REQUIRED from callers
+      (entrypoint/print-url already pass them; the unit tests now pass the
+      lib values, so a lib change can no longer hide behind a Python
+      default); `GATEWAY_TAILNET_IP_DEFAULT` (100.64.0.1) moved into the
+      shared lib (build.sh uses it; the Dockerfile ARG defaults are pinned
+      by test); `tests/server/integration.sh` uses `$ALPINE_PAGE` /
+      `$WEBVM_IMAGE_DIR/$WEBVM_IMAGE_NAME` / `$WEBDAV_BASE_PATH` instead
+      of the hardcoded literals; new `.github/actions/build-frontend`
+      composite action shared by ci.yml's frontend job and pages.yml (the
+      fingerprint-read + npm ci + vitest + build derivation was a third
+      inline copy); build.sh skips the (idempotent) e2fsprogs helper image
+      build when the tag already exists.
+    - **New unit tests (+40 pytest → 248, +2 vitest → 45, all in CI):**
+      the transport edge contract against the existing fake server
+      (mkdir 405/409, delete/get/listdir missing-file, ping-false,
+      corrupt-lease recovery incl. refresh), `pull_home`'s snapshot-restore
+      branch, `cmd_pull` crash-safe generic-exception branches, push-loop
+      "push error"/"final push failed" paths, `cmd_daemon` signal-
+      registration failure + mid-run takeover re-acquisition (fake clock),
+      the nested-exclusion snapshot test, `webvm-pidfile.sh`
+      missing/live/reaped/ZOMBIE pids (Linux-only zombie case), the
+      single-instance launcher, the IDLE `-n` fallback, the screen-resize
+      adaptive cadence (fake xrandr/sleep), `precompress-static.sh`
+      (type/1 KiB filters, no-.gz invariant, brotli-missing noop), the
+      SERVER entrypoint's full happy path (stub headscale serving a real
+      socket + masked key listings → users/key checks pass, all services
+      supervised) and the gateway's whole relay matrix incl. git-relay
+      gating. New drift pins: paste delay/payload lockstep
+      (DELAY_US == CX_TYPE_DELAY_MS·1000, PASTE_MAX_CHARS ≤ MAX_PAYLOAD),
+      the guest-baked syncUrl vs the renderer (one formula), the vendored
+      cxcore trap-patch guards (exactly 3 report sites, no debugger, no
+      `e()`), the security-header trio across nginx/subresource/sw.js,
+      compose `ipv4_address` interpolation, the E2E/CI URL literals vs the
+      lib, gen-certs regenerating on a `GATEWAY_CONTROL_IP` change.
+    - **Performance:** nginx `open_file_cache` (the boot's ~1100 range
+      GETs stop paying per-request metadata syscalls); the ext2 warm-fetch
+      window widened 16 → 32 MiB (the boot-critical read set measurably
+      extends past 16 MiB); tailscale.wasm preload no longer waits for the
+      `/health` probe (the wasm is same-origin — the probe only warms the
+      control connection); the watchdog's pixel probe reuses one scratch
+      canvas (no per-tick allocation); `cpuCallback` no longer
+      clearInterval+setInterval per scheduling event (armed once);
+      `latencyCallback` coalesced to ≤1/500 ms like the CPU percentage.
+      NOT changed: per-char `cxReadFunc` batching and the keep-alive's
+      `date +%s` fork (both bounded by the guest's own pacing/emulation
+      costs — no measurable win), the CloudDevice gzip path (as §12/36).
+    Verified: 248 pytest + 45 vitest green (incl. the two new sandbox
+    suites — the entrypoint happy paths run real chrooted stubs), the
+    frontend builds clean with the Svelte edits, `docker compose config -q`
+    passes, shellcheck clean on the full list incl. rc-preload. The
+    in-guest second-generation keep-alive cycle runs in the rootfs smoke
+    suite (requires the emulated guest — CI).
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path
 semantics) is a lookup-and-record step, not a design decision — and the §12/21
 checklist lists exactly which version-dependent claims to re-verify when the

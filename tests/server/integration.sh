@@ -4,18 +4,20 @@
 #
 #   STORAGE_BACKEND=webdav    exercises the WebDAV + control-plane paths
 #   (or HEADSCALE_ENABLED=1)  enables the headscale join test without webdav
+#   GATEWAY_AUTHKEY set       enables the headscale join test (browser/none
+#                             phases have no headscale — join + exit-node
+#                             checks are skipped there)
 set -eu
 
-SITE_PORT="${SITE_PORT:-8081}"
-CONTROL_PORT="${CONTROL_PORT:-8443}"
-WEBDAV_PORT="${WEBDAV_PORT:-8082}"
-# Browser-facing control host: 127.0.0.1 single machine / LAN IP. Hostnames
-# are banned (host.docker.internal etc. — never reintroduce).
-CONTROL_HOST="${CONTROL_HOST:-127.0.0.1}"
-# The server's static compose-network IP: the CONTAINER-side address for the
-# join-test client (which runs on webvm-net, not on the host loopback).
-GATEWAY_CONTROL_IP="${GATEWAY_CONTROL_IP:-172.28.0.10}"
-LAN_IP="${LAN_IP:-127.0.0.1}"
+# Shared defaults (CONTROL_HOST/LAN_IP/ports/GATEWAY_CONTROL_IP) + helpers.
+WEBVM_COMMON="${WEBVM_COMMON:-$(dirname "$0")/../../scripts/lib/webvm-common.sh}"
+if [ ! -f "$WEBVM_COMMON" ]; then
+	echo "FATAL: shared lib not found at $WEBVM_COMMON" >&2
+	exit 1
+fi
+# shellcheck disable=SC1090
+. "$WEBVM_COMMON"
+
 WEBDAV_USER="${WEBDAV_USER:-}"
 WEBDAV_PASS="${WEBDAV_PASS:-}"
 GATEWAY_AUTHKEY="${GATEWAY_AUTHKEY:-}"
@@ -38,27 +40,21 @@ echo "==> wait for the site to serve"
 # `docker compose up` returns as soon as the server container is started, but
 # the entrypoint brings nginx up only after headscale's socket/users/key
 # checks — the site can take several seconds to answer. Never race it: poll
-# until /alpine.html actually returns 200 (90 s covers even a cold CI start).
-SITE_OK=0
-for _i in $(seq 1 90); do
-	if [ "$(curl -sk -o /dev/null -w '%{http_code}' "$SITE_URL/alpine.html" 2>/dev/null)" = "200" ]; then
-		SITE_OK=1
-		break
-	fi
-	sleep 1
-done
-[ "$SITE_OK" = "1" ] || fail "/alpine.html never became reachable"
+# until /$ALPINE_PAGE actually returns 200 (90 s covers even a cold CI start).
+if ! webvm_wait_until 90 1 sh -c "curl -sk -o /dev/null -w '%{http_code}' \"$SITE_URL/${ALPINE_PAGE}\" 2>/dev/null | grep -q 200"; then
+	fail "/${ALPINE_PAGE} never became reachable"
+fi
 
 echo "==> site headers (HTTPS)"
-curl -sk -D - -o /dev/null "$SITE_URL/alpine.html" | tee /tmp/hdr.txt | grep -qi "^HTTP/.* 200" || fail "/alpine.html not 200"
+curl -sk -D - -o /dev/null "$SITE_URL/${ALPINE_PAGE}" | tee /tmp/hdr.txt | grep -qi "^HTTP/.* 200" || fail "/${ALPINE_PAGE} not 200"
 grep -qi "cross-origin-opener-policy: same-origin" /tmp/hdr.txt || fail "COOP header missing"
 grep -qi "cross-origin-embedder-policy: require-corp" /tmp/hdr.txt || fail "COEP header missing"
 grep -qi "content-security-policy:" /tmp/hdr.txt || fail "CSP header missing"
 grep -qi "connect-src 'self' https://$CONTROL_HOST:$CONTROL_PORT wss://$CONTROL_HOST:$CONTROL_PORT" /tmp/hdr.txt || fail "CSP connect-src missing/wrong"
 
 echo "==> site redirects"
-curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/" | grep -q "302" || fail "/ should 302 -> /alpine.html"
-curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/alpine" | grep -q "301" || fail "/alpine should 301 -> /alpine.html"
+curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/" | grep -q "302" || fail "/ should 302 -> /${ALPINE_PAGE}"
+curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/alpine" | grep -q "301" || fail "/alpine should 301 -> /${ALPINE_PAGE}"
 
 echo "==> baked page config (webvm-config.js)"
 curl -sk -D /tmp/hdr-cfg.txt -o /tmp/webvm-config.js "$SITE_URL/webvm-config.js"
@@ -77,24 +73,23 @@ else
 fi
 
 echo "==> ext2 byte ranges"
-curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/custom-disk-images/webvm-custom-disk.ext2" | grep -q "200" || fail "ext2 not 200"
-curl -sk -H "Range: bytes=0-1023" -o /dev/null -w "%{http_code}" "$SITE_URL/custom-disk-images/webvm-custom-disk.ext2" | grep -q "206" || fail "ext2 Range not 206"
+curl -sk -o /dev/null -w "%{http_code}" "$SITE_URL/${WEBVM_IMAGE_DIR}/${WEBVM_IMAGE_NAME}" | grep -q "200" || fail "ext2 not 200"
+curl -sk -H "Range: bytes=0-1023" -o /dev/null -w "%{http_code}" "$SITE_URL/${WEBVM_IMAGE_DIR}/${WEBVM_IMAGE_NAME}" | grep -q "206" || fail "ext2 Range not 206"
 
 if [ "${STORAGE_BACKEND:-browser}" = "webdav" ]; then
 	echo "==> webdav PROPFIND/PUT/GET round-trip"
 	[ -n "$WEBDAV_USER" ] && [ -n "$WEBDAV_PASS" ] || fail "WEBDAV_USER/WEBDAV_PASS not set"
 	curl -s -u "$WEBDAV_USER:$WEBDAV_PASS" -X PUT --data-binary "integration test" \
-		"http://${LAN_IP}:${WEBDAV_PORT}/webdav/integration.txt" -o /dev/null || fail "webdav PUT failed"
-	got=$(curl -s -u "$WEBDAV_USER:$WEBDAV_PASS" "http://${LAN_IP}:${WEBDAV_PORT}/webdav/integration.txt")
+		"http://${LAN_IP}:${WEBDAV_PORT}${WEBDAV_BASE_PATH}integration.txt" -o /dev/null || fail "webdav PUT failed"
+	got=$(curl -s -u "$WEBDAV_USER:$WEBDAV_PASS" "http://${LAN_IP}:${WEBDAV_PORT}${WEBDAV_BASE_PATH}integration.txt")
 	[ "$got" = "integration test" ] || fail "webdav GET mismatch"
 	curl -s -u "$WEBDAV_USER:$WEBDAV_PASS" -X PROPFIND -H "Depth: 1" \
-		"http://${LAN_IP}:${WEBDAV_PORT}/webdav/" | grep -q "integration.txt" || fail "webdav PROPFIND missing file"
+		"http://${LAN_IP}:${WEBDAV_PORT}${WEBDAV_BASE_PATH}" | grep -q "integration.txt" || fail "webdav PROPFIND missing file"
 	curl -s -u "$WEBDAV_USER:$WEBDAV_PASS" -X DELETE \
-		"http://${LAN_IP}:${WEBDAV_PORT}/webdav/integration.txt" -o /dev/null || true
+		"http://${LAN_IP}:${WEBDAV_PORT}${WEBDAV_BASE_PATH}integration.txt" -o /dev/null || true
 fi
 
 echo "==> control listener + DERP probe"
-[ -n "$GATEWAY_AUTHKEY" ] || fail "GATEWAY_AUTHKEY not set (needed for the join test)"
 # CORS: nginx hides headscale's own ACAO (*) and echoes the request Origin
 # only when present (a second/empty ACAO value breaks the browser's CORS
 # check — MultipleAllowOriginValues — see plans/networking-bug.md §15.2).
@@ -107,25 +102,31 @@ PROBE_ACAO=$(curl -sk -D - -o /dev/null -H "Origin: https://example.test" "$CONT
 	| tr -d '\r' | awk -F': ' 'tolower($1)=="access-control-allow-origin" {print $2}')
 [ "$PROBE_ACAO" = "https://example.test" ] || fail "/derp/probe with Origin must echo it (got '$PROBE_ACAO')"
 
-echo "==> headscale join test (tailscaled client, private CA)"
-# Shared helper: joins a throwaway tailscaled node to the control plane. The
-# client container runs on the compose network, so the login URL is the
-# CONTAINER-side one: the server's static compose-network IP
-# (GATEWAY_CONTROL_IP, cert SAN covers IP:172.28.0.10) — never a hostname.
-AUTHKEY="$GATEWAY_AUTHKEY" CONTROL_URL="https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT}" \
-	tests/server/join-test-client.sh >/dev/null || fail "join test client did not register"
-docker compose exec -T server headscale nodes list | grep -q "ci-client" || fail "ci-client node did not register with headscale"
+# The headscale join test needs a headscale to join: browser/none phases run
+# an nginx-only server (no headscale, no gateway) — skip there, fail in the
+# tailnet modes where GATEWAY_AUTHKEY is a mandatory input.
+if [ -n "$GATEWAY_AUTHKEY" ]; then
+	echo "==> headscale join test (tailscaled client, private CA)"
+	# Shared helper: joins a throwaway tailscaled node to the control plane.
+	# The client container runs on the compose network, so the login URL is
+	# the CONTAINER-side one: the server's static compose-network IP
+	# (GATEWAY_CONTROL_IP, cert SAN covers IP:172.28.0.10) — never a hostname.
+	AUTHKEY="$GATEWAY_AUTHKEY" CONTROL_URL="https://${GATEWAY_CONTROL_IP}:${CONTROL_PORT}" \
+		tests/server/join-test-client.sh >/dev/null || fail "join test client did not register"
+	docker compose exec -T server headscale nodes list | grep -q "ci-client" \
+		|| fail "ci-client node did not register with headscale"
 
-echo "==> no exit node advertised"
-# Assert the NEGATIVE: no node on this headnet advertises a default route
-# (an exit node or 0.0.0.0/0 route). The gateway itself never uses
-# --advertise-routes and never joins as an exit node, so list-routes must be
-# empty of default routes for every node.
-docker compose exec -T server headscale nodes list | grep -q "ci-client" \
-	|| fail "ci-client node did not register with headscale"
-if docker compose exec -T server headscale nodes list-routes 2>/dev/null | grep -E '0\.0\.0\.0/0|::/0'; then
-	fail "an exit-node default route is advertised on the headnet"
+	echo "==> no exit node advertised"
+	# Assert the NEGATIVE: no node on this headnet advertises a default route
+	# (an exit node or 0.0.0.0/0 route). The gateway itself never uses
+	# --advertise-routes and never joins as an exit node, so list-routes must
+	# be empty of default routes for every node.
+	if docker compose exec -T server headscale nodes list-routes 2>/dev/null | grep -E '0\.0\.0\.0/0|::/0'; then
+		fail "an exit-node default route is advertised on the headnet"
+	fi
+	echo "   (no 0.0.0.0/0 or ::/0 routes on any node — no exit node)"
+else
+	echo "==> headscale join test skipped (no GATEWAY_AUTHKEY — browser/none phase)"
 fi
-echo "   (no 0.0.0.0/0 or ::/0 routes on any node — no exit node)"
 
 echo "==> integration PASS"

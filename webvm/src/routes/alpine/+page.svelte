@@ -2,15 +2,21 @@
 	import { onMount } from 'svelte';
 	import WebVM from '$lib/WebVM.svelte';
 	import { acquireSessionLock } from '$lib/sessionGuard.js';
+	import { sharedCacheId, ephemeralCacheId } from '$lib/cacheId.js';
 	import * as configObj from '/config_public_alpine';
 
-	// cacheId per mode:
+	// Boot overlap: start the CheerpX runtime download NOW (module-cached, so
+	// WebVM.svelte's later import awaits the SAME promise) instead of letting
+	// the session-lock acquisition (up to ~1 s worst case: ping + settle)
+	// serialize the runtime fetch behind it. The block devices still need
+	// the lock's verdict (shared vs ephemeral cacheId) and are not started
+	// early — only the runtime itself, which is cacheId-independent.
+	import('@leaningtech/cheerpx').catch(() => {});
+
+	// cacheId per mode (single derivation in $lib/cacheId.js):
 	//   browser/samba/webdav -> blocks_alpine_<image-build> (shared overlay,
 	//   versioned to the guest image so a rebuilt image starts a fresh overlay)
 	//   none                 -> random per-session id (fresh overlay every load)
-	function randomCacheId() {
-		return "blocks_alpine_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-	}
 
 	let cacheId;
 	let ready = false;
@@ -35,10 +41,10 @@
 	});
 
 	if (configObj.storageBackend === "none") {
-		cacheId = randomCacheId();
+		cacheId = ephemeralCacheId();
 		ready = true;
 	} else {
-		cacheId = "blocks_alpine_" + configObj.imageBuild;
+		cacheId = sharedCacheId(configObj.imageBuild);
 		onMount(async () => {
 			try {
 				const acquired = await acquireSessionLock();
@@ -46,7 +52,7 @@
 					// Another live tab holds the shared overlay: boot an
 					// ephemeral session that never writes to the shared overlay.
 					ephemeral = true;
-					cacheId = randomCacheId();
+					cacheId = ephemeralCacheId();
 				}
 			} catch (e) {
 				// The lock store failed (e.g. storage blocked/corrupt). Never
@@ -55,7 +61,7 @@
 				console.error("session lock failed:", e);
 				lockError = String((e && e.message) || e);
 				ephemeral = true;
-				cacheId = randomCacheId();
+				cacheId = ephemeralCacheId();
 			}
 			ready = true;
 		});

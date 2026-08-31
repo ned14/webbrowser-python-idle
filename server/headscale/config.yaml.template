@@ -81,6 +81,16 @@ disable_check_updates: true
 # key (HEADSCALE_PREAUTHKEY is created with --ephemeral), so closed tabs stop
 # accumulating stale nodes after this window; the GATEWAY node is persistent
 # (tailnet-IP stability) and is never reaped.
+#
+# Kept at 30m — NOT shortened: the pinned wasm client's netmap validation
+# requires the netmap to contain more than a bare-minimum peer set (with
+# only the gateway + one client node the client loops on "authReconfig:
+# netmap not yet valid. Skipping." and never reaches Running — verified
+# 2026-08-30; with ~7+ registered nodes the same client becomes valid and
+# connects). The E2E suite's sequential boots naturally accumulate enough
+# nodes within the 30m window; a shorter reaping window starved the netmap
+# and broke the tailnet join (the network-spec regression when this was
+# tried at 5m).
 node:
   ephemeral:
     inactivity_timeout: "30m"

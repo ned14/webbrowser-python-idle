@@ -14,12 +14,16 @@ tests/
 │                    WebDAV round-trip, headscale join test)
 ├─ e2e/             Playwright: real VM boot in headless Chromium
 ├─ fixtures/        fake WebDAV server, fake home, test data
+└─ (frontend)       vitest suites in webvm/src/lib/*.test.js (cacheId,
+                     sessionGuard, session seed, network states + watchdog,
+                     clipboard paste contract) — `cd webvm && npm test`
 ```
 
 ## Order
 
 1. Unit: `make test-unit` (or `docker compose --profile test run --rm test-unit`)
-2. Build: `make build` (guest ext2 + frontend + images)
+2. Frontend unit: `cd webvm && npm test` (also runs in the CI frontend job)
+3. Build: `make build` (guest ext2 + frontend + images)
 3. Rootfs smoke: `tests/rootfs/smoke.sh browser` (repeat per backend:
    `samba`, `webdav`, `none`)
 4. Bring up the stack: `make up` (browser mode) or

@@ -52,10 +52,17 @@ COPY webvm/custom-disk-images/ /srv/webvm/custom-disk-images/
 
 # Templates + entrypoint
 COPY server/nginx.conf.template /etc/webvm/nginx.conf.template
+# (The CSP header has no template: server/render-webvm-config.py --render-csp
+# is its single home — the entrypoint renders /etc/nginx/csp.conf from it.)
 COPY server/headscale/config.yaml.template /etc/webvm/headscale/config.yaml.template
 COPY server/wsgidav.yaml.template /etc/webvm/wsgidav.yaml.template
 COPY server/render-webvm-config.py /etc/webvm/render-webvm-config.py
 COPY server/entrypoint.sh /usr/local/bin/entrypoint.sh
+# Static nginx snippets (no env vars — included by the rendered nginx.conf)
+COPY server/control-location.conf /etc/nginx/control-location.conf
+COPY server/site-subresource-headers.conf /etc/nginx/site-subresource-headers.conf
+# Shared env defaults + helpers (sourced by the entrypoint)
+COPY scripts/lib/webvm-common.sh /etc/webvm/lib/webvm-common.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 8081 8443 8082 3478/udp

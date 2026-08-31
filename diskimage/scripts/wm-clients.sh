@@ -18,8 +18,13 @@
 # (file-explorer.py `_wm_client_windows`), so its 0.5–3 s window polls spawn
 # no interpreter either.
 #
+# The keep-alive daemon's xprop -spy session feeds its parsed lines into
+# `wm-clients.sh --count-line` (stdin), so the hex-window-id counting contract
+# lives HERE exactly once (an earlier duplicate in the spy could drift).
+#
 # Usage:
-#     wm-clients.sh --count   # print the number of client windows
+#     wm-clients.sh --count       # read _NET_CLIENT_LIST via xprop, print the count
+#     wm-clients.sh --count-line  # count the hex ids on a client-list line from stdin
 #
 # On any X/`xprop` failure this prints nothing and exits non-zero (for
 # --count it prints nothing, mirroring the old `i3-msg`/wm-clients.py failure
@@ -27,13 +32,29 @@
 # that cannot be read is reported as an error, never as an empty desktop.
 set -u
 
-LIST=$(xprop -root _NET_CLIENT_LIST 2>/dev/null)
-case "$LIST" in
-	""|*"not found"*|*"No such atom"*)
-		exit 1 ;;
-esac
+# Count the 0x… window ids in a _NET_CLIENT_LIST line (stdin). Unreadable
+# lines (xprop's missing-atom errors come in BOTH case spellings across
+# builds, plus "not found") exit 1 with no output — never "0", which would be
+# read as an empty desktop. tr strips the space padding busybox wc adds, so a
+# zero-count desktop prints exactly "0" (never "      0").
+count_line() {
+	LINE=$(cat)
+	case "$LINE" in
+		""|*"not found"*|*[Nn]o\ [Ss]uch\ [Aa]tom*) exit 1 ;;
+	esac
+	printf '%s\n' "$LINE" | grep -o '0x[0-9a-fA-F]\+' | wc -l | tr -d ' '
+}
 
-# Count the 0x… window ids xprop lists after the property name (the same hex
-# pattern wm-clients.py matched). tr strips the space padding busybox wc adds,
-# so a zero-count desktop prints exactly "0" (never "      0").
-printf '%s\n' "$LIST" | grep -o '0x[0-9a-fA-F]\+' | wc -l | tr -d ' '
+case "${1:-}" in
+	--count-line)
+		count_line
+		;;
+	--count)
+		LIST=$(xprop -root _NET_CLIENT_LIST 2>/dev/null)
+		printf '%s\n' "$LIST" | count_line
+		;;
+	*)
+		echo "usage: wm-clients.sh --count|--count-line" >&2
+		exit 1
+		;;
+esac

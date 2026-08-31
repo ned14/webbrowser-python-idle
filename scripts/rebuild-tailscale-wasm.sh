@@ -15,12 +15,23 @@
 # Outputs: webvm/cheerpx/tun/tailscale.wasm  (then run build.sh / npm build)
 #          webvm/cheerpx/tun/wasm_exec.js    (matching Go toolchain glue)
 #
-# Requires Docker (golang:1.26.6 image; no local Go toolchain needed).
+# Requires Docker (golang image; no local Go toolchain needed).
 # Pinned: tailscale v1.102.2, Go 1.26.6 (tailscale's go.mod requirement).
+# Versions come from scripts/versions.env — the single source for the
+# tailscale pin (gateway image + join-test client must agree; the lockstep
+# unit test enforces it).
 set -eu
 
-VERSION="v1.102.2"
-GO_IMAGE="golang:1.26.6"
+VERSION_FILE="$(dirname "$0")/versions.env"
+if [ ! -f "$VERSION_FILE" ]; then
+	echo "FATAL: $VERSION_FILE not found" >&2
+	exit 1
+fi
+# shellcheck disable=SC1090
+. "$VERSION_FILE"
+
+VERSION="v${TAILSCALE_VERSION}"
+GO_IMAGE="golang:${GO_VERSION}"
 ENTRY="$(dirname "$0")/tailscale-wasm-entry/wasm_js.go"
 DEST_TUN="webvm/cheerpx/tun"
 BUILD_DIR="$(mktemp -d)"

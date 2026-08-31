@@ -218,6 +218,65 @@ RUN if [ "$STORAGE_BACKEND" = "samba" ]; then \
 		chown user:user /home/user/.syncrc; \
 	fi
 
+# Size trimming (round 2, 2026-08-21): components verified unused at runtime.
+#   * /usr/share/mime — only libgio's g_content_type_guess reads it; no guest
+#     binary calls that path (openbox menu has no icons, the explorer sniffs
+#     file types itself, xterm less/vi do not need the MIME DB).
+#   * /usr/libexec/glycin-loaders — gdk-pixbuf's on-demand image loaders,
+#     dlopen'd only when an image is actually decoded; openbox's Clearlooks
+#     theme is color-only and the menu has no icons, so nothing decodes.
+#   * DejaVu faces not reachable through 99-webvm-aliases.conf (which maps
+#     only to Sans/Sans Mono/Serif regular+bold+italic): Condensed,
+#     ExtraLight, MathTeX.
+#   * /usr/share/hwdata (pci.ids) — libpciaccess uses it only for device-name
+#     labels; Xorg's modesetting driver works without it.
+#   * /usr/lib/girepository-1.0 typelibs — no pygobject/gjs in the guest.
+#   * libepoxy + libwayland-client — orphaned by the mesa/GL stack removal
+#     (no DT_NEEDED or dlopen users remain, verified 2026-08-21).
+#   * Tcl extras (itcl/thread/tdbc) — optional Tcl packages, tkinter never
+#     loads them.
+#   * imlib2 CLI tools, non-Clearlooks openbox themes, mesa leftovers
+#     (drirc.d) and build-time aclocal macros, fontconfig cache (regenerated
+#     on demand).
+#   * Python __pycache__ is NOT removed — it is PRE-BAKED with compileall.
+#     The original round-2 trim deleted __pycache__ on the theory that the
+#     interpreter regenerates it on demand, but that made the FIRST import on
+#     a fresh boot recompile every stdlib module onto the SLOW overlay
+#     (measured: first `import tkinter` 1.12 s with no pyc vs 0.30 s with
+#     baked pyc — plans/update-to-latest.md §9.5.1 item 11; idlelib and the
+#     file explorer import far more and paid even more). compileall prebakes
+#     bytecode matching the exact installed 3.14 interpreter (+~5.5 MiB),
+#     so first-run imports read cached .pyc instead of recompiling.
+# LAYER ORDER (2026-08-29): this RUN sits BEFORE the rootfs/config/scripts
+# COPYs (nothing below adds files under the paths it trims), so an edit to a
+# rootfs file does not re-run the stdlib compileall — on Apple Silicon the
+# i386 guest builds are QEMU-emulated and a full compileall is minutes.
+# Guest-side scripts copied afterwards get a small compileall at the END
+# (a few files, seconds).
+RUN python3 -m compileall -q -j 4 /usr/lib/python3.14 && \
+	rm -rf /usr/share/mime /usr/libexec/glycin-loaders /usr/share/hwdata \
+		/usr/lib/girepository-1.0 /usr/share/drirc.d /usr/share/aclocal \
+		/var/cache/fontconfig \
+		/usr/lib/itcl4.3.4 /usr/lib/thread2.8.12 /usr/lib/tdbc1.1.12 \
+		/usr/lib/tdbcmysql1.1.12 /usr/lib/tdbcodbc1.1.12 /usr/lib/tdbcpostgres1.1.12 \
+		/usr/lib/libepoxy.so.0 /usr/lib/libepoxy.so.0.0.0 \
+		/usr/lib/libwayland-client.so.0 /usr/lib/libwayland-client.so.0.25.0 \
+		/usr/bin/imlib2_* \
+		/usr/share/fonts/dejavu/DejaVuMathTeXGyre.ttf \
+		/usr/share/fonts/dejavu/DejaVuSans-ExtraLight.ttf \
+		/usr/share/fonts/dejavu/DejaVuSansCondensed*.ttf \
+		/usr/share/fonts/dejavu/DejaVuSerifCondensed*.ttf && \
+	find /usr/share/themes -mindepth 1 -maxdepth 1 -type d ! -name Clearlooks \
+		-exec rm -rf {} +
+
+# Fontconfig cache: DELETE then REBUILD. The naive trim deleted
+# /var/cache/fontconfig ("regenerated on demand"), but "on demand" means the
+# FIRST Tk app of every boot (the file explorer) scans and rebuilds the
+# cache onto the slow overlay — hundreds of ms of boot-time import churn.
+# Regenerate a BAKED cache here (~1-2 MiB in the image) so first font use
+# reads a ready cache.
+RUN fc-cache -f >/dev/null 2>&1 || true
+
 # Git tooling: no remotes preconfigured (remotes are added in-guest later via
 # the gateway's tailnet IP on the 2222 relay). accept-new host keys. The
 # ed25519 keypair is generated at FIRST BOOT (desktop.start) — never baked
@@ -285,6 +344,15 @@ COPY scripts/file-viewer.py /usr/local/bin/file-viewer.py
 COPY scripts/file-viewer-tests.py /usr/local/bin/file-viewer-tests.py
 COPY rootfs/usr/local/bin/open-file-explorer.sh /usr/local/bin/open-file-explorer.sh
 COPY rootfs/usr/local/bin/keep-file-explorer.sh /usr/local/bin/keep-file-explorer.sh
+# Shared pidfile-liveness guard (sourced by open-file-explorer.sh and
+# keep-file-explorer.sh — the single-instance contract lives in one file).
+COPY rootfs/usr/local/lib/webvm-pidfile.sh /usr/local/lib/webvm-pidfile.sh
+# The SHARED defaults+helpers lib (scripts/lib/webvm-common.sh — a checked-in
+# copy, since the diskimage build context cannot see scripts/; the copy's
+# byte-equality is pinned by tests/unit/test_scripts.py). The paste-typer
+# sources it for the supervisor wrapper (webvm_supervise_start) — the same
+# marker contract the server/gateway entrypoints use.
+COPY rootfs/usr/local/lib/webvm-common.sh /usr/local/lib/webvm-common.sh
 RUN chmod +x /usr/local/bin/open-file-explorer.sh /usr/local/bin/keep-file-explorer.sh /usr/local/bin/file-viewer.py /usr/local/bin/wm-clients.sh
 
 # A starter .py in the home directory: new users can double-click it to try
@@ -336,6 +404,16 @@ RUN cat >> /etc/rc.conf <<'EOF'
 # exec'd init scripts inherit the faccessat/sigprocmask fix shim
 # (diskimage/faccessat-fix.c, plans/update-to-latest.md Tier B 9.2).
 rc_env_allow="LD_PRELOAD"
+
+# Boot-time win (2026-08-29): run the default-runlevel services
+# (udev-postmount, dbus, local) CONCURRENTLY. `local` (desktop.start -> X)
+# has no dependency on dbus/udev-postmount (X's input devices come from
+# udev in sysinit via the static xorg.conf, and the session runs its own
+# dbus-run-session), so serial start was pure emulated-service latency on
+# the boot critical path. NOTE: if the guest ever wedges at boot after a
+# base-image change, this is the first suspect — the openrc parallel runner
+# spawns the three start scripts concurrently.
+rc_parallel="YES"
 EOF
 # OpenRC 0.63 bootstrap with the /run tmpfs-mount failure made non-fatal
 # (plans/update-to-latest.md Tier B; see the file header for the diff)
@@ -355,6 +433,14 @@ COPY rootfs/etc/fonts/conf.d/99-webvm-aliases.conf /etc/fonts/conf.d/99-webvm-al
 # site.py imports sitecustomize in EVERY interpreter — sync agent, explorer,
 # viewer, IDLE (-n user code included), any student script.
 COPY rootfs/usr/lib/python3.14/site-packages/sitecustomize.py /usr/lib/python3.14/site-packages/sitecustomize.py
+
+# Prebake bytecode for the guest-side scripts copied AFTER the stdlib
+# compileall layer (a few files — seconds, unlike the stdlib pass): the
+# explorer/viewer/sync agent would otherwise recompile onto the slow overlay
+# on their first boot-time import. /home/user is deliberately NOT compiled —
+# its __pycache__ would be swept into the backend sync.
+RUN python3 -m compileall -q /usr/local/bin /usr/local/lib/webvm-sync \
+	/usr/lib/python3.14/site-packages
 
 # CRITICAL FIX (2026-08-10, root cause of the display bug): `docker build`
 # creates a `/.dockerenv` file in the container rootfs. The `docker export`
@@ -415,50 +501,7 @@ RUN /sbin/openrc sysinit; true
 
 # Size trimming
 RUN rm -rf /usr/share/doc /usr/share/man /usr/share/info /var/cache/apk/*
-
-# Size trimming (round 2, 2026-08-21): components verified unused at runtime.
-#   * /usr/share/mime — only libgio's g_content_type_guess reads it; no guest
-#     binary calls that path (openbox menu has no icons, the explorer sniffs
-#     file types itself, xterm less/vi do not need the MIME DB).
-#   * /usr/libexec/glycin-loaders — gdk-pixbuf's on-demand image loaders,
-#     dlopen'd only when an image is actually decoded; openbox's Clearlooks
-#     theme is color-only and the menu has no icons, so nothing decodes.
-#   * DejaVu faces not reachable through 99-webvm-aliases.conf (which maps
-#     only to Sans/Sans Mono/Serif regular+bold+italic): Condensed,
-#     ExtraLight, MathTeX.
-#   * /usr/share/hwdata (pci.ids) — libpciaccess uses it only for device-name
-#     labels; Xorg's modesetting driver works without it.
-#   * /usr/lib/girepository-1.0 typelibs — no pygobject/gjs in the guest.
-#   * libepoxy + libwayland-client — orphaned by the mesa/GL stack removal
-#     (no DT_NEEDED or dlopen users remain, verified 2026-08-21).
-#   * Tcl extras (itcl/thread/tdbc) — optional Tcl packages, tkinter never
-#     loads them.
-#   * imlib2 CLI tools, non-Clearlooks openbox themes, mesa leftovers
-#     (drirc.d) and build-time aclocal macros, fontconfig cache (regenerated
-#     on demand).
-#   * Python __pycache__ is NOT removed — it is PRE-BAKED with compileall.
-#     The original round-2 trim deleted __pycache__ on the theory that the
-#     interpreter regenerates it on demand, but that made the FIRST import on
-#     a fresh boot recompile every stdlib module onto the SLOW overlay
-#     (measured: first `import tkinter` 1.12 s with no pyc vs 0.30 s with
-#     baked pyc — plans/update-to-latest.md §9.5.1 item 11; idlelib and the
-#     file explorer import far more and paid even more). compileall prebakes
-#     bytecode matching the exact installed 3.14 interpreter (+~5.5 MiB),
-#     so first-run imports read cached .pyc instead of recompiling.
-RUN python3 -m compileall -q -j 4 /usr/lib/python3.14 && \
-	rm -rf /usr/share/mime /usr/libexec/glycin-loaders /usr/share/hwdata \
-		/usr/lib/girepository-1.0 /usr/share/drirc.d /usr/share/aclocal \
-		/var/cache/fontconfig \
-		/usr/lib/itcl4.3.4 /usr/lib/thread2.8.12 /usr/lib/tdbc1.1.12 \
-		/usr/lib/tdbcmysql1.1.12 /usr/lib/tdbcodbc1.1.12 /usr/lib/tdbcpostgres1.1.12 \
-		/usr/lib/libepoxy.so.0 /usr/lib/libepoxy.so.0.0.0 \
-		/usr/lib/libwayland-client.so.0 /usr/lib/libwayland-client.so.0.25.0 \
-		/usr/bin/imlib2_* \
-		/usr/share/fonts/dejavu/DejaVuMathTeXGyre.ttf \
-		/usr/share/fonts/dejavu/DejaVuSans-ExtraLight.ttf \
-		/usr/share/fonts/dejavu/DejaVuSansCondensed*.ttf \
-		/usr/share/fonts/dejavu/DejaVuSerifCondensed*.ttf && \
-	find /usr/share/themes -mindepth 1 -maxdepth 1 -type d ! -name Clearlooks \
-		-exec rm -rf {} +
+# (The round-2 trim + stdlib compileall now run in the cache-stable layer
+# BEFORE the rootfs/config/scripts COPYs — see that block.)
 
 CMD ["/sbin/init"]

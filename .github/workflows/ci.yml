@@ -57,18 +57,15 @@ jobs:
         with:
           name: guest-${{ matrix.backend }}
           path: guest-artifact
-      - name: Export guest fingerprint to the build
-        # The download step placed the artifact at guest-artifact/ in the
-        # workspace root; this step runs there too, so the path is relative.
-        run: echo "WEBVM_IMAGE_BUILD=$(cat guest-artifact/image-build.txt)" >> "$GITHUB_ENV"
-      - name: npm ci (committed lockfile, pinned cheerpx 1.3.8)
-        working-directory: webvm
-        run: npm ci --no-audit --no-fund
       - name: Build frontend with matching cacheId fingerprint
-        working-directory: webvm
-        env:
-          WEBVM_MODE: ${{ matrix.backend }}
-        run: npm run build
+        # The download placed the artifact at guest-artifact/ in the
+        # workspace root; the composite exports the fingerprint, runs npm
+        # ci + the vitest suite and builds (the shared build-frontend
+        # action — also used by pages.yml, so the derivation cannot drift).
+        uses: ./.github/actions/build-frontend
+        with:
+          backend: ${{ matrix.backend }}
+          image_build_file: guest-artifact/image-build.txt
       - name: Upload frontend build
         uses: actions/upload-artifact@v7
         with:
@@ -109,36 +106,12 @@ jobs:
       # --- Phase 1: browser-mode E2E (no tailnet, no secrets) ----------------
       # The browser matrix case must boot a REAL browser-mode build (nginx-only
       # server, no sync agent, no controlUrl) — plan §9.4 matrix [browser, webdav].
-      # Start each phase from a clean tree: download-artifact@v8 MERGES into the
-      # destination, and the server Dockerfile COPYs the whole dirs — leftover
-      # browser files would otherwise be baked into the webdav image.
-      - name: Clean phase artifact dirs
-        run: rm -rf webvm/build webvm/custom-disk-images
-      - name: Download browser guest ext2 + frontend
-        uses: actions/download-artifact@v8
+      # (Phase setup — artifact downloads, .env, server build + up — is the
+      # shared composite action .github/actions/e2e-phase, used by both phases.)
+      - name: Phase setup (browser)
+        uses: ./.github/actions/e2e-phase
         with:
-          name: guest-browser
-          path: webvm/custom-disk-images/
-      - uses: actions/download-artifact@v8
-        with:
-          name: frontend-browser
-          path: webvm/build/
-
-      - name: Deployment .env (browser phase)
-        run: |
-          cat > .env <<EOF
-          CONTROL_HOST=127.0.0.1
-          LAN_IP=127.0.0.1
-          STORAGE_BACKEND=browser
-          EOF
-
-      - name: Build server image (browser build)
-        run: docker compose build server
-
-      - name: Bring up the server (browser mode, nginx only)
-        # --wait gates on the new compose healthcheck so a slow/failed start
-        # fails here deterministically instead of surfacing as Playwright timeouts.
-        run: docker compose up -d server --wait --wait-timeout 120
+          backend: browser
 
       - name: E2E browser-mode (boot, no-egress, persistence, session guard)
         working-directory: tests/e2e
@@ -147,37 +120,31 @@ jobs:
           npx playwright test
           # sync.spec.js self-skips (no E2E_WEBDAV_* env)
 
+      - name: Server integration (browser phase)
+        # The header/redirect/ext2-range/CORS assertions run against THIS
+        # nginx-only stack too — not just the webdav phase. The headscale
+        # join test self-skips (no GATEWAY_AUTHKEY here — no headscale).
+        run: |
+          set -a; . ./.env; set +a
+          STORAGE_BACKEND=browser tests/server/integration.sh
+
       - name: Tear down browser phase
         run: docker compose --profile tailnet down
 
       # --- Phase 2: webdav stack (control plane + sync) ----------------------
       # Isolate from phase 1: download-artifact@v8 merges, and the server
       # Dockerfile COPYs the whole dirs into the webdav image.
-      - name: Clean phase artifact dirs
-        run: rm -rf webvm/build webvm/custom-disk-images
-      - name: Download webdav guest ext2 + frontend
-        uses: actions/download-artifact@v8
+      - name: Phase setup (webdav)
+        uses: ./.github/actions/e2e-phase
         with:
-          name: guest-webdav
-          path: webvm/custom-disk-images/
-      - uses: actions/download-artifact@v8
-        with:
-          name: frontend-webdav
-          path: webvm/build/
+          backend: webdav
+          env_extra: |
+            WEBDAV_USER=webdav
+            WEBDAV_PASS=webdavpass
+            HEADSCALE_BOOTSTRAP=1
 
-      - name: Deployment .env (webdav phase)
-        run: |
-          cat > .env <<EOF
-          CONTROL_HOST=127.0.0.1
-          LAN_IP=127.0.0.1
-          STORAGE_BACKEND=webdav
-          WEBDAV_USER=webdav
-          WEBDAV_PASS=webdavpass
-          HEADSCALE_BOOTSTRAP=1
-          EOF
-
-      - name: Build images (webdav build)
-        run: docker compose build
+      - name: Build gateway image (tailnet profile)
+        run: docker compose --profile tailnet build gateway
 
       - name: Bootstrap preauth keys (first run of headscale)
         run: |
@@ -249,14 +216,17 @@ jobs:
       - name: "E2E webdav (control plane + sync)"
         working-directory: tests/e2e
         run: |
+          set -a; . ../../.env; set +a
           GATEWAY_IP=$(docker compose exec -T gateway tailscale ip -4 2>/dev/null | head -1)
           echo "gateway tailnet IP: $GATEWAY_IP"
           # boot.spec's browser-mode case must stay a DISCONNECTED session in
           # the webdav phase too (its header comment asserts no auto-login):
           # any explicit hash disables the baked /webvm-config.js seeding.
+          # The explicit hash URL comes from the SAME derivation the `make
+          # url` path uses (scripts/print-url.sh) — never rebuilt by hand.
           E2E_SITE_URL="https://127.0.0.1:8081/alpine.html#e2e" \
           E2E_GATEWAY_IP="$GATEWAY_IP" \
-          E2E_WEBDAV_URL="https://127.0.0.1:8081/alpine.html#authKey=$(grep '^HEADSCALE_PREAUTHKEY=' ../../.env | cut -d= -f2)&controlUrl=https://127.0.0.1:8443&syncUrl=http://${GATEWAY_IP}:8082/webdav/&syncUser=webdav&syncPass=webdavpass" \
+          E2E_WEBDAV_URL="$(../../scripts/print-url.sh)" \
           E2E_WEBDAV_BASE="http://127.0.0.1:8082/webdav/" \
           E2E_WEBDAV_USER=webdav E2E_WEBDAV_PASS=webdavpass \
           npx playwright test
@@ -274,6 +244,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/work -w /work koalaman/shellcheck:stable -S warning \
             build.sh server/entrypoint.sh gateway/entrypoint.sh \
+            scripts/lib/webvm-common.sh \
             scripts/gen-certs.sh scripts/print-url.sh scripts/acceptance.sh \
             scripts/fetch-cheerpx-runtime.sh scripts/rebuild-tailscale-wasm.sh \
             scripts/precompress-static.sh \
@@ -282,6 +253,9 @@ jobs:
             diskimage/rootfs/usr/local/bin/open-file-explorer.sh \
             diskimage/rootfs/usr/local/bin/idle3.14-launcher \
             diskimage/rootfs/usr/local/bin/idle-loopback-cache \
+            diskimage/rootfs/usr/local/bin/paste-typer.sh \
+            diskimage/rootfs/usr/local/lib/webvm-pidfile.sh \
+            diskimage/rootfs/usr/local/sbin/rc-preload \
             diskimage/scripts/wm-clients.sh \
             diskimage/scripts/99-screen-resize.sh tests/rootfs/smoke.sh \
             tests/server/integration.sh tests/server/join-test-client.sh

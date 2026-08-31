@@ -809,12 +809,33 @@ def main(argv):
     # not treat that as a stuck desktop.
     # pgrep -f is unusable in the guest (the CheerpX core traps on
     # /proc/<pid>/cmdline reads of processes still being set up — see
-    # faccessat-fix.c), so liveness is tracked via this file.
+    # faccessat-fix.c), so liveness is tracked via this file. The
+    # "pid starttime" format (field 22 of /proc/self/stat) lets the shared
+    # guard (webvm-pidfile.sh) reject a RECYCLED pid — see
+    # file-explorer.py's pidfile for the full rationale.
     try:
         with open("/tmp/viewer.pid", "w") as f:
-            f.write(str(os.getpid()))
+            starttime = ""
+            try:
+                with open("/proc/self/stat") as _s:
+                    starttime = _s.read().split()[21]
+            except (OSError, IndexError):
+                pass
+            f.write("%s %s" % (os.getpid(), starttime))
     except OSError:
         pass
+
+    # Remove the pidfile on a CLEAN exit so the keep-alive's kill -0 guard
+    # cannot pin a stale file (the daemon also cleans it before relaunching).
+    def _remove_pidfile():
+        try:
+            os.remove("/tmp/viewer.pid")
+        except OSError:
+            pass
+
+    import atexit
+    atexit.register(_remove_pidfile)
+
     paths = [p for p in argv if os.path.isfile(p)]
     if not paths:
         print("usage: file-viewer.py FILE [FILE ...]", file=sys.stderr)

@@ -33,6 +33,7 @@ lock the decision logic itself.
 
 import os
 import pathlib
+import socket
 import subprocess
 import textwrap
 import time
@@ -57,6 +58,22 @@ def _sandbox(script_tmp: pathlib.Path) -> dict[str, str]:
         "/tmp/idle.pid": str(script_tmp / "idle.pid"),
         "/tmp/viewer.pid": str(script_tmp / "viewer.pid"),
         "/tmp/.keep-alive-count": str(script_tmp / "count"),
+        # The X-liveness gate is sandboxed too: the tests provide a real
+        # AF_UNIX socket at this path (see the vm fixture). The socket is
+        # derived from $DISPLAY now (":99" -> /tmp/.X11-unix/X99), so the
+        # sandbox pins $DISPLAY and the socket together.
+        "X_SOCKET=\"${X_SOCKET:-/tmp/.X11-unix/X${X_DISPLAY_NUM:-0}}\"":
+            f"X_SOCKET=\"${{X_SOCKET:-{script_tmp}/x.sock}}\"",
+        "X_DISPLAY_NUM=$(printf '%s' \"${DISPLAY:-:0}\" | sed 's/^://; s/\\..*$//')":
+            f"X_DISPLAY_NUM={script_tmp}/x-display",
+        # The shared lib + window-count helper are sandboxed copies: the
+        # daemon sources /usr/local/lib/webvm-pidfile.sh and pipes xprop
+        # lines into /usr/local/bin/wm-clients.sh --count-line (the single
+        # home of the hex-id counting contract).
+        "WEBVM_PIDFILE_SH=\"${WEBVM_PIDFILE_SH:-/usr/local/lib/webvm-pidfile.sh}\"":
+            f"WEBVM_PIDFILE_SH=\"${{WEBVM_PIDFILE_SH:-{script_tmp}/webvm-pidfile.sh}}\"",
+        "WM_CLIENTS_BIN=\"${WM_CLIENTS_BIN:-/usr/local/bin/wm-clients.sh}\"":
+            f"WM_CLIENTS_BIN=\"${{WM_CLIENTS_BIN:-{script_tmp}/wm-clients.sh}}\"",
         # Shrink timings: stuck after 2s, spy session 4s, 0.5s ticks/grace.
         "STUCK_SECONDS=30": "STUCK_SECONDS=2",
         "SESSION_SECONDS=60": "SESSION_SECONDS=4",
@@ -71,6 +88,17 @@ def _sandbox(script_tmp: pathlib.Path) -> dict[str, str]:
     daemon_copy = script_tmp / "keep-file-explorer.sh"
     daemon_copy.write_text(text)
     daemon_copy.chmod(0o755)
+
+    pidfile_lib = script_tmp / "webvm-pidfile.sh"
+    pidfile_lib.write_text(
+        (ROOT / "diskimage" / "rootfs" / "usr" / "local" / "lib" / "webvm-pidfile.sh").read_text()
+    )
+
+    wm_clients = script_tmp / "wm-clients.sh"
+    wm_clients.write_text(
+        (ROOT / "diskimage" / "scripts" / "wm-clients.sh").read_text()
+    )
+    wm_clients.chmod(0o755)
 
     launcher = script_tmp / "launcher.sh"
     launcher.write_text(textwrap.dedent(f"""\
@@ -141,6 +169,11 @@ def vm(tmp_path: pathlib.Path):
             self.dir = tmp_path
             self.env = _sandbox(self.dir)
             self.daemon = None
+            # A REAL AF_UNIX socket at the sandboxed X_SOCKET path: the
+            # daemon's X-liveness gate uses `[ -S ]`, which only a socket
+            # satisfies. Bound for the lifetime of the fixture.
+            self.xsock = socket.socket(socket.AF_UNIX)
+            self.xsock.bind(str(self.dir / "x.sock"))
 
         def start(self, scenario_lines: list[str]):
             self.scenario = _write_scenario(self.dir, scenario_lines)
@@ -154,6 +187,11 @@ def vm(tmp_path: pathlib.Path):
                 stderr=subprocess.DEVNULL,
             )
 
+        def drop_x(self):
+            """Simulate Xorg dying: close + remove the X socket."""
+            self.xsock.close()
+            (self.dir / "x.sock").unlink(missing_ok=True)
+
         def release(self):
             (self.dir / "go").write_text("go\n")
 
@@ -162,6 +200,9 @@ def vm(tmp_path: pathlib.Path):
 
         def set_idle_pid(self, pid):
             (self.dir / "idle.pid").write_text(str(pid))
+
+        def set_viewer_pid(self, pid):
+            (self.dir / "viewer.pid").write_text(str(pid))
 
         @property
         def launches(self) -> list[str]:
@@ -176,6 +217,11 @@ def vm(tmp_path: pathlib.Path):
             if self.daemon and self.daemon.poll() is None:
                 self.daemon.kill()
                 self.daemon.wait()
+            try:
+                self.xsock.close()
+                (self.dir / "x.sock").unlink(missing_ok=True)
+            except OSError:
+                pass
 
     vm = VM()
     yield vm
@@ -242,6 +288,30 @@ def test_windowless_explorer_behind_idle_is_not_killed(vm):
         sleeper.wait()
 
 
+def test_windowless_explorer_behind_viewer_is_not_killed(vm):
+    """Zero windows + live explorer + live VIEWER (file-viewer.py opened from
+    the explorer) = the viewer swap, the same model as IDLE: the explorer
+    disabled itself while the viewer shows — it must survive past
+    STUCK_SECONDS untouched (the idle-only coverage missed this branch)."""
+    sleeper = _live_pid()
+    try:
+        vm.start([ZERO_WINDOWS])
+        vm.set_explorer_pid(sleeper.pid)
+        vm.set_viewer_pid(sleeper.pid)
+        vm.release()
+
+        time.sleep(6)
+        assert sleeper.poll() is None, (
+            "explorer behind the viewer must not be force-killed"
+        )
+        assert len(vm.launches) == 0, (
+            "explorer behind the viewer must not be relaunched"
+        )
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
 def test_stuck_windowless_explorer_is_force_killed_and_relaunched(vm):
     """Zero windows + live explorer + NO idle/viewer, held past STUCK_SECONDS:
     the daemon kills the stuck process AND relaunches immediately (the kill
@@ -278,3 +348,23 @@ def test_healthy_desktop_is_left_alone(vm):
     finally:
         sleeper.kill()
         sleeper.wait()
+
+
+def test_x_server_gone_pauses_all_decisions(vm):
+    """When the X server socket disappears (Xorg died mid-session), the
+    daemon must stop relaunching/killing — every launch would fail against
+    the dead display and churn forever."""
+    vm.start([ZERO_WINDOWS])
+    vm.set_explorer_pid(_dead_pid())
+    vm.release()
+
+    def one_window_applied():
+        return vm.read_count() == "0"
+
+    _wait_for(one_window_applied, 6, "zero-window count to be published")
+
+    vm.drop_x()  # Xorg dies
+    time.sleep(4)  # several poll ticks past the grace + stuck windows
+    assert vm.launches == [], (
+        "a dead X server must never trigger explorer relaunches"
+    )

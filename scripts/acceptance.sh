@@ -5,32 +5,40 @@
 # no-internet proofs, and the visual items.
 set -eu
 
-STORAGE_BACKEND="${STORAGE_BACKEND:-browser}"
-CONTROL_HOST="${CONTROL_HOST:-127.0.0.1}"
-LAN_IP="${LAN_IP:-127.0.0.1}"
-SITE_PORT="${SITE_PORT:-8081}"
-CONTROL_PORT="${CONTROL_PORT:-8443}"
-WEBDAV_PORT="${WEBDAV_PORT:-8082}"
-GATEWAY_TAILNET_IP="${GATEWAY_TAILNET_IP:-}"
+# Shared defaults + .env loader + helpers: the deployment values (and the
+# samba/webdav credentials used in the printed commands below) come from
+# .env / the environment — never empty defaults.
+WEBVM_COMMON="${WEBVM_COMMON:-$(dirname "$0")/lib/webvm-common.sh}"
+if [ ! -f "$WEBVM_COMMON" ]; then
+	echo "FATAL: shared lib not found at $WEBVM_COMMON" >&2
+	exit 1
+fi
+# shellcheck disable=SC1090
+. "$WEBVM_COMMON"
+webvm_load_dotenv
 
 SITE_URL="https://${LAN_IP}:${SITE_PORT}"
+# The desktop page route + image dir/name come from the shared lib (the same
+# values nginx serves and build.sh produces).
+PAGE_URL="$SITE_URL/$ALPINE_PAGE"
+IMAGE_URL="$SITE_URL/$WEBVM_IMAGE_DIR/$WEBVM_IMAGE_NAME"
 
 echo "== WebVM LAN acceptance ($STORAGE_BACKEND) =="
 
 echo ""
 echo "[1] Site access + headers"
-curl -sk -o /dev/null -w "  /alpine.html -> %{http_code}\n" "$SITE_URL/alpine.html"
+curl -sk -o /dev/null -w "  $ALPINE_PAGE -> %{http_code}\n" "$PAGE_URL"
 curl -sk -o /dev/null -w "  /            -> %{http_code} (expect 302)\n" "$SITE_URL/"
-curl -sk -D - -o /dev/null "$SITE_URL/alpine.html" | grep -qi "cross-origin-embedder-policy: require-corp" \
+curl -sk -D - -o /dev/null "$PAGE_URL" | grep -qi "cross-origin-embedder-policy: require-corp" \
 	&& echo "  COEP require-corp: OK" || echo "  COEP: MISSING"
 curl -sk -H "Range: bytes=0-1023" -o /dev/null -w "  ext2 Range    -> %{http_code} (expect 206)\n" \
-	"$SITE_URL/custom-disk-images/webvm-custom-disk.ext2"
+	"$IMAGE_URL"
 
 echo ""
 echo "[2] No-internet proofs (manual, in the browser DevTools Network tab):"
-echo "  * Open $SITE_URL/alpine.html"
+echo "  * Open $PAGE_URL"
 echo "  * Expected requests: SAME-ORIGIN ONLY (page, assets, the ext2,"
-echo "    /custom-disk-images/…) — zero external hosts."
+echo "    /$WEBVM_IMAGE_DIR/…) — zero external hosts."
 echo "  * In network modes the only cross-origin traffic is to"
 echo "    ${CONTROL_HOST}:${CONTROL_PORT} (WSS control + /derp)."
 echo "  * The blocked logtail fetch (log.tailscale.com) may appear as a CSP"
@@ -85,12 +93,12 @@ echo ""
 echo "[6] Git (when a LAN git server is wanted)"
 echo "  Host step:  GIT_SSH_LAN_IP=<git-server> in .env, then"
 echo "              docker compose --profile tailnet up -d"
-echo "  Guest step: git remote add origin ssh://git@$GATEWAY_TAILNET_IP:2222/<path>"
+echo "  Guest step: git remote add origin ssh://git@$GATEWAY_TAILNET_IP:$GIT_SSH_PORT/<path>"
 echo "              then git clone / pull / push against the LAN remote."
 
 echo ""
 echo "[7] Image size / first load"
-ls -lh webvm/custom-disk-images/webvm-custom-disk.ext2 2>/dev/null | awk '{print "  ext2:", $5}'
+ls -lh "webvm/$WEBVM_IMAGE_DIR/$WEBVM_IMAGE_NAME" 2>/dev/null | awk '{print "  ext2:", $5}'
 echo "  * Record the first-load time in the browser (must be < 2 GiB image)."
 
 echo ""
@@ -106,7 +114,9 @@ echo "    Paste — the text must appear in the FOCUSED guest window (xterm or"
 echo "    the file explorer's Search box) as if typed by hand."
 echo "  * Paste 'café — 日本語' — must be refused with 'cannot be typed as"
 echo "    keys: char U+00E9 …' and nothing sent."
-echo "  * Type 400+ chars — the panel must show the '~4s to type' warning."
+echo "  * Type 400+ chars — the panel must show the '~2s to type' warning"
+echo "    (5 ms/char since 2026-08-29 — the estimate lives in"
+echo "    webvm/src/lib/clipboard.js CX_TYPE_DELAY_MS)."
 echo "  * Open file… / drag a .txt onto the box — content loads and pastes."
 echo "  * In-VM Ctrl+C / Ctrl+V inside IDLE must still work natively."
 

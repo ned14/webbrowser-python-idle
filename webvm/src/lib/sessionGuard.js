@@ -1,8 +1,9 @@
 // Browser-level single-session guard for the shared IndexedDB overlay.
 //
 // Because the overlay cache is shared per origin (fixed cacheId
-// `blocks_alpine_<image-build>`), two live tabs would share one overlay and
-// can corrupt it. This guard uses localStorage + BroadcastChannel:
+// `blocks_alpine_<image-build>` — the derivation lives in $lib/cacheId.js),
+// two live tabs would share one overlay and can corrupt it. This guard uses
+// localStorage + BroadcastChannel:
 //
 //   * the holder keeps a token + heartbeat (~10s) with ~90s expiry in
 //     localStorage, released on pagehide/beforeunload;
@@ -17,7 +18,11 @@
 const HEARTBEAT_MS = 10000;
 const EXPIRY_MS = 90000;
 const PING_TIMEOUT_MS = 800;
-const SETTLE_MS = 200;
+// The acquire-race settle window. Kept small (50 ms): on the common path
+// (no other holder) it is the ENTIRE cost of the lock on the boot critical
+// path — the runtime download starts in parallel (see +page.svelte), but
+// the block devices still wait on this verdict.
+const SETTLE_MS = 50;
 
 let heartbeatTimer = null;
 let channel = null;

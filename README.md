@@ -88,9 +88,10 @@ explorer's Search box, …) as if you had typed it by hand — the guest
   (plus Return/Tab/Backspace) can be typed; anything else (é, “smart quotes”,
   日本語, emoji, control chars) is refused with a diagnostic naming the
   offending character — before anything is sent.
-- **Speed warning:** typing is character-by-character (~100 chars/s), so the
-  panel shows a live estimate ("1,234 chars — ~12s to type") once the content
-  is long, and refuses above 10,000 characters.
+- **Speed warning:** typing is character-by-character (~200 chars/s at the
+  5 ms/char XTEST cadence), so the panel shows a live estimate ("1,234 chars —
+  ~6.2s to type") once the content is long, and refuses above 10,000
+  characters.
 
 ## Quick start (browser mode — no tailnet)
 

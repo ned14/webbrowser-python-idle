@@ -67,11 +67,43 @@ VIEWER = "/usr/local/bin/file-viewer.py"
 # open-file-explorer.sh).
 PIDFILE = "/tmp/explorer.pid"
 
+
+def _process_starttime():
+    """/proc/self/stat field 22 (starttime, clock ticks since boot) — the
+    pidfile's recycled-pid guard (webvm-pidfile.sh) verifies it. A pid
+    REUSED by an unrelated process keeps the number but changes the
+    starttime, so the guard can tell the record apart from a recycled
+    impostor."""
+    try:
+        with open("/proc/self/stat") as f:
+            return f.read().split()[21]
+    except (OSError, IndexError):
+        return ""
+
+
 try:
     with open(PIDFILE, "w") as f:
-        f.write(str(os.getpid()))
+        f.write("%s %s" % (os.getpid(), _process_starttime()))
 except OSError:
     pass
+
+
+def _remove_pidfile():
+    """Remove the pidfile on a CLEAN exit (2026-08-30): the keep-alive
+    daemon's pidfile_alive relies on `kill -0`, which also succeeds on the
+    un-reaped zombie a SIGKILLed child leaves behind. Removing the file at
+    exit makes the normal close path deterministic: the daemon sees a dead
+    explorer immediately instead of waiting out STUCK_SECONDS (the SIGKILL
+    path is covered by the daemon's own pidfile cleanup before relaunch)."""
+    try:
+        os.remove(PIDFILE)
+    except OSError:
+        pass
+
+
+import atexit  # noqa: E402  (tiny module; not part of the lazy-import set)
+
+atexit.register(_remove_pidfile)
 
 # =========================
 # WM client-list polling
@@ -573,7 +605,8 @@ class SingleTab(ttk.Frame):
         search_frame = ttk.Frame(self.main_panel)
         search_frame.pack(fill="x", pady=(0, 5))
         ttk.Label(search_frame, text="Search:").pack(side="left")
-        ttk.Entry(search_frame, textvariable=search_var).pack(
+        self.search_entry = ttk.Entry(search_frame, textvariable=search_var)
+        self.search_entry.pack(
             side="left", fill="x", expand=True, padx=5)
         ttk.Label(search_frame, text="Sort by:").pack(side="left", padx=(10, 0))
         ttk.Combobox(search_frame, textvariable=sort_var,
@@ -609,6 +642,20 @@ class SingleTab(ttk.Frame):
 
         self._rebuild_breadcrumbs()
         self.load_folder(self.current_path)
+
+        # X input focus: the emulated X server's click-to-focus is UNRELIABLE
+        # (ButtonPress events reach widgets — the file list opens on clicks —
+        # but the X input focus never follows; verified 2026-08-30: no caret,
+        # no selection, XTestFakeKeyEvent keys go nowhere). The paste lane
+        # (paste-typer.sh + xsendkeys) types into the X INPUT FOCUS, so the
+        # explorer claims it for its Search entry directly — focus_force() is
+        # an XSetInputFocus request (no WM round-trip, no property exchange),
+        # which works under the emulated X. Without this, pastes land
+        # nowhere; with it, the Search entry is the default paste target
+        # (the only text input on the desktop). The .after delay lets the
+        # window manager map + deiconify the explorer first (an early
+        # focus_force can be overridden by the WM's map-focus).
+        root.after(1500, lambda: self.search_entry.focus_force())
 
     # -------------------------
     # Launched-app UI disable

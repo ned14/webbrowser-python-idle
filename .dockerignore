@@ -1,21 +1,11 @@
-# Build context is the repo root (server/Dockerfile uses context `.` so it can
-# COPY webvm/build and webvm/custom-disk-images). Keep the context small.
-.git
-.gitignore
-.env
-.env.example
-certs
-data
-plans
-prompts
-scripts
-tests
-Makefile
-README.md
-compose.yaml
-diskimage
-gateway
-webvm/.git
-webvm/node_modules
-webvm/.svelte-kit
-webvm/assets/*.gif
+# Build context is the repo root (server/Dockerfile and gateway/Dockerfile
+# use context `.` so they can COPY the built frontend, the ext2 and the
+# shared shell lib). Whitelist only what the images COPY, so the context
+# stays small (the ~500 MB webvm/ tree is unavoidable: the server image
+# needs webvm/build + webvm/custom-disk-images).
+*
+!server/**
+!gateway/**
+!scripts/lib/**
+!webvm/build/**
+!webvm/custom-disk-images/**
