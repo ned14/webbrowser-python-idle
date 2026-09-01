@@ -2464,6 +2464,67 @@ gateway relays).
     passes, shellcheck clean on the full list incl. rc-preload. The
     in-guest second-generation keep-alive cycle runs in the rootfs smoke
     suite (requires the emulated guest — CI).
+38. **Live-site boot failures on GitHub Pages — stale cjFS data +
+    post-publish liveness check (2026-09-01).** The live site
+    (`https://ned14.github.io/webbrowser-python-idle/alpine.html`) failed to
+    boot in a user browser with `Uncaught RuntimeError: table index is out of
+    bounds` inside `cheerpOSOpenMain -> idbMakeFileData` after a clean
+    Alpine init. Investigation (byte-hash of the live runtime/bundles vs the
+    repo, live image chunk protocol check, fresh-profile Playwright boots):
+    the deployment itself was healthy — cold and warm boots succeeded — and
+    the crash read records from the CheerpX guest-persistent folder FS
+    (IndexedDB DB `cjFS_/files/`, an upstream FIXED name, never versioned per
+    deployment; upstream cheerpOS.js carries a literal "TODO: Verify IndexDB
+    version"). The affected browser held `cjFS_*` records written by older
+    deployments (the 1.3.7 -> 1.3.8 runtime bump of 2026-08-18 and the
+    broken/cancelled 2026-08-31 Pages runs); a fresh profile never sees them
+    and boots cleanly. Fix: `webvm/src/lib/cjfsVersion.js` —
+    `resetCjfsIfImageChanged(imageBuild)` runs on BOTH session-lock paths in
+    `+page.svelte` (the mount-fixed `cjFS_/files/` DB is opened by ephemeral
+    sessions too) and deletes THIS app's cjFS IndexedDB family —
+    `cjFS_/files/` + the runtime-prefixed overlay family
+    `cjFS_/blocks_alpine_<build>/` — whenever the image-build fingerprint
+    differs from the marker (first load under the migration wipes too —
+    automatic repair for already-poisoned browsers); same policy as the
+    `blocks_alpine_<image-build>` overlay (a rebuilt image starts a fresh
+    base). The wipe is scoped to the app's own databases: all of an
+    account's Pages projects share one `https://<user>.github.io` origin
+    and IndexedDB is origin-scoped, so a bare `cjFS_*` prefix would destroy
+    sibling projects' CheerpX stores. The localStorage migration marker
+    records SUCCESS only — a deleted-while-blocked (another tab's live VM)
+    or errored wipe leaves the marker unset and retries on the next boot
+    (post-review hardening). Cosmetic: removed the `<link rel=preload
+    as="worker">` for cxcore.js (Chromium rejects the destination and the
+    runtime loads the file via `new Worker(url)` — no preload destination
+    matches; three of the four runtime files remain preloaded) and staged an
+    empty `webvm-config.js` in pages.yml (Pages previously 404ed the
+    deliberate-no-op config script every load). NEW post-publish liveness
+    check: `.github/workflows/liveness.yml` triggers on the Pages workflow's
+    successful completion (`workflow_run` — the check CANNOT run before the
+    publish) and runs `tests/e2e/live-site-check.mjs`, which waits for the
+    deployed bundle to reference that run's disk image (`_<runId>.ext2`,
+    cache-busted polling; Pages/Fastly can lag a run's completion), then
+    FULLY boots the live site 5x in a row (fresh profile per boot, desktop
+    pixels via canvasProbe + COI + zero `[WebVM] runtime failed`/page errors;
+    the webvm-config.js 404 and preload warning of older deploys are
+    reported, not failed on; `--retry-on-flake` retries one failed boot
+    once with a fresh profile — the observed cold-boot crash never repeats
+    across profiles, so a documented retry drops the false-red rate from
+    ~21% to ~0.2% per run while a true regression still fails every boot;
+    the workflow's concurrency group is per triggering run
+    (`liveness-${{ workflow_run.id }}`), so a failed/cancelled interrupting
+    Pages run can never cancel a check the published state is owed).
+    Note: the first 5-boot run caught an
+    intermittent cold-boot `null function or function signature mismatch`
+    (~1/5, one of eleven boots) on an otherwise-healthy deployment — the
+    checker's exact purpose. Verification: 45->55 vitest incl. the new
+    cjfsVersion suite (10 tests), frontend builds clean, page no longer
+    emits the preload warning, live liveness runs green. Updated:
+    `webvm/src/lib/cjfsVersion.js` (+`cjfsVersion.test.js`),
+    `webvm/src/routes/alpine/+page.svelte`, `webvm/src/app.html`,
+    `.github/workflows/pages.yml`, `.github/workflows/liveness.yml` (NEW),
+    `tests/e2e/live-site-check.mjs` (NEW), `tests/README.md`.
+
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path
 semantics) is a lookup-and-record step, not a design decision — and the §12/21
 checklist lists exactly which version-dependent claims to re-verify when the

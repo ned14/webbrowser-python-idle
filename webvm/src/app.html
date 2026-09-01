@@ -28,16 +28,21 @@
 		<!-- Start the CheerpX runtime download during HTML parse instead of
 		     waiting for the app bundle to import it. cx.esm.js is only a
 		     605-byte loader; the real weight is cx_esm.js (the ES module the
-		     loader imports), cxcore.js (the engine worker) and cxcore.wasm
-		     (fetched by the worker). All four are preloaded so the boot path
-		     overlaps the fetch of the runtime with the app bundle itself.
-		     RELATIVE on purpose: the GitHub Pages deployment lives under
-		     /<repo>/, where a root-absolute href would 404 on every load
-		     (the dynamic import resolves through siteBase, which equals the
-		     document base — so the relative hrefs hit the same URLs). -->
+		     loader imports) and cxcore.wasm (fetched by the engine worker).
+		     Three of the four runtime files are preloaded here so the boot
+		     path overlaps the fetch of the runtime with the app bundle
+		     itself; cxcore.js (the engine worker) is deliberately NOT — the
+		     runtime loads it via `new Worker(url)`, a request no <link
+		     rel=preload> destination matches (Chromium rejects as="worker"),
+		     so a preload would only produce a "preloaded but not used"
+		     warning and a duplicate fetch (the same trap the tailscale.wasm
+		     preload fell into, removed 2026-08-30). RELATIVE on purpose: the
+		     GitHub Pages deployment lives under /<repo>/, where a
+		     root-absolute href would 404 on every load (the dynamic import
+		     resolves through siteBase, which equals the document base — so
+		     the relative hrefs hit the same URLs). -->
 		<link rel="modulepreload" href="cheerpx/cx.esm.js">
 		<link rel="modulepreload" href="cheerpx/cx_esm.js">
-		<link rel="preload" as="worker" href="cheerpx/cxcore.js">
 		<!-- crossorigin (anonymous) matches the worker's plain fetch():
 		     same-origin, CORS mode, same-origin credentials — the preload
 		     and the real request share one cache entry. -->

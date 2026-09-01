@@ -1,0 +1,62 @@
+name: Liveness (published WebVM boots)
+
+# Post-publish boot check for the GitHub Pages site. Runs AFTER the Pages
+# workflow completes successfully (workflow_run provides the ordering "only
+# once the image is published"), then fully boots the live site N times in a
+# row with fresh browser profiles. The checker itself additionally waits until
+# the deployed bundle references the publishing run's disk image — Pages is
+# fronted by a CDN (max-age 600) so a run can be "done" while an edge still
+# serves the previous deploy; a stale or half-published deployment is never
+# tested (see tests/e2e/live-site-check.mjs).
+#
+# A boot is only "full" when the desktop is reachable: display canvas with
+# rendered pixels, cross-origin isolation intact, and no [WebVM] runtime
+# failure / page error (uv "table index is out of bounds" boot crashes are
+# caught here). Known cosmetics of older deployments — the webvm-config.js
+# 404 (staged empty since 2026-09-01) and the preload `as` warning — are
+# reported, never failed on.
+
+on:
+  workflow_run:
+    workflows: ["Pages (project website — the VM)"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Scope the group to the triggering Pages run: a failed/cancelled
+  # interrupting run must not cancel the check the published state is owed
+  # (with a static group + cancel-in-progress, the replacement run's only job
+  # is skipped by the success `if` and the group ends as a no-op). Each
+  # successful publish always receives its complete check; two rapid
+  # successful deploys cost two checks, which is the safe trade-off.
+  group: liveness-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  live-boot:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # DO NOT bump to 24: same constraint as the E2E job in ci.yml —
+          # Playwright 1.48.0 (pinned for Chromium 130, the last browser the
+          # wasm tailscale client's netmap works on) deadlocks on Node >= 24.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: Install Playwright + chromium
+        working-directory: tests/e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Boot the live site 5x in a row
+        working-directory: tests/e2e
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: node live-site-check.mjs --run-id "$RUN_ID" --boots 5

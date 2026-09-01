@@ -45,6 +45,20 @@ tests/
    relay, the `nc -z` sequence):
    `E2E_WEBDAV_URL='<full hash URL from make url>' E2E_GATEWAY_IP=<gateway-tailnet-ip> E2E_WEBDAV_BASE=http://127.0.0.1:8082/webdav/ E2E_WEBDAV_USER=… E2E_WEBDAV_PASS=… npx playwright test`
 
+## Live-site liveness (published WebVM on GitHub Pages)
+
+`node live-site-check.mjs [--boots N] [--run-id <pages-run-id>]
+[--retry-on-flake]` fully boots the DEPLOYED site N times in a row (fresh
+browser profile per boot, desktop pixels via the shared canvasProbe +
+cross-origin isolation + zero runtime/page errors). `--run-id` waits for the
+deployed bundle to reference that Pages run's disk image before starting
+(Pages CDN can lag a run's completion). `--retry-on-flake` retries a single
+failed boot once with a fresh profile — the observed cold-boot crash never
+repeats across profiles, so sensitivity is unchanged while the false-red rate
+drops from ~21% to ~0.2% per run. Run by `.github/workflows/liveness.yml`
+after every successful Pages publish. Requires the same `npm ci` + `npx
+playwright install` as the E2E suite.
+
 ## LAN acceptance
 
 `make acceptance` runs `scripts/acceptance.sh` — the manual/LAN checklist that

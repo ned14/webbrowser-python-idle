@@ -50,6 +50,13 @@ jobs:
           (cd "$DEPLOY_DIR" && split "$IMAGE_NAME" "$IMAGE_NAME.c" -a 6 -b 128k -x --additional-suffix=.txt)
           stat -c%s "$DEPLOY_DIR/$IMAGE_NAME" > "$DEPLOY_DIR/$IMAGE_NAME.meta"
           rm "$DEPLOY_DIR/$IMAGE_NAME"
+          # The local server bakes /webvm-config.js at container start; Pages
+          # has no server, so an empty config is staged instead — otherwise
+          # every load logs a 404 for a <script src> that is a deliberate
+          # no-op when absent, and the liveness check (liveness.yml) treats
+          # it as expected noise. The import-empty seed is exactly what the
+          # browser/none entrypoint renders: no authKey/controlUrl/syncUrl.
+          printf 'window.__webvmConfig = {};\n' > "$DEPLOY_DIR/webvm-config.js"
 
       - name: Build frontend for GitHub Pages (github disk device)
         # Shared build-frontend action (same derivation as CI's frontend

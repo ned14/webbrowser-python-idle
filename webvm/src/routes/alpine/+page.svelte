@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import WebVM from '$lib/WebVM.svelte';
 	import { acquireSessionLock } from '$lib/sessionGuard.js';
+	import { resetCjfsIfImageChanged } from '$lib/cjfsVersion.js';
 	import { sharedCacheId, ephemeralCacheId } from '$lib/cacheId.js';
 	import * as configObj from '/config_public_alpine';
 
@@ -48,6 +49,22 @@
 		onMount(async () => {
 			try {
 				const acquired = await acquireSessionLock();
+				// Migrate the guest-persistent CheerpX folder FS (cjFS_*) to
+				// this image build BEFORE the VM mounts — stale records
+				// written by older runtimes/images crash the boot on open()
+				// ("Uncaught RuntimeError: table index is out of bounds" /
+				// "null function or function signature mismatch" in
+				// cheerpOSOpenMain -> idbMakeFileData, 2026-09-01 on the live
+				// Pages site; fresh profiles booted cleanly). Runs on BOTH
+				// lock paths: cjFS_/files/ is mount-fixed and is opened by
+				// ephemeral sessions too, and an ephemeral tab on poisoned
+				// records crashes just the same. The wipe is safe on the
+				// not-acquired path by construction: another tab's live VM
+				// holds the databases open, deleteDatabase is BLOCKED, and
+				// the marker is recorded only when every deletion actually
+				// succeeded (see $lib/cjfsVersion.js) — so it simply
+				// retries on a later boot.
+				await resetCjfsIfImageChanged(configObj.imageBuild);
 				if (!acquired) {
 					// Another live tab holds the shared overlay: boot an
 					// ephemeral session that never writes to the shared overlay.
