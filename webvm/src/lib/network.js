@@ -1,6 +1,5 @@
 import { writable } from 'svelte/store';
 import { browser } from '$app/environment'
-import { siteBase } from './siteBase.js';
 
 // The connection-state names — single source of truth. NetworkingTab.svelte
 // and updateButtonData switch on these literals; never retype them.
@@ -419,9 +418,23 @@ async function startTailnet()
 {
 	try
 	{
-		// siteBase (from cheerpx.js) makes this resolve correctly under a
-		// GitHub Pages base path too; the runtime glue is served same-origin.
-		const net = await import(siteBase + '/cheerpx/tun/tailscale_tun_auto.js');
+		// ROOT-ABSOLUTE on purpose (NOT siteBase or a relative path —
+		// regression 2026-09-01, CI network/sync specs): the tun glue module
+		// must be imported under EXACTLY the URL the CheerpX core's own
+		// net-init (cheerpOSNetInit, run by the heal below) imports, or the
+		// browser ends up with TWO module instances of tailscale_tun.js —
+		// each constructing its own singleton IpStack. The IpStack is a
+		// module-level singleton; two instances mean the SECOND client's
+		// IpStack.up({localIp...}) reconfigures a stack the first client's
+		// sockets still use, and the guest's first connect() hits a
+		// half-torn-down stack (EINVAL -> ipstack wasm "table index is out
+		// of bounds" -> the whole session dies before the sync agent's
+		// lease lands; verified 2026-09-01: siteBase-prefixed URL fails
+		// 3/3, root-absolute passes). The core resolves its own tun URL
+		// root-absolutely, so this must match. The tailnet never runs on
+		// GitHub Pages (no authKey/controlUrl rendered there), so the
+		// siteBase indirection is not needed for the pages deployment.
+		const net = await import('/cheerpx/tun/tailscale_tun_auto.js');
 		tunExports = await net.autoConf({
 			loginUrlCb: loginUrlCb,
 			stateUpdateCb: stateUpdateCb,
@@ -459,11 +472,12 @@ async function startTailnet()
 		// load), a background watcher keeps looking for a few minutes so a
 		// late injection still heals the session instead of failing silently.
 		const runCoreNetInitHeal = () => {
-			// siteBase, not a root-absolute path: the healer's tun glue URL
-			// must resolve under a GitHub Pages base path exactly like the
-			// driver's import above (a hardcoded /cheerpx/… would 404 there).
+			// ROOT-ABSOLUTE, matching the driver's import above: the core
+			// resolves this URL itself, and a mismatch yields TWO tun-glue
+			// module instances / TWO IpStack singletons (the 2026-09-01
+			// regression — see startTailnet's import comment).
 			window.cheerpOSNetInit(
-				siteBase + '/cheerpx/tun/tailscale_tun_auto.js',
+				'/cheerpx/tun/tailscale_tun_auto.js',
 				loginUrlCb,
 				authKey,
 				controlUrl,
