@@ -77,7 +77,7 @@ python3 /etc/webvm/render-webvm-config.py --render-csp \
 		exit 1
 	}
 
-envsubst '$CONTROL_HOST $CONTROL_PORT $CONTROL_WSS_PORT $SITE_PORT $WEBVM_IMAGE_DIR $ALPINE_PAGE' \
+envsubst '$CONTROL_HOST $CONTROL_PORT $SITE_PORT $WEBVM_IMAGE_DIR $ALPINE_PAGE' \
 	< /etc/webvm/nginx.conf.template > /etc/nginx/nginx.conf
 envsubst '$CONTROL_HOST $CONTROL_PORT $STUN_PORT' \
 	< /etc/webvm/headscale/config.yaml.template > /etc/headscale/config.yaml

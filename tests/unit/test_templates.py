@@ -139,12 +139,16 @@ class TestNginx:
 
     def test_csp_connect_src_self_and_control_only(self, nginx, csp):
         # The CSP connect-src must allow only 'self' + the control host:port
-        # family (blocks logtail and any other third-party fetch). The scheme-
-        # default 443 entries are the wasm client's PORT-DROPPED control-plane
-        # URLs (wss://<host>/ts2021, /derp, /derp/probe) — scoped to :443, never
-        # portless.
+        # pair (blocks logtail and any other third-party fetch). No scheme-
+        # default 443 entries: the page glue re-inserts the control port into
+        # the wasm client's port-dropped control-plane URLs, so they all dial
+        # CONTROL_PORT — never portless, which would open the WHOLE host to
+        # connect-src.
         assert "connect-src 'self' https://127.0.0.1:8443 wss://127.0.0.1:8443" in csp
-        assert "https://127.0.0.1:443 wss://127.0.0.1:443" in csp
+        # No scheme-default 443 allowlist (the wasm client used to dial it
+        # portless; the glue now re-inserts the control port).
+        assert "https://127.0.0.1:443" not in csp
+        assert "wss://127.0.0.1:443" not in csp
         # No portless host entry (would open the whole host to connect-src)
         assert "wss://127.0.0.1 " not in csp
         # script-src covers the self-hosted CheerpX runtime (never the CDN)
@@ -157,11 +161,12 @@ class TestNginx:
 
     def test_csp_lan_host_scoping(self, render_webvm_config):
         # The LAN deployment's CSP (a hardcoded LAN IP as CONTROL_HOST) must
-        # carry the same scoped allowlist: control host:port + the portless
-        # :443 scheme-default pair, and never a portless host entry.
+        # carry the same scoped allowlist: control host:port only, and never a
+        # portless host entry or a scheme-default 443 pair.
         csp = render_webvm_config.render_csp("192.168.1.10", "8443")
         assert "connect-src 'self' https://192.168.1.10:8443 wss://192.168.1.10:8443" in csp
-        assert "https://192.168.1.10:443 wss://192.168.1.10:443" in csp
+        assert "https://192.168.1.10:443" not in csp
+        assert "wss://192.168.1.10:443" not in csp
         assert "wss://192.168.1.10 " not in csp
         assert "127.0.0.1" not in csp
 

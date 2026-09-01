@@ -6,6 +6,10 @@
 #   SITE_PORT (8081)    the WebVM site (COOP/COEP/CORP, CSP connect-src)
 #   CONTROL_PORT (8443) Headscale control + embedded DERP (WSS)
 # Exposure to the host is restricted by compose port bindings (LAN_IP only).
+# NO privileged/default-WSS listener (443): the page's network glue re-inserts
+# the control port into the wasm client's port-dropped control URLs, so the
+# browser dials CONTROL_PORT alone (tailnet works with host 443 unoccupied —
+# and unneeded — since 2026-09-01).
 
 # brotli_static module (Alpine subpackage nginx-mod-http-brotli, version-matched
 # to the installed nginx by apk): serves pre-generated .br siblings produced by
@@ -91,12 +95,11 @@ http {
 		# request) — the page and WASM client make ZERO external requests.
 		# script-src 'self' covers the self-hosted CheerpX runtime modules/workers
 		# (/cheerpx/*) and the app bundle.
-		# The portless https/wss entries cover the wasm client's DEFAULT-PORT
-		# URLs: the bundled client drops the controlUrl port when it builds the
-		# Noise-over-WebSocket URL (wss://<host>/ts2021) and the DERP URLs, so
-		# the scheme-default 443 (CONTROL_WSS_PORT, relayed by the gateway in
-		# tailnet modes) must be allowed too. Scoped to :443 explicitly — never
-		# portless, which would open the WHOLE host to connect-src.
+		# Only the control host:port pair (never portless, which would open the
+		# WHOLE host to connect-src): the page glue re-inserts the control port
+		# into the client's port-dropped URLs, so wss://host:port/ts2021 +
+		# /derp and https://host:port/derp/probe are all dialed on
+		# CONTROL_PORT — the scheme-default 443 is never touched.
 		# The header text itself lives in /etc/nginx/csp.conf (rendered by the
 		# entrypoint from server/render-webvm-config.py --render-csp — the CSP's
 		# single home) so all three sites that need it share one source — a
@@ -197,27 +200,7 @@ http {
 		add_header Cross-Origin-Resource-Policy "cross-origin" always;
 
 		# Catch-all reverse proxy to headscale with the WebSocket + CORS
-		# handling — shared with the CONTROL_WSS_PORT listener via
-		# /etc/nginx/control-location.conf (the two must never drift).
-		include /etc/nginx/control-location.conf;
-	}
-
-	# ----------------------------------------------------------------------
-	# Control plane on the DEFAULT WSS port (CONTROL_WSS_PORT, default 443).
-	# The bundled CheerpX wasm client builds its Noise-over-WebSocket URL as
-	# wss://<control-host>/ts2021 (the controlUrl PORT IS DROPPED — Leaning's
-	# fork always uses the scheme-default port), so the control plane must
-	# also be reachable on 443. Same config as the CONTROL_PORT listener.
-	# ----------------------------------------------------------------------
-	server {
-		listen ${CONTROL_WSS_PORT} ssl;
-		server_name _;
-
-		ssl_certificate     /certs/server.crt;
-		ssl_certificate_key /certs/server.key;
-
-		add_header Cross-Origin-Resource-Policy "cross-origin" always;
-
+		# handling (via /etc/nginx/control-location.conf).
 		include /etc/nginx/control-location.conf;
 	}
 }

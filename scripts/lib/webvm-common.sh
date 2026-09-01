@@ -27,9 +27,6 @@ CONTROL_HOST="${CONTROL_HOST:-127.0.0.1}"
 LAN_IP="${LAN_IP:-127.0.0.1}"
 SITE_PORT="${SITE_PORT:-8081}"
 CONTROL_PORT="${CONTROL_PORT:-8443}"
-# The scheme-default WSS port the CheerpX wasm client uses when it DROPS the
-# controlUrl port building wss://<host>/ts2021 (nginx listener + gateway relay).
-CONTROL_WSS_PORT="${CONTROL_WSS_PORT:-443}"
 WEBDAV_PORT="${WEBDAV_PORT:-8082}"
 STUN_PORT="${STUN_PORT:-3478}"
 WEBDAV_ROOT="${WEBDAV_ROOT:-/data/webdav}"

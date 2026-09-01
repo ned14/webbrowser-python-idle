@@ -544,7 +544,13 @@ single-machine use needs; §12/21):
   (same pattern for `CONTROL_PORT`/`WEBDAV_PORT`/`STUN_PORT`). **The default is
   loopback-safe:** `LAN_IP` defaults to `127.0.0.1`, so zero-config `make up`
   works on a single machine with no duplicate-bind collision. LAN/multi-device
-  use sets `LAN_IP=<lan-ip>`.
+  use sets `LAN_IP=<lan-ip>`. **No scheme-default WSS port (443) anywhere
+  (REVISED 2026-09-01):** the page glue re-inserts the control port into the
+  wasm client's port-dropped control-plane URLs (wss://\<host\>/ts2021, /derp,
+  https://\<host\>/derp/probe — all dialed on CONTROL_PORT), so the gateway no
+  longer publishes 443 and the tailnet runs on machines where host 443 is
+  already occupied (the old `CONTROL_WSS_PORT` listener/relay/CSP-443 entries
+  were removed; see §12/21 item 38).
 - The page is opened at the published site port, so its own origin is always
   correct. The **URL hash** must carry the effective endpoints:
   `controlUrl=https://${CONTROL_HOST}:${CONTROL_PORT}` (path-less — see
@@ -1551,7 +1557,11 @@ gateway relays).
     later, pointing at the recorded gateway tailnet IP through a `2222` relay.
 7. **Host ports:** defaults `SITE_PORT=8081`, `CONTROL_PORT=8443`,
    `WEBDAV_PORT=8082` accepted; arbitrary remapping supported via `.env` and the
-   runtime URL hash (§10.9).
+   runtime URL hash (§10.9). **No privileged scheme-default WSS port (443)
+   needed since 2026-09-01** — the page glue re-inserts the control port into
+   the wasm client's port-dropped URLs, so the control plane (and DERP) are
+   reached on `CONTROL_PORT` alone; the gateway publishes no host ports
+   (§12/21 item 38).
 8. **Pinned versions:** webvm commit SHA, exact `@leaningtech/cheerpx`,
    Headscale tag, `tailscale/tailscale` tag — looked up and recorded in the
    repo at implementation time (a lookup-and-record step, not a design
@@ -2535,6 +2545,35 @@ gateway relays).
     `webvm/src/routes/alpine/+page.svelte`, `webvm/src/app.html`,
     `.github/workflows/pages.yml`, `.github/workflows/liveness.yml` (NEW),
     `tests/e2e/live-site-check.mjs` (NEW), `tests/README.md`.
+39. **Tailnet on a machine where host 443 is already occupied — the scheme-
+    default WSS port is gone (2026-09-01).** The wasm Tailscale client's
+    port-drop (it builds control-plane URLs portless: `wss://<host>/ts2021`,
+    `wss://<host>/derp`, `https://<host>/derp/probe`) used to force the
+    gateway to publish host 443 (CONTROL_WSS_PORT relay), which makes the
+    tailnet unstartable wherever another service owns 443. Since the page
+    glue ALREADY wraps `window.WebSocket` (the rejection watchdog) and every
+    control socket/request is created through `window.WebSocket` /
+    `XMLHttpRequest` / `fetch` in the page realm, the fix re-inserts the
+    session control port into portless control-plane URLs
+    (`reinsertControlPort` in `webvm/src/lib/network.js`; pinned to the
+    control host + headscale's control paths only — `/ts2021`, `/derp`,
+    `/key`, `/bootstrap-dns`, `/machine/register`; any other URL passes
+    through byte-identical). ALL control traffic now dials CONTROL_PORT, so
+    the whole 443 machinery was removed: gateway `/ts2021` socat relay +
+    compose publish, nginx `CONTROL_WSS_PORT` listener, the CSP
+    `https/wss://host:443` connect-src entries, `CONTROL_WSS_PORT` itself
+    (shared libs, compose, .env.example, entrypoint envsubst list), the
+    gateway's `control-443` health probe, the E2E no-egress 443 family and
+    the CSP unit assertions. This also vacates host 443 entirely — a site
+    on `SITE_PORT=443` no longer collides with the WSS relay (§10.9).
+    Verification: 9 new vitest cases for `reinsertControlPort` (network suite
+    18->27; frontend total 78 passed), `make test-unit` green (278 pytest)
+    incl. the gateway relay-matrix assertions
+    (no `TCP-LISTEN:443`), `docker compose config -q` clean. NOTE: the
+    rewritten control-plane dials go to the SAME nginx CONTROL_PORT listener
+    that served them via the relay before — only the port changes; the full
+    boot flow (key → /ts2021 → netmap → DERP) must be re-verified by the
+    tailnet E2E in CI for the webdav phase.
 
 (pinned versions, guest NIC config, `extra_hosts` precedence, DataDevice path
 semantics) is a lookup-and-record step, not a design decision — and the §12/21

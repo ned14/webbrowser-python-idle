@@ -12,14 +12,15 @@ import { waitForDesktop } from '../lib/desktop.js';
 const CONTROL_HOST = process.env.E2E_CONTROL_HOST || '127.0.0.1';
 const CONTROL_PORT = process.env.E2E_CONTROL_PORT || '8443';
 // The wasm Tailscale client DROPS the controlUrl port when building its
-// control-plane URLs (wss://<host>/ts2021, /derp, /derp/probe), so the
-// control plane is also addressed on the scheme-default port 443
-// (CONTROL_WSS_PORT, relayed by the gateway in tailnet modes). The no-egress
-// allowlist must admit BOTH port families.
-const CONTROL_WSS_PORT = process.env.E2E_CONTROL_WSS_PORT || '443';
+// control-plane URLs (wss://<host>/ts2021, /derp, /derp/probe), and the page
+// glue re-inserts the control port, so ALL control-plane traffic dials
+// CONTROL_PORT — the scheme-default 443 is never touched (the tailnet must
+// run on machines where 443 is already occupied). The no-egress allowlist is
+// therefore the single control host:port pair (plus portless, which the
+// browser resolves to the same host:CONTROL_PORT after the glue rewrite).
 const isControlPlane = (candidate) =>
 	candidate.hostname === CONTROL_HOST &&
-	(candidate.port === CONTROL_PORT || candidate.port === CONTROL_WSS_PORT || candidate.port === '');
+	(candidate.port === CONTROL_PORT || candidate.port === '');
 const SITE_URL =
 	process.env.E2E_SITE_URL ||
 	`https://127.0.0.1:${process.env.E2E_SITE_PORT || 8081}/alpine.html`;

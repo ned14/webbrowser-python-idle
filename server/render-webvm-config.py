@@ -48,20 +48,21 @@ def render_csp(control_host, control_port):
     template could drift from the page's connect-src needs). connect-src is
     'self' + the control plane ONLY: it blocks the compiled-in Tailscale
     logtail fetch (and any third-party request) — the page and WASM client
-    make ZERO external requests. The portless https/wss entries cover the
-    wasm client's DEFAULT-PORT URLs (it drops the controlUrl port when
-    building wss://<host>/ts2021), scoped to :443 — never portless, which
-    would open the WHOLE host to connect-src.
+    make ZERO external requests. The control host:port pair covers every
+    control-plane URL: the page glue re-inserts the control port into the
+    wasm client's port-dropped URLs (wss://<host>/ts2021, /derp and
+    https://<host>/derp/probe), so all of them dial CONTROL_PORT — the
+    scheme-default 443 is never used (never portless, which would open the
+    WHOLE host to connect-src).
     """
     return (
         'add_header Content-Security-Policy "default-src \'self\'; '
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
-        "worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-        "font-src 'self' data:; "
-        f"connect-src 'self' https://{control_host}:{control_port} "
-        f"wss://{control_host}:{control_port} "
-        f"https://{control_host}:443 wss://{control_host}:443\" always;\n"
+        + "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        + "worker-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; "
+        + "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        + "font-src 'self' data:; "
+        + f"connect-src 'self' https://{control_host}:{control_port} "
+        + f"wss://{control_host}:{control_port}\" always;\n"
     )
 
 

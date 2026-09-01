@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { updateButtonData, NETWORK_STATES, networkData, applyControlSocketClose, validateLoginUrl } from './network.js';
+import { updateButtonData, NETWORK_STATES, networkData, applyControlSocketClose, validateLoginUrl, reinsertControlPort } from './network.js';
 
 // updateButtonData is the pure state->button-config mapping for the
 // Networking sidebar panel (10 states). The state string literals the UI
@@ -25,6 +25,58 @@ describe('validateLoginUrl', () => {
 		expect(() => validateLoginUrl('/ts2021')).toThrow();
 		expect(() => validateLoginUrl('')).toThrow();
 		expect(() => validateLoginUrl('not a url')).toThrow();
+	});
+});
+
+// reinsertControlPort is the pure decision behind the control-plane port
+// re-insertion: the wasm Tailscale client DROPS the controlUrl port and
+// builds its control-plane URLs portless (wss://<host>/ts2021, /derp,
+// https://<host>/derp/probe). The glue wraps window WebSocket/XMLHttpRequest/
+// fetch with this, so the tailnet dials CONTROL_PORT and host 443 never needs
+// to be published (running on a machine where 443 is already occupied).
+describe('reinsertControlPort', () => {
+	const CONTROL = 'https://127.0.0.1:8443';
+
+	it('re-inserts the control port into portless wss control URLs', () => {
+		expect(reinsertControlPort('wss://127.0.0.1/ts2021', CONTROL)).toBe('wss://127.0.0.1:8443/ts2021');
+		expect(reinsertControlPort('wss://127.0.0.1/derp', CONTROL)).toBe('wss://127.0.0.1:8443/derp');
+	});
+
+	it('re-inserts into the portless https control URLs', () => {
+		expect(reinsertControlPort('https://127.0.0.1/derp/probe', CONTROL)).toBe('https://127.0.0.1:8443/derp/probe');
+		expect(reinsertControlPort('https://127.0.0.1/key?v=142', CONTROL)).toBe('https://127.0.0.1:8443/key?v=142');
+	});
+
+	it('leaves URLs with an explicit port untouched', () => {
+		expect(reinsertControlPort('https://127.0.0.1:8443/key?v=142', CONTROL)).toBe('https://127.0.0.1:8443/key?v=142');
+	});
+
+	it('leaves portless URLs on OTHER hosts untouched', () => {
+		expect(reinsertControlPort('https://10.0.0.5/ts2021', CONTROL)).toBe('https://10.0.0.5/ts2021');
+		expect(reinsertControlPort('https://login.tailscale.com/key', CONTROL)).toBe('https://login.tailscale.com/key');
+	});
+
+	it('leaves non-control paths untouched', () => {
+		expect(reinsertControlPort('https://127.0.0.1/health', CONTROL)).toBe('https://127.0.0.1/health');
+	});
+
+	it('leaves non-http(s)/ws(s) schemes untouched', () => {
+		expect(reinsertControlPort('ftp://127.0.0.1/key', CONTROL)).toBe('ftp://127.0.0.1/key');
+	});
+
+	it('is a no-op without a controlUrl, on garbage input or unknown URLs', () => {
+		expect(reinsertControlPort('wss://127.0.0.1/ts2021', '')).toBe('wss://127.0.0.1/ts2021');
+		expect(reinsertControlPort('not a url', CONTROL)).toBe('not a url');
+		expect(reinsertControlPort(null, CONTROL)).toBeNull();
+		expect(reinsertControlPort(undefined, CONTROL)).toBeUndefined();
+	});
+
+	it('a portless controlUrl (no control port known) leaves URLs unchanged', () => {
+		expect(reinsertControlPort('wss://127.0.0.1/ts2021', 'https://127.0.0.1')).toBe('wss://127.0.0.1/ts2021');
+	});
+
+	it('a malformed controlUrl leaves URLs unchanged', () => {
+		expect(reinsertControlPort('wss://127.0.0.1/ts2021', 'not a url')).toBe('wss://127.0.0.1/ts2021');
 	});
 });
 

@@ -188,6 +188,60 @@ function tripUnreachable()
 	networkReachable.set(false);
 }
 
+// --- Control-plane port re-insertion --------------------------------------
+// The wasm Tailscale client DROPS the controlUrl port when it builds its
+// control-plane URLs (wss://<host>/ts2021, wss://<host>/derp,
+// https://<host>/derp/probe — the reason the old CONTROL_WSS_PORT gateway
+// relay existed). The client cannot be reconfigured, but every control
+// socket/request is created through window WebSocket / XMLHttpRequest in
+// THIS realm, so those are wrapped below to re-insert the session's control
+// port into any portless control-plane URL — the control plane then works
+// with host 443 NOT published at all (required to run the tailnet on a
+// machine where 443 is already occupied by another service). The rewrite is
+// pinned to the control host + headscale's control paths; any other URL
+// passes through byte-identical.
+const CONTROL_PLANE_PATHS = ['/ts2021', '/derp', '/key', '/bootstrap-dns', '/machine/register'];
+export function reinsertControlPort(urlString, controlUrl)
+{
+	if (typeof urlString !== "string" || !controlUrl)
+		return urlString;
+	let url;
+	try
+	{
+		url = new URL(urlString);
+	}
+	catch(e)
+	{
+		return urlString;
+	}
+	// Only portless http(s)/ws(s) URLs are candidates — an explicit port
+	// already dials the right place (e.g. the /key fetch on :8443).
+	if (url.port !== "" || !["https:", "http:", "wss:", "ws:"].includes(url.protocol))
+		return urlString;
+	for (const path of CONTROL_PLANE_PATHS)
+	{
+		if (!url.pathname.startsWith(path))
+			continue;
+		let control;
+		try
+		{
+			control = new URL(controlUrl);
+		}
+		catch(e)
+		{
+			return urlString;
+		}
+		// Never redirect to a different host: only re-insert the port when
+		// the client dialed the session's own control host, and only when a
+		// control port is actually known.
+		if (url.hostname !== control.hostname || !control.port)
+			return urlString;
+		url.port = control.port;
+		return url.href;
+	}
+	return urlString;
+}
+
 if (browser && networkingEnabled)
 {
 	const RealWebSocket = window.WebSocket;
@@ -203,8 +257,9 @@ if (browser && networkingEnabled)
 			setTimeout(() => dummy.dispatchEvent(new CloseEvent("close")), 0);
 			return dummy;
 		}
-		const ws = protocols === undefined ? new RealWebSocket(url)
-			: new RealWebSocket(url, protocols);
+		const target = typeof url === "string" ? reinsertControlPort(url, controlUrl) : url;
+		const ws = protocols === undefined ? new RealWebSocket(target)
+			: new RealWebSocket(target, protocols);
 		if (isControl)
 		{
 			ws.addEventListener("open", () => { connectedNow = false; });
@@ -223,6 +278,23 @@ if (browser && networkingEnabled)
 	PatchedWebSocket.CLOSING = RealWebSocket.CLOSING;
 	PatchedWebSocket.CLOSED = RealWebSocket.CLOSED;
 	window.WebSocket = PatchedWebSocket;
+	// The wasm client's plain-HTTP control calls (/derp/probe) go through
+	// XMLHttpRequest (GOOS=js net/http) — wrap open() with the same port
+	// re-insertion. fetch() is wrapped too as belt-and-braces; the page's own
+	// /health probe uses an explicit port and is unaffected.
+	const RealXHROpen = window.XMLHttpRequest.prototype.open;
+	window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+		return RealXHROpen.call(this, method,
+			typeof url === "string" ? reinsertControlPort(url, controlUrl) : url, ...rest);
+	};
+	const RealFetch = window.fetch;
+	window.fetch = function(input, init) {
+		if (typeof input === "string")
+			input = reinsertControlPort(input, controlUrl);
+		else if (input instanceof Request)
+			input = new Request(reinsertControlPort(input.url, controlUrl), input);
+		return RealFetch.call(this, input, init);
+	};
 }
 
 function netmapUpdateCb(map)

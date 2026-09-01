@@ -389,7 +389,6 @@ SERVER_HAPPY_ENV = {
     "WEBDAV_BASE_PATH": "/webdav/",
     "ALPINE_PAGE": "alpine.html",
     "STUN_PORT": "3478",
-    "CONTROL_WSS_PORT": "443",
     "HEADSCALE_BOOTSTRAP": "0",
 }
 
@@ -573,10 +572,11 @@ def test_reset_countdown_missing_file_warns_but_boots(tmp_path):
 
 def test_gateway_relay_matrix(tmp_path):
     """The gateway's socat relay matrix: the webdav relay (WEBDAV_PORT ->
-    GATEWAY_CONTROL_IP), the scheme-default WSS relay (0.0.0.0:443 -> the
-    server's CONTROL_WSS_PORT), the loopback DERP relay (CONTROL_PORT ->
+    GATEWAY_CONTROL_IP), the loopback DERP relay (CONTROL_PORT ->
     GATEWAY_CONTROL_IP), the git relays gated on *_LAN_IP — and the
-    tailscale up args (path-less login server, authkey)."""
+    tailscale up args (path-less login server, authkey). NO scheme-default
+    WSS (443) relay: the page glue re-inserts the control port, so the
+    browser dials CONTROL_PORT directly (443 occupied-safe since 2026-09-01)."""
     root = build_sandbox(tmp_path)
     ts_sock = _bind_socket(root, "var/run/tailscale/tailscaled.sock")
     try:
@@ -602,7 +602,6 @@ def test_gateway_relay_matrix(tmp_path):
             "GATEWAY_AUTHKEY": "hskey-auth-gateway",
             "GATEWAY_CONTROL_IP": "172.28.0.10",
             "CONTROL_PORT": "8443",
-            "CONTROL_WSS_PORT": "443",
             "WEBDAV_PORT": "8082",
             "GIT_SSH_LAN_IP": "",
             "GIT_HTTP_LAN_IP": "",
@@ -615,15 +614,14 @@ def test_gateway_relay_matrix(tmp_path):
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 lines = socat_args.read_text().splitlines()
-                if len(lines) >= 3:
+                if len(lines) >= 2:
                     break
                 time.sleep(0.2)
             lines = socat_args.read_text().splitlines()
             assert "TCP-LISTEN:8082,fork,reuseaddr,bind=127.0.0.1 TCP:172.28.0.10:8082" in lines, lines
-            assert "TCP-LISTEN:443,fork,reuseaddr,bind=0.0.0.0 TCP:172.28.0.10:443" in lines, lines
             assert "TCP-LISTEN:8443,fork,reuseaddr,bind=127.0.0.1 TCP:172.28.0.10:8443" in lines, lines
-            assert not any("2222" in l or "8083" in l for l in lines), \
-                "git relays must NOT start without their *_LAN_IP"
+            assert not any("TCP-LISTEN:443," in l or "2222" in l or "8083" in l for l in lines), \
+                "the scheme-default WSS relay must NOT start (page glue re-inserts the control port); git relays must NOT start without their *_LAN_IP"
             up = tsup.read_text()
             assert "--login-server=https://172.28.0.10:8443" in up, up
             assert "--authkey=hskey-auth-gateway" in up, up
@@ -659,7 +657,6 @@ def test_gateway_samba_and_git_relays(tmp_path):
             "GATEWAY_AUTHKEY": "hskey-auth-gateway",
             "GATEWAY_CONTROL_IP": "172.28.0.10",
             "CONTROL_PORT": "8443",
-            "CONTROL_WSS_PORT": "443",
             "SAMBA_LAN_IP": "192.168.1.50",
             "GIT_SSH_LAN_IP": "192.168.1.60",
             "GIT_HTTP_LAN_IP": "192.168.1.61",
@@ -672,7 +669,7 @@ def test_gateway_samba_and_git_relays(tmp_path):
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 lines = socat_args.read_text().splitlines()
-                if len(lines) >= 5:
+                if len(lines) >= 4:
                     break
                 time.sleep(0.2)
             lines = socat_args.read_text().splitlines()

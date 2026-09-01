@@ -102,8 +102,8 @@ and `tests/README.md` before inventing new build or test commands.
 
 A live **public** running deployment of this repo exists for real-world
 debugging:
-`https://webvm.nedprod.com` (site at `https://webvm.nedprod.com:8081/`), SSH
-in as `root@webvm.nedprod.com`, git checkout at
+`https://webvm.nedprod.com` (site at `https://webvm.nedprod.com/`, served on the
+standard HTTPS port 443), SSH in as `root@webvm.nedprod.com`, git checkout at
 `/root/webbrowser-python-idle` (deployment state lives in its `.env`, which is
 never committed). It runs `STORAGE_BACKEND=browser` via `make up` (nginx-only,
 disconnected sessions, no gateway). A host cron runs `scripts/reset-cycle.sh`
@@ -113,3 +113,12 @@ happened. Use this instance to reproduce and verify frontend/guest behavior in
 a real public browser context (cert: private CA at
 `/root/webbrowser-python-idle/certs/ca.crt`, so E2E/browser checks use
 `ignoreHTTPSErrors`).
+
+> **NOTE (2026-09-01): `webvm.nedprod.com` is now proxied through Cloudflare.**
+> Public requests to the site go through Cloudflare's edge: browsers see
+> Cloudflare's cert (not the private CA), response headers/caching can be
+> re-written by the proxy (e.g. CDN `max-age`, stripped headers, TLS version),
+> and the origin still serves 443 but only sees the proxy as the client.
+> This may affect later testing results — reproduce/verify with the proxy in
+> mind, and reach the origin directly (`--resolve` / the private CA /
+> `ignoreHTTPSErrors`) when the proxy itself would skew the check.

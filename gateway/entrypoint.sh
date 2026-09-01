@@ -92,17 +92,6 @@ case "$STORAGE_BACKEND" in
 		start_relay "${WEBDAV_PORT}" "${GATEWAY_CONTROL_IP}:${WEBDAV_PORT}"
 		;;
 esac
-# Control plane on the DEFAULT WSS port (443): the CheerpX wasm client drops
-# the controlUrl port when building the /ts2021 Noise WebSocket URL
-# (wss://<host>/ts2021). The host publishes 443 on THIS container (tailnet
-# profile only — browser/none modes never bind the privileged port), and
-# socat forwards it to the server's control listener over the compose
-# network. Unlike the tailscaled relays it must listen on ALL interfaces
-# (Docker's port publish forwards to the container's eth0, not its loopback).
-# The LISTENER stays 443 (the compose publish maps host CONTROL_WSS_PORT ->
-# container 443); the TARGET is the server's CONTROL_WSS_PORT listener.
-start_relay 443 "${GATEWAY_CONTROL_IP}:${CONTROL_WSS_PORT}" "0.0.0.0"
-
 # DERP-map loopback relay (CONTROL_PORT): the netmap's DERP region host is
 # derived from headscale's server_url, which is the BROWSER-facing
 # CONTROL_HOST — 127.0.0.1 on the zero-config single machine. Inside this
@@ -115,6 +104,11 @@ start_relay 443 "${GATEWAY_CONTROL_IP}:${CONTROL_WSS_PORT}" "0.0.0.0"
 # relay is then unused but harmless.
 start_relay "${CONTROL_PORT}" "${GATEWAY_CONTROL_IP}:${CONTROL_PORT}"
 
+# NO scheme-default-WSS (443) relay: the browser's control-plane URLs used to
+# be port-dropped (wss://<host>/ts2021), which is why this container once
+# published host 443. The page's network glue now re-inserts the control
+# port, so the browser dials CONTROL_PORT directly and 443 is never needed.
+
 # Git relays (host-side step: set the *_LAN_IP vars in .env and recreate the
 # gateway; the guest then adds remotes like ssh://git@<GATEWAY_TAILNET_IP>:2222/).
 # The SSH relay port comes from the shared lib (GIT_SSH_PORT).
@@ -124,12 +118,12 @@ start_relay "${CONTROL_PORT}" "${GATEWAY_CONTROL_IP}:${CONTROL_PORT}"
 # --- Relay health probe: socat's fork-mode relays DEGRADE after hours of
 # short-lived connections (a relay can reach a half-dead state where it still
 # accepts + forwards requests but drops the responses — observed 2026-08-30:
-# the browser's control-plane connections through the :443 relay stalled
-# while the server itself answered instantly). A half-dead relay still
-# passes kill -0, so the marker supervisor never notices. Probe the two
-# browser-facing relays END-TO-END through their own listeners; a probe that
-# does not complete within its timeout means the relay is unusable — exit
-# the container (compose restart policy re-creates it with fresh relays and
+# the browser's control-plane connections through the then-published :443
+# relay stalled while the server itself answered instantly). A half-dead
+# relay still passes kill -0, so the marker supervisor never notices. Probe
+# each relay END-TO-END through its own listener; a probe that does not
+# complete within its timeout means the relay is unusable — exit the
+# container (compose restart policy re-creates it with fresh relays and
 # tailscaled re-joins with the same node key/IP).
 relay_probe() {
 	_name=$1
@@ -152,7 +146,6 @@ relay_probe() {
 while :; do
 	webvm_supervise_once $TS_MARKER $RELAY_MARKERS || exit 1
 	sleep 300
-	relay_probe "control-443" "https://127.0.0.1:${CONTROL_WSS_PORT}/derp/probe"
 	relay_probe "derp-${CONTROL_PORT}" "https://127.0.0.1:${CONTROL_PORT}/derp/probe"
 	sleep 300
 done
