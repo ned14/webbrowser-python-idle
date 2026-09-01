@@ -97,3 +97,19 @@ and `tests/README.md` before inventing new build or test commands.
   before the phases begin.
 - Keep design decisions recorded in §3/§12 of the plan, and keep the §12/21
   checklist current as versions get pinned.
+
+## Live instance (debugging aid)
+
+A live **public** running deployment of this repo exists for real-world
+debugging:
+`https://webvm.nedprod.com` (site at `https://webvm.nedprod.com:8081/`), SSH
+in as `root@webvm.nedprod.com`, git checkout at
+`/root/webbrowser-python-idle` (deployment state lives in its `.env`, which is
+never committed). It runs `STORAGE_BACKEND=browser` via `make up` (nginx-only,
+disconnected sessions, no gateway). A host cron runs `scripts/reset-cycle.sh`
+every six hours (02/08/14/20 UTC); the reset script only restarts the service
+when the backend has storage to reset (webdav) or when a git pull + rebuild
+happened. Use this instance to reproduce and verify frontend/guest behavior in
+a real public browser context (cert: private CA at
+`/root/webbrowser-python-idle/certs/ca.crt`, so E2E/browser checks use
+`ignoreHTTPSErrors`).

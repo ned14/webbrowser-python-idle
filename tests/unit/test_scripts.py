@@ -1110,23 +1110,33 @@ def test_reset_cycle_defaults_are_off():
     assert _lib_var("RESET_DEADLINE_FILE") == "/etc/webvm/reset/deadline"
 
 
-def test_reset_cycle_refuses_when_not_enabled(tmp_path):
-    """Without RESET_INTERVAL_HOURS the cycle must refuse to run (opt-in),
-    and a non-numeric / zero interval must fail closed — a wrong cadence must
-    never silently start wiping storage."""
-    res = _run_reset_cycle({"STORAGE_BACKEND": "webdav"}, cwd=tmp_path)
+def test_reset_cycle_interval_is_opt_in_not_a_gate(tmp_path):
+    """RESET_INTERVAL_HOURS opts into the storage-reset COUNTDOWN facility only;
+    it must NOT gate the cycle as a whole. With it unset there is no server-side
+    storage to reset (browser) or the reset is not scheduled (webdav), and with
+    no upstream changes the cycle is a complete no-op: exit 0, service
+    untouched — a browser-backend cron run every 6 h must never bounce the
+    stack."""
+    for backend in ("browser", "webdav"):
+        res = _run_reset_cycle({"STORAGE_BACKEND": backend}, cwd=tmp_path)
+        assert res.returncode == 0, f"{backend}: {res.stderr}"
+        assert "no storage to reset" in res.stdout
+        assert "stop the stack" not in res.stdout, \
+            "a no-op cycle must never stop the stack"
+
+
+def test_reset_cycle_bad_interval_fails(tmp_path):
+    """A SET but invalid RESET_INTERVAL_HOURS fails closed — a broken cadence
+    must never silently start wiping storage."""
+    res = _run_reset_cycle(
+        {"STORAGE_BACKEND": "webdav", "RESET_INTERVAL_HOURS": "soon"}, cwd=tmp_path)
     assert res.returncode == 1
-    assert "RESET_INTERVAL_HOURS" in res.stderr
+    assert "positive integer" in res.stderr
 
     res2 = _run_reset_cycle(
-        {"STORAGE_BACKEND": "webdav", "RESET_INTERVAL_HOURS": "soon"}, cwd=tmp_path)
-    assert res2.returncode == 1
-    assert "positive integer" in res2.stderr
-
-    res3 = _run_reset_cycle(
         {"STORAGE_BACKEND": "webdav", "RESET_INTERVAL_HOURS": "0"}, cwd=tmp_path)
-    assert res3.returncode == 1
-    assert ">= 1" in res3.stderr
+    assert res2.returncode == 1
+    assert ">= 1" in res2.stderr
 
 
 def test_reset_cycle_dry_run_writes_deadline(tmp_path):

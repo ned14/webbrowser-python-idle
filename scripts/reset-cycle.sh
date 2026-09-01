@@ -1,28 +1,32 @@
 #!/bin/sh
-# One full reset cycle for a PUBLIC instance, driven by a host cron job:
+# One full update+reset cycle for a PUBLIC instance, driven by a host cron job:
 #
-#   1. UPDATE CHECK (upstream only, service stays up): fetch the remote, and
-#      only when the tracking branch has new commits pull them (--ff-only) and
-#      rebuild everything (make build: guest image + frontend + containers).
-#      A failing pull/build aborts HERE, before any downtime — the current
-#      deployment keeps serving untouched.
-#   2. STORAGE-RESET CYCLE (always): shut the whole stack down, wipe the
-#      server-side webdav storage (webdav mode only), record the NEXT deadline
-#      in the state dir, then restore the stack (make up-tailnet).
+#   1. UPDATE CHECK (service stays up): fetch the remote; when the tracking
+#      branch has new commits, pull (--ff-only) and rebuild everything
+#      (make build: guest image + frontend + containers). A failing
+#      pull/build aborts here — the running deployment keeps serving.
+#   2. RESTART/RESET — ONLY when there is something to do:
+#      * the backend has SERVER-SIDE storage to reset (webdav only): shut the
+#        stack down, wipe the webdav storage, restore;
+#      * OR a rebuild happened in step 1: shut down and restore so the NEW
+#        images are actually rolled out.
+#      A browser/none/samba backend with no upstream changes does NOTHING —
+#      no stop/start at all (no storage to reset, nothing new to serve).
+#      samba storage lives on the guest / an external server, never here.
+#      The restore command matches the mode: tailnet backends (samba/webdav)
+#      come back with `make up-tailnet`, browser/none with `make up`.
 #
-# The deadline written in step 2 is bind-mounted into the server container
-# (compose: ${RESET_STATE_DIR} -> /etc/webvm/reset) and baked into
-# /webvm-config.js at container start, so the page's sidebar shows a live
-# countdown to end users ("storage resets in HH:MM:SS"). It is written AFTER
-# every fallible step so a failed cycle never moves the countdown.
+# The storage-reset countdown is OPT-IN: with RESET_INTERVAL_HOURS set, a
+# reset cycle writes the next deadline (epoch seconds) to
+# ${RESET_STATE_DIR}/deadline (bind-mounted into the server container; the
+# entrypoint bakes it into /webvm-config.js so the sidebar shows a live
+# "storage resets in HH:MM:SS" countdown). Written AFTER every fallible step
+# so a failed cycle never moves it. With RESET_INTERVAL_HOURS unset, the
+# update/rebuild path still runs and the (webdav) storage reset + countdown
+# are disabled.
 #
-# OPT-IN: RESET_INTERVAL_HOURS must be set in .env (e.g. RESET_INTERVAL_HOURS=6
-# for the default six-hour cadence). With it unset the facility is off and this
-# script refuses to run.
-#
-# Example crontab line (runs at 02:00, 08:00, 14:00, 20:00 UTC — the cycle
-# itself is safe to re-run early: it is idempotent and the deadline is simply
-# recomputed):
+# Example crontab line (6-hour cadence — 02:00/08:00/14:00/20:00 UTC; safe to
+# re-run early: with nothing to do the cycle is a no-op):
 #   0 2,8,14,20 * * * cd /path/to/deployment && ./scripts/reset-cycle.sh >> /var/log/webvm-reset.log 2>&1
 #
 # Dry-run (writes the deadline + prints the steps, runs no docker/git/make):
@@ -40,18 +44,21 @@ fi
 . "$WEBVM_COMMON"
 webvm_load_dotenv
 
-# --- Opt-in gate + validation -------------------------------------------------
-if [ -z "${RESET_INTERVAL_HOURS:-}" ]; then
-	echo "FATAL: RESET_INTERVAL_HOURS is unset — the reset cycle is opt-in. Set it in .env (e.g. RESET_INTERVAL_HOURS=6) to enable the periodic storage-reset cycle + sidebar countdown." >&2
-	exit 1
-fi
-case "$RESET_INTERVAL_HOURS" in
-	''|*[!0-9]*)
+# --- Validation --------------------------------------------------------------
+# RESET_INTERVAL_HOURS is OPT-IN for the storage-reset countdown, NOT a gate
+# on the cycle as a whole: the update/rebuild leg must work without it (a
+# browser-backend deployment has no server-side storage to reset and no
+# countdown, but still wants the nightly pull+rebuild). An explicitly SET but
+# invalid interval fails closed so a broken cadence never silently wipes
+# storage.
+case "${RESET_INTERVAL_HOURS:-}" in
+	'') ;;
+	*[!0-9]*)
 		echo "FATAL: RESET_INTERVAL_HOURS must be a positive integer number of hours, got '$RESET_INTERVAL_HOURS'" >&2
 		exit 1
 		;;
 esac
-if [ "$RESET_INTERVAL_HOURS" -lt 1 ]; then
+if [ -n "${RESET_INTERVAL_HOURS:-}" ] && [ "$RESET_INTERVAL_HOURS" -lt 1 ]; then
 	echo "FATAL: RESET_INTERVAL_HOURS must be >= 1, got '$RESET_INTERVAL_HOURS'" >&2
 	exit 1
 fi
@@ -65,27 +72,43 @@ esac
 
 STATE_DIR="${RESET_STATE_DIR:-./state/reset}"
 DEADLINE_FILE="$STATE_DIR/deadline"
-NEXT_DEADLINE=$(( $(date +%s) + RESET_INTERVAL_HOURS * 3600 ))
+NEXT_DEADLINE=""
+if [ -n "${RESET_INTERVAL_HOURS:-}" ]; then
+	NEXT_DEADLINE=$(( $(date +%s) + RESET_INTERVAL_HOURS * 3600 ))
+fi
 
 mkdir -p "$STATE_DIR"
 if [ "${RESET_CYCLE_DRY_RUN:-}" = "1" ]; then
-	echo "$NEXT_DEADLINE" > "$DEADLINE_FILE"
-	echo "dry-run: deadline=$NEXT_DEADLINE ($(date -d "@$NEXT_DEADLINE" 2>/dev/null || date -r "$NEXT_DEADLINE") +${RESET_INTERVAL_HOURS}h) written to $DEADLINE_FILE"
+	if [ -n "$NEXT_DEADLINE" ]; then
+		echo "$NEXT_DEADLINE" > "$DEADLINE_FILE"
+		echo "dry-run: deadline=$NEXT_DEADLINE ($(date -d "@$NEXT_DEADLINE" 2>/dev/null || date -r "$NEXT_DEADLINE") +${RESET_INTERVAL_HOURS}h) written to $DEADLINE_FILE"
+	fi
 	echo "dry-run: would check upstream (git fetch + rev-list HEAD..@{u}); if changed, git pull --ff-only + make build"
-	echo "dry-run: would stop the stack, wipe webdav storage (webdav mode only), write the deadline, then restore with make up-tailnet"
+	if [ "$STORAGE_BACKEND" = "webdav" ] && [ -n "$NEXT_DEADLINE" ]; then
+		RESTORE_TARGET="up-tailnet"
+	else
+		case "$STORAGE_BACKEND" in
+			browser|none) RESTORE_TARGET="up" ;;
+			*) RESTORE_TARGET="up-tailnet" ;;
+		esac
+	fi
+	echo "dry-run: would stop the stack, wipe webdav storage (webdav mode only), write the deadline, then restore with make $RESTORE_TARGET"
 	exit 0
 fi
 
 # --- 1. Upstream update check (pulls + rebuilds ONLY when upstream changed) --
 # `git fetch` failure (offline / no remotes) is NON-fatal: the rebuild is
-# skipped but the storage-reset cycle below still runs — it never needs the
-# network. `set -e` would otherwise turn a fetch glitch into a skipped reset.
+# skipped (nothing new rolled) and the storage-reset leg below still decides
+# for itself. `set -e` would otherwise turn a fetch glitch into a skipped
+# storage reset.
+rebuilt=0
 if git fetch --quiet 2>/dev/null; then
 	if git rev-parse --abbrev-ref @{u} >/dev/null 2>&1; then
 		if [ -n "$(git rev-list HEAD..@{u} 2>/dev/null)" ]; then
 			echo "==> upstream has new commits — pulling + rebuilding (service stays up)"
 			git pull --ff-only
 			make build
+			rebuilt=1
 		else
 			echo "==> upstream unchanged ($(git rev-parse --short HEAD)) — skipping pull/rebuild"
 		fi
@@ -96,26 +119,45 @@ else
 	echo "WARNING: git fetch failed (offline?) — skipping the upstream pull/rebuild" >&2
 fi
 
-# --- 2. Storage-reset cycle (always) ------------------------------------------
-echo "==> reset-cycle: stopping the stack"
-docker compose --profile tailnet down
-
-# Wipe the server-side storage (webdav mode only). browser/none/samba have no
-# server-side storage to wipe (samba storage lives in the guest); the deadline
-# file lives OUTSIDE the webdav share (STATE_DIR), so this never touches it.
-if [ "$STORAGE_BACKEND" = "webdav" ]; then
-	echo "==> reset-cycle: wiping webdav storage at $DATA_DIR"
-	rm -rf "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?* 2>/dev/null || true
+# --- 2. Restart/rest only when there is something to do ----------------------
+# Storage-reset legs:
+#   * webdav: the server-side webdav root (DATA_DIR) is real storage to reset;
+#     browser/none have none, samba storage lives on the guest/external server.
+# A rebuild (rebuilt=1) always warrants a restart — the new images must be
+# served. Neither => the service is NOT touched.
+restore_target="up-tailnet"
+case "$STORAGE_BACKEND" in
+	browser|none) restore_target="up" ;;
+esac
+needs_reset=0
+if [ "$STORAGE_BACKEND" = "webdav" ] && [ -n "$NEXT_DEADLINE" ]; then
+	needs_reset=1
 fi
 
-# Record the next deadline AFTER every fallible step above succeeded (a failed
-# pull/build/down/wipe aborts the cycle and must NOT move the countdown). The
-# entrypoint reads it at the next container start and bakes it into
-# /webvm-config.js.
-echo "$NEXT_DEADLINE" > "$DEADLINE_FILE"
-echo "==> reset-cycle: next storage reset at epoch $NEXT_DEADLINE (in ${RESET_INTERVAL_HOURS}h)"
+if [ "$needs_reset" = "1" ] || [ "$rebuilt" = "1" ]; then
+	echo "==> reset-cycle: stopping the stack"
+	docker compose --profile tailnet down
 
-echo "==> reset-cycle: restoring the stack (make up-tailnet)"
-make up-tailnet
+	# Wipe the server-side storage (webdav mode only). browser/none/samba
+	# have no server-side storage to wipe (samba storage lives in the guest);
+	# the deadline file lives OUTSIDE the webdav share (STATE_DIR), so this
+	# never touches it.
+	if [ "$needs_reset" = "1" ]; then
+		echo "==> reset-cycle: wiping webdav storage at $DATA_DIR"
+		rm -rf "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?* 2>/dev/null || true
+	fi
 
-echo "==> reset-cycle: cycle complete"
+	# Record the next deadline AFTER every fallible step above succeeded (a
+	# failed pull/build/down/wipe aborts the cycle and must NOT move the
+	# countdown). Only when the countdown facility is enabled.
+	if [ -n "$NEXT_DEADLINE" ]; then
+		echo "$NEXT_DEADLINE" > "$DEADLINE_FILE"
+		echo "==> reset-cycle: next storage reset at epoch $NEXT_DEADLINE (in ${RESET_INTERVAL_HOURS}h)"
+	fi
+
+	echo "==> reset-cycle: restoring the stack (make $restore_target)"
+	make "$restore_target"
+	echo "==> reset-cycle: cycle complete"
+else
+	echo "==> reset-cycle: nothing to do — no storage to reset ($STORAGE_BACKEND) and no upstream changes; service left untouched"
+fi
