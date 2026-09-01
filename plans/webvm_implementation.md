@@ -1,7 +1,6 @@
 # WebVM (Option A1) Implementation Plan — Personal Use, Minimal Alpine + IDLE, LAN-Only Networking, Configurable Storage (Browser | Samba | Container WebDAV)
 
 Research date: 2026-08-08 · Revised 2026-08-09 (see note below).
-See `attic/implementation_options.md` for the archived option comparison.
 
 > **Revision note (condensed 2026-08-26; per-round detail is in the §12/21
 > records and git history):** rounds 5–7 (2026-08-09) corrected the design —

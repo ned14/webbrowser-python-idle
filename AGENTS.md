@@ -18,9 +18,6 @@ workflow.
   locally** (§12/21 carries the implementation-time verification results).
   Follow its phasing (Phase 1 `browser` mode end-to-end → Phase 2
   tailnet/gateway → Phase 3 git/sync).
-- `attic/implementation_options.md` — archived option comparison that
-  motivated the plan.
-- `prompts/research.md` — the original research prompt.
 
 ## Non-negotiable design facts (don't contradict these)
 
@@ -50,14 +47,12 @@ workflow.
     (`GATEWAY_CONTROL_IP`, default `172.28.0.10` on the fixed
     `172.28.0.0/16` network — cert SAN covers it), and its loopback socat
     relay on `CONTROL_PORT` forwards the netmap's DERP host (`127.0.0.1` on
-    the single machine) to the server. No `extra_hosts` hostname mapping is
-    used (removed 2026-08-16).
+    the single machine) to the server — not `host-gateway`, not
+    loopback-published ports, and never a hostname. No `extra_hosts`
+    hostname mapping is used (removed 2026-08-16).
   - `tests/unit/test_scripts.py::test_control_host_defaults_consistent`
     FAILS CI if the literal `host.docker.internal` reappears in any runtime
     config, script, test or CI file — keep it green.
-- Gateway reaches the control plane at the server's static compose-network IP
-  (`GATEWAY_CONTROL_IP` = 172.28.0.10 on a fixed `172.28.0.0/16` network) —
-  not `host-gateway`, not loopback-published ports, and never a hostname.
 - Tailnet modes are brought up with `make up-tailnet`, not
   `make up --profile tailnet`.
 - `diskImageType="bytes"` (HttpBytesDevice), same-origin ext2 with nginx

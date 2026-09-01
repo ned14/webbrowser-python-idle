@@ -1,7 +1,0 @@
-^[[A^[[131C ^[[1m^[[34m[^[[1m^[[32m ok ^[[1m^[[34m]^[[m
-TRACE-RUN-START mode=verify-tclsh
-===BEGIN-VERIFY===
-TCLSH-OK^M
-TRACE-VERIFY-TCLSH-RC=0
-===END-VERIFY===
-TRACE-RUN-END
