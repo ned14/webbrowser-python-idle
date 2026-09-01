@@ -16,6 +16,13 @@
 #      The restore command matches the mode: tailnet backends (samba/webdav)
 #      come back with `make up-tailnet`, browser/none with `make up`.
 #
+#   3. DOCKER PRUNE (opt-in, deployment-scoped): when the cycle actually
+#      stopped and restored the stack AND ${PRUNE_DOCKER} is 1, run
+#      `docker system prune -af` (no --volumes — the headscale/gateway state
+#      volumes must survive) to reclaim the build-cache/layer churn that a
+#      tight-disk VPS like webvm.nedprod.com accumulates on every rebuild.
+#      Set PRUNE_DOCKER=1 in the DEPLOYMENT's .env only — never a default.
+#
 # The storage-reset countdown is OPT-IN: with RESET_INTERVAL_HOURS set, a
 # reset cycle writes the next deadline (epoch seconds) to
 # ${RESET_STATE_DIR}/deadline (bind-mounted into the server container; the
@@ -157,6 +164,17 @@ if [ "$needs_reset" = "1" ] || [ "$rebuilt" = "1" ]; then
 
 	echo "==> reset-cycle: restoring the stack (make $restore_target)"
 	make "$restore_target"
+
+	# Deployment-scoped docker prune (opt-in via the DEPLOYMENT's .env):
+	# reclaims the build-cache + untagged layer churn every rebuild leaves
+	# behind — on a tight-disk VPS (webvm.nedprod.com) that accumulates
+	# fast. `-af` removes every image not used by a running container; the
+	# named state volumes are untouched (never --volumes).
+	if [ "${PRUNE_DOCKER:-0}" = "1" ]; then
+		echo "==> reset-cycle: pruning docker (PRUNE_DOCKER=1)"
+		docker system prune -af
+	fi
+
 	echo "==> reset-cycle: cycle complete"
 else
 	echo "==> reset-cycle: nothing to do — no storage to reset ($STORAGE_BACKEND) and no upstream changes; service left untouched"
