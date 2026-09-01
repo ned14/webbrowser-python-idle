@@ -2,6 +2,9 @@
 	"name": "webvm",
 	"version": "2.0.0",
 	"private": true,
+	"engines": {
+		"node": "^20.19.0 || >=22.12.0"
+	},
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build && sh ../scripts/precompress-static.sh build",

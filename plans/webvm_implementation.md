@@ -2087,8 +2087,19 @@ gateway relays).
       tab only, there is no guest console output AND no non-black KMS pixel
       for 200 s (270 s floor) — above the E2E's 240 s first-pixel budget so a
       slow cold-cache boot is never falsely declared stuck; the last boot
-      text is shown in the overlay and a "Booting the VM… Ns" pill makes a
-      still-booting screen honest. Terminal-only VMs are excluded from the
+      text is shown in the overlay and an "Estimated time remaining" pill
+      makes a still-booting screen honest — the budget is CALIBRATED from
+      live-site boots (cold ~52 s UK at a ~57 ms "Backend latency" disk read
+      latency vs ~87 s at ~103 ms with a +90 ms extra RTT [North-America
+      reader]: ~0.75 s of boot per extra ms, so the pill's 105 s baseline is
+      scaled by the engine's measured per-block read latency — the same
+      figure the Disk pane displays) —
+      replacing the old "Booting the VM… Ns" counter; it counts to 00:00 and
+      stays visible until the guest's file manager reports itself ready on
+      the boot console ('webvm desktop ready' — a one-shot marker written by
+      file-explorer.py once its first listing is on screen), so the pill
+      covers the pixel→desktop window too. Terminal-only VMs are excluded
+      from the
       pixel checks.
     - Vendored-runtime patch (applied by `scripts/fetch-cheerpx-runtime.sh`
       after every fetch): removes all `debugger;` statements (they froze the

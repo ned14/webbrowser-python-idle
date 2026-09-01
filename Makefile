@@ -40,9 +40,18 @@ certs:
 ## Build the guest ext2 image, the frontend (with the image fingerprint), then
 ## the container images. STORAGE_BACKEND resolves from .env (command line /
 ## environment override it) so the image mode always matches the deployment.
+## webvm deps are installed automatically when the pinned vite binary is absent
+## (a fresh checkout): `npm run build` would otherwise fall back to PATH and a
+## bare machine can win an unrelated system "vite" (a Qt GUI app that crashes/
+## hangs opening the `build` argument). Requires Node ^20.19.0 or >=22.12.0:
+## npm ci pulls vitest 4 -> rolldown, which enforces that engine range.
 build:
 	@echo "==> Building for backend '$(STORAGE_BACKEND)' (deployment mode: $(DEPLOY_BACKEND))"
 	./build.sh $(STORAGE_BACKEND)
+	@cd webvm; if [ ! -x node_modules/.bin/vite ]; then \
+		node -e "const [p,q]=process.versions.node.split('.').map(Number); if (!((p===20&&q>=19)||(p===22&&q>=12)||p>22)) { console.error('ERROR: webvm build requires Node ^20.19.0 or >=22.12.0 (npm ci pulls vitest 4 -> rolldown, which enforces it); found '+process.versions.node+'. Install Node 22.12+ or newer, then re-run make build.'); process.exit(1) }"; \
+		npm ci --no-audit --no-fund; \
+	fi
 	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/$(WEBVM_IMAGE_DIR)/image-build.txt 2>/dev/null || echo dev) WEBVM_COMMIT=$$(git rev-parse HEAD 2>/dev/null || true) WEBVM_COMMIT_DATE=$$(git show -s --format=%cs HEAD 2>/dev/null || true) npm run build
 	docker compose build
 	@echo ""

@@ -68,6 +68,33 @@
 	var trapReloadUsed = false; // in-memory guard for the one-shot auto reload
 	var watchdogTimer = null;
 	var bootElapsed = 0;
+	// "Estimated time remaining" boot pill: the guest's file manager writes
+	// 'webvm desktop ready' to /dev/console once its first listing is on
+	// screen, and the pill counts down from BOOT_ETA_SECONDS until that marker
+	// lands. The budget is SCALED by the engine's measured per-block read
+	// latency (the same "Backend latency" the Disk pane displays): the 105 s
+	// reference was calibrated at a 57 ms steady read latency (live cold boots,
+	// tests/e2e/measure-latency-boot.mjs: 52.5 s boot at 57 ms; 86.8 s at
+	// 103 ms, i.e. ~0.75 s of boot time per extra millisecond of read latency).
+	// A North-America reader's higher latency thus lifts the estimate instead
+	// of flooring early; latency below the reference (e.g. cache-warm reads)
+	// never shrinks it below the calibrated baseline.
+	var BOOT_ETA_SECONDS = 105;
+	var LATENCY_REF_MS = 57;          // measured steady read latency at calibration
+	var BOOT_ETA_LATENCY_SCALE = 0.75; // s of boot per extra ms of read latency
+	var BOOT_ETA_MIN_SECONDS = 60;
+	var BOOT_ETA_MAX_SECONDS = 300;
+	var DESKTOP_READY_MARKER = "webvm desktop ready";
+	var fileManagerSeen = false;
+	var bootRemaining = BOOT_ETA_SECONDS;
+	var etaTimer = null;
+
+	function dynamicBootEtaSeconds()
+	{
+		var lat = Math.max($diskLatency, LATENCY_REF_MS);
+		return Math.max(BOOT_ETA_MIN_SECONDS, Math.min(BOOT_ETA_MAX_SECONDS,
+			BOOT_ETA_SECONDS + (lat - LATENCY_REF_MS) * BOOT_ETA_LATENCY_SCALE));
+	}
 
 	// The runtime reports guest traps as `console.log('Unexpected exit',
 	// <RuntimeError>)` (after the vendored runtime patch:
@@ -326,6 +353,35 @@
 	}
 	var __bootTextDecoder = null;
 	var __pasteTextDecoder = null;
+	var __desktopTextDecoder = null;
+
+	// 1-second countdown ticker for the boot pill ("Estimated time
+	// remaining"). Self-terminates once the file manager reports ready, a
+	// fatal lands, or the boot no longer runs — the watchdog's 5 s tick keeps
+	// its own (slower) cadence for stuck detection.
+	function fmtClock(s)
+	{
+		s = Math.max(0, Math.floor(s));
+		return String(Math.floor(s / 60)).padStart(2, "0") + ":" +
+			String(s % 60).padStart(2, "0");
+	}
+	function startEtaTimer()
+	{
+		if(etaTimer != null)
+			return;
+		etaTimer = setInterval(() => {
+			if(fatal || fileManagerSeen || !bootStarted)
+			{
+				clearInterval(etaTimer);
+				etaTimer = null;
+				return;
+			}
+			var eta = Math.max(BOOT_ETA_MIN_SECONDS,
+				dynamicBootEtaSeconds());
+			bootRemaining = Math.max(0, eta -
+				Math.floor((Date.now() - bootStartTs) / 1000));
+		}, 1000);
+	}
 	function writeData(buf, vt)
 	{
 		if(vt != 1)
@@ -345,6 +401,16 @@
 			if(__bootTextDecoder == null)
 				__bootTextDecoder = new TextDecoder("utf-8", {fatal:false});
 			cxBootConsoleTail = (cxBootConsoleTail + __bootTextDecoder.decode(buf, {stream:true})).slice(-4096);
+		}
+		// Desktop-ready marker: run REGARDLESS of pixelSeen — the file manager
+		// reports itself on the boot console only after the first pixels — so
+		// the boot pill stays honest until the desktop is actually up.
+		if(bootStarted && !fileManagerSeen && !fatal)
+		{
+			if(__desktopTextDecoder == null)
+				__desktopTextDecoder = new TextDecoder("utf-8", {fatal:false});
+			if(__desktopTextDecoder.decode(buf, {stream:true}).indexOf(DESKTOP_READY_MARKER) !== -1)
+				fileManagerSeen = true;
 		}
 		// The paste typer's CXACK/CXFAIL answers ride the console stream;
 		// scan them off (stream:true so multi-byte UTF-8 split across
@@ -665,6 +731,8 @@
 		bootStartTs = Date.now();
 		guestOutputTs = bootStartTs;
 		bootStarted = true;
+		bootRemaining = BOOT_ETA_SECONDS;
+		startEtaTimer();
 		if(watchdogTimer == null)
 			watchdogTimer = setInterval(watchdogTick, WATCHDOG_INTERVAL_MS);
 		await initCheerpX();
@@ -980,13 +1048,16 @@
 		{/if}
 		<div class="absolute top-0 bottom-0 {sideBarPinned ? 'left-[23.5rem]' : 'left-14'} right-0 p-1 scrollbar" id="console">
 		</div>
-		{#if configObj.needsDisplay && bootStarted && !fatal && !pixelSeen}
-			<!-- Boot in progress: the display canvas covers the console, so an
+		{#if configObj.needsDisplay && bootStarted && !fatal && !fileManagerSeen}
+			<!-- Boot pill: the display canvas covers the console, so an
 			     unresponsive-looking black screen is honest only if the page
-			     says it is still booting. Also the first sign that a boot has
-			     quietly died (silently increasing counter). -->
+			     says it is still booting. Counts DOWN from an estimate until
+			     the guest's file manager reports itself ready (the
+			     'webvm desktop ready' console marker — file-explorer.py), so
+			     it stays visible through the pixel->desktop window; a stuck
+			     boot floors at 00:00 (the watchdog still handles it). -->
 			<div class="absolute top-3 right-3 z-40 rounded bg-black/70 text-green-300 font-mono text-xs px-3 py-1.5 pointer-events-none select-none">
-				Booting the VM… {bootElapsed}s
+				Estimated time remaining {fmtClock(bootRemaining)}
 			</div>
 		{/if}
 	</div>

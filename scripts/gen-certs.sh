@@ -24,6 +24,14 @@ fi
 # shellcheck disable=SC1090
 . "$WEBVM_COMMON"
 
+# .env overrides reach the script ONLY when loaded here: `make certs`/`make
+# up-tailnet` pass no CONTROL_HOST/LAN_IP on the command line, so without this
+# the cert SAN would silently cover the defaults (127.0.0.1) instead of the
+# deployment's CONTROL_HOST — a LAN/public host that TLS then rejects. Explicit
+# env vars (command line / CI) still win: webvm_load_dotenv never overrides
+# them, with the same precedence as every other consumer.
+webvm_load_dotenv
+
 CERT_DIR="${CERT_DIR:-./certs}"
 CERT_DAYS="${CERT_DAYS:-3650}"
 
@@ -42,16 +50,29 @@ fi
 # deployment — an IP-in-DNS entry is invalid and browsers ignore it (the
 # IP: entries cover it). localhost is the one genuine hostname.
 #
-# is_ip_literal: an IP literal must contain a '.' (IPv4) or ':' (IPv6).
-# A bare dotless/colonless token (e.g. a hostname like "dead" or "babe",
-# which is entirely hex digits) is a HOSTNAME and must get a DNS: entry —
-# the old hex/colon/dot character-class test misclassified such hostnames
-# as IPs and silently dropped their DNS SAN (TLS hostname mismatch).
+# is_ip_literal: a REAL IP literal must be an IPv6 (contains ':') or exactly
+# four dot-separated DECIMAL octets (IPv4). Anything else — including a dotted
+# DNS name such as webvm.nedprod.com, and the bare hex-ish tokens 'dead'/'babe'
+# the old character-class test misclassified — is a HOSTNAME and gets a DNS:
+# entry. (The previous '. or :' test treated every dotted token as an IP, which
+# silently dropped the DNS SAN of dotted control hosts.)
 is_ip_literal() {
 	case "$1" in
-		*.* | *:*) return 0 ;;
+		*:*) return 0 ;;
 	esac
-	return 1
+	_rest=$1
+	_i=0
+	while :; do
+		_oct=${_rest%%.*}
+		case "$_oct" in
+			''|*[!0-9]*) return 1 ;;
+		esac
+		_i=$((_i + 1))
+		[ "$_rest" = "$_oct" ] && break
+		[ "$_i" -ge 4 ] && return 1
+		_rest=${_rest#*.}
+	done
+	[ "$_i" -eq 4 ]
 }
 SAN="DNS:localhost,IP:127.0.0.1,IP:${LAN_IP},IP:${GATEWAY_CONTROL_IP}"
 if ! is_ip_literal "$CONTROL_HOST"; then

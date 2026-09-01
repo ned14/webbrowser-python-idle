@@ -270,6 +270,18 @@ def close_window():
     """Close the explorer. The keep-alive daemon relaunches it immediately."""
     root.destroy()
 
+def announce_desktop_ready():
+    """Best-effort one-shot marker on the boot console ('webvm desktop ready'):
+    the page's boot countdown hides exactly when the file manager reports itself
+    on screen. /dev/console may be absent (e.g. the rootfs smoke suite under
+    Xvfb), so any failure is silently ignored."""
+    try:
+        with open("/dev/console", "w") as _console:
+            _console.write("webvm desktop ready\n")
+    except Exception:
+        pass
+
+
 def set_status(msg, persistent=False):
     """Show a status message that clears itself after a few seconds (unless
     persistent — used while a launched app has disabled the explorer)."""
@@ -579,6 +591,10 @@ class SingleTab(ttk.Frame):
         self._load_gen = 0
         self._more_button = None
         self._active_menu = None
+        # One-shot desktop-ready marker (announce_desktop_ready): announced on
+        # the FIRST startup folder load only — later navigate-reloads must not
+        # re-announce (the page hides its boot countdown on the first one).
+        self._desktop_announced = False
         self._ui_disabled = False  # True while a launched app (IDLE/viewer) runs
         self._saved_cursors = {}  # per-widget cursors while disabled (wait pointer)
 
@@ -915,6 +931,15 @@ class SingleTab(ttk.Frame):
                 return
             self.entries_cache = entries
             self.update_ui()
+            # One-shot desktop-ready marker: the page's "Estimated time
+            # remaining" boot pill ends when the FIRST folder listing is on
+            # screen (this load is the autostarted home folder). Delayed
+            # slightly past the render (root.after from this worker thread is
+            # the same pattern update_ui already uses) so the marker lands
+            # after the window painted.
+            if not self._desktop_announced:
+                self._desktop_announced = True
+                root.after(400, announce_desktop_ready)
             # compute folder sizes asynchronously
             for e in entries:
                 if e["is_dir"]:
