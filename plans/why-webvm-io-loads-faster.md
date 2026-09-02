@@ -4,19 +4,40 @@ Question: `https://webvm.io/alpine.html` (upstream WebVM) reaches a usable
 desktop faster than `https://webvm.nedprod.com/alpine.html` (this repo's
 custom deployment). Both are Cloudflare-fronted. Findings below.
 
-## Would REMOVING Cloudflare make the VM boot faster? NO — measured.
+## CORRECTION (2026-09-02, later same day): direct-to-origin is NOT slower
 
-Direct-to-origin range reads (bypassing CF: `curl -k --resolve
-webvm.nedprod.com:443:82.47.22.78`, same 128 KiB range @ 60 MiB, 20
-samples, from this Mac): median **331 ms**, min 315 ms, max 394 ms —
-vs **68 ms** median through Cloudflare (min 65, max 473). Direct is
-~5× SLOWER: the origin is a UK home-broadband box, and direct
-international (or poorly-routed) TCP + TLS handshakes to the home upload
-link cost far more than CF's nearby edge + warm backbone connection to the
-origin. Cloudflare is reducing the origin-leg cost, not adding it. (For a
-UK-based user direct might compare more favourably, but the general claim
-"removing CF speeds up the VM" is NOT supported; the ~68 ms floor and the
-473 ms tail both point at the ORIGIN leg as the bottleneck either way.)
+An earlier version of this file claimed removing Cloudflare makes range
+reads ~5× slower (one-shot curl: 331 ms direct vs 68 ms via CF). That was a
+MEASUREMENT ARTIFACT: one-shot curl opens a fresh TCP+TLS connection per
+read (~4 RTTs from a US vantage to the UK origin ≈ 330 ms), but the VM's
+XHR byte device REUSES keep-alive connections. Re-measured the way the VM
+actually reads (one reused connection, sequential 128 KiB range reads, 15
+warm reads each, Node https keepAlive agent, direct via custom lookup to
+82.47.22.78 with Host/SNI preserved):
+
+    via Cloudflare:  median 71-77 ms   (15/15 reads reused the socket)
+    direct to origin: median 55-57 ms  (15/15 reads reused the socket)
+
+Direct is ~15-20 ms (~20 %) FASTER per read than via CF from this US
+vantage. The origin box was also mislabeled "home broadband" — that was an
+assumption, unverified (the repo itself calls it "a tight-disk VPS"; IP is
+in a BT-looking range; actual access type unknown). Caveats: this is one
+vantage + one moment; a UK user may see an even larger direct advantage
+(shorter public path), a far-away/lossy user a smaller one. The real
+conclusion stands on the mechanism, not the label: CF's per-read cost is
+dominated by the same origin leg the direct path takes, plus CF's own hop;
+once connection setup is amortized, direct is competitive-or-better.
+
+### Implication for the proposed split-brain setup
+Serving HTML/wasm/JS via CF while the ext2 range reads go DIRECT to the
+origin (a proxied-off subdomain with a CORS allow-header on nginx) is
+viable and would likely IMPROVE boot time for most visitors (per-read
+55-70 ms direct vs 71-77 ms via CF, and no CF 206-is-DYNAMIC constraint).
+Risks to weigh: per-visitor geography variance, and the origin's upload
+capacity if many cold boots happen at once (only ~86 MB per cold boot is
+actually read; repeat visitors hit the browser cache). R2/edge serving
+remains the best option for scaling; direct-to-origin is the cheapest
+experiment that can beat today's ~43 s boot.
 
 ## Measured (headless Chromium, same Mac, sequential runs)
 
@@ -27,8 +48,7 @@ UK-based user direct might compare more favourably, but the general claim
 | Disk read transport | per-range HTTPS GETs (`HttpBytesDevice`, `bytes=`), CF `cf-cache-status: DYNAMIC` (206s never edge-cached) | **WebSocket** `wss://disks.webvm.io/alpine_20251007.ext2` via `CloudDevice` |
 | Canvas sized | ~30-31 s | ~14 s |
 | First screen content (>0.2 % non-black) | ~42-43 s | ~22-24 s |
-| Per-range read latency (30 × 128 KiB @ 60 MiB offset) | median 68.5 ms, mean 95 ms, **max 473 ms** | n/a (WS-only; https range GET → 500) |
-| Serial range throughput | ~1.4 MB/s | n/a |
+| Per-range read latency, KEEP-ALIVE (see CORRECTION above) | via CF median ~71-77 ms; DIRECT to origin median ~55-57 ms | n/a (WS-only) |
 
 The upstream page boots to visible content in roughly **half** the time
 despite an image **8× larger**.
