@@ -70,18 +70,22 @@
 	var bootElapsed = 0;
 	// "Estimated time remaining" boot pill: the guest's file manager writes
 	// 'webvm desktop ready' to /dev/console once its first listing is on
-	// screen, and the pill counts down from BOOT_ETA_SECONDS until that marker
-	// lands. The budget is SCALED by the engine's measured per-block read
-	// latency (the same "Backend latency" the Disk pane displays): the 105 s
-	// reference was calibrated at a 57 ms steady read latency (live cold boots,
-	// tests/e2e/measure-latency-boot.mjs: 52.5 s boot at 57 ms; 86.8 s at
-	// 103 ms, i.e. ~0.75 s of boot time per extra millisecond of read latency).
-	// A North-America reader's higher latency thus lifts the estimate instead
-	// of flooring early; latency below the reference (e.g. cache-warm reads)
-	// never shrinks it below the calibrated baseline.
-	var BOOT_ETA_SECONDS = 105;
-	var LATENCY_REF_MS = 57;          // measured steady read latency at calibration
-	var BOOT_ETA_LATENCY_SCALE = 0.75; // s of boot per extra ms of read latency
+	// screen, and the pill counts down from an ETA until that marker lands.
+	// The ETA is SCALED by the engine's measured per-block read latency (the
+	// same "Backend latency" the Disk pane displays). Recalibrated
+	// 2026-09-02 for the Cloudflare-fronted deployment (webvm.nedprod.com):
+	// the CDN proxies every byte-range request to the origin (206s are not
+	// edge-cached), adding a fixed ~15-20 ms per block read, so the
+	// measured profile is now 57.8 s boot at a 73 ms steady read latency
+	// (UK) and 70.4 s at 96 ms (+90 ms throttle) — ~0.55 s of boot per extra
+	// ms — vs the pre-CDN origin-direct points the 105 s/57 ms/0.75 model
+	// was fitted to (52.5 s at 57 ms; 86.8 s at 103 ms). The anchor moves to
+	// the CDN reference and the slope is set slightly above the measured
+	// 0.55 for headroom; latency below the reference never shrinks the ETA
+	// below the floor (cache-warm or edge-cached reads).
+	var BOOT_ETA_SECONDS = 75;
+	var LATENCY_REF_MS = 73;          // measured steady read latency through Cloudflare
+	var BOOT_ETA_LATENCY_SCALE = 0.6; // s of boot per extra ms of read latency (CDN proxy leg)
 	var BOOT_ETA_MIN_SECONDS = 60;
 	var BOOT_ETA_MAX_SECONDS = 300;
 	var DESKTOP_READY_MARKER = "webvm desktop ready";

@@ -2098,11 +2098,15 @@ gateway relays).
       slow cold-cache boot is never falsely declared stuck; the last boot
       text is shown in the overlay and an "Estimated time remaining" pill
       makes a still-booting screen honest — the budget is CALIBRATED from
-      live-site boots (cold ~52 s UK at a ~57 ms "Backend latency" disk read
-      latency vs ~87 s at ~103 ms with a +90 ms extra RTT [North-America
-      reader]: ~0.75 s of boot per extra ms, so the pill's 105 s baseline is
-      scaled by the engine's measured per-block read latency — the same
-      figure the Disk pane displays) —
+      live-site boots; recalibrated 2026-09-02 for the Cloudflare-fronted
+      deployment (the CDN proxies every byte-range read to the origin — 206s
+      are not edge-cached — adding a fixed ~15-20 ms per read): cold 57.8 s
+      at a ~73 ms "Backend latency" disk read latency (UK) vs 70.4 s at
+      ~96 ms with a +90 ms extra RTT: ~0.55 s of boot per extra ms, so the
+      pill's 75 s baseline at the 73 ms reference is scaled 0.6 s/ms by the
+      engine's measured per-block read latency — the same figure the Disk
+      pane displays (pre-CDN origin-direct points: 52.5 s at 57 ms, 86.8 s
+      at 103 ms) —
       replacing the old "Booting the VM… Ns" counter; it counts to 00:00 and
       stays visible until the guest's file manager reports itself ready on
       the boot console ('webvm desktop ready' — a one-shot marker written by
