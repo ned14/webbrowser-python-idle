@@ -4,6 +4,20 @@ Question: `https://webvm.io/alpine.html` (upstream WebVM) reaches a usable
 desktop faster than `https://webvm.nedprod.com/alpine.html` (this repo's
 custom deployment). Both are Cloudflare-fronted. Findings below.
 
+## Would REMOVING Cloudflare make the VM boot faster? NO — measured.
+
+Direct-to-origin range reads (bypassing CF: `curl -k --resolve
+webvm.nedprod.com:443:82.47.22.78`, same 128 KiB range @ 60 MiB, 20
+samples, from this Mac): median **331 ms**, min 315 ms, max 394 ms —
+vs **68 ms** median through Cloudflare (min 65, max 473). Direct is
+~5× SLOWER: the origin is a UK home-broadband box, and direct
+international (or poorly-routed) TCP + TLS handshakes to the home upload
+link cost far more than CF's nearby edge + warm backbone connection to the
+origin. Cloudflare is reducing the origin-leg cost, not adding it. (For a
+UK-based user direct might compare more favourably, but the general claim
+"removing CF speeds up the VM" is NOT supported; the ~68 ms floor and the
+473 ms tail both point at the ORIGIN leg as the bottleneck either way.)
+
 ## Measured (headless Chromium, same Mac, sequential runs)
 
 | Metric | webvm.nedprod.com | webvm.io (upstream) |
@@ -76,7 +90,11 @@ D. Accept it (document that 2× slower boot is the price of the current
    architecture).
 
 Recommended: **A (R2)** — largest win, smallest change. B is the fallback
-if R2 isn't acceptable.
+if R2 isn't acceptable. Removing Cloudflare entirely is NOT recommended:
+measured ~5× slower per read direct-to-origin (see above), plus loss of
+CF's TLS/DDoS/static-caching benefits. Note R2 still fronted by CF means
+the user-facing leg is unchanged and the ORIGIN leg disappears entirely —
+the actual fix for the ~68 ms floor + 473 ms tail.
 
 ## Harnesses added
 - tests/e2e/boot-timing-compare.mjs — sequential canvas-size / first-content
