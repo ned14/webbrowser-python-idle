@@ -39,6 +39,45 @@ actually read; repeat visitors hit the browser cache). R2/edge serving
 remains the best option for scaling; direct-to-origin is the cheapest
 experiment that can beat today's ~43 s boot.
 
+## SPLIT-BRAIN SHIPPED + MEASURED (2026-09-02, later)
+
+Implemented and deployed the configurable facility + the split setup:
+
+- **Facility**: `WEBVM_DISK_BASE_URL` (single home: scripts/lib/
+  webvm-common.sh; default empty = same-origin, byte-unchanged). Flows to
+  (a) the frontend bake (`config_public_alpine.js` + vite define), (b) the
+  CSP connect-src (`render-webvm-config.py --disk-origin`, entrypoint), (c)
+  the nginx CORS/preflight answer on the image location (allow-origin *,
+  expose Content-Range/ETag, OPTIONS 204 with allow-headers Range), and (d)
+  the server-cert SAN (`gen-certs.sh` adds the disk hostname). Unit tests
+  pin each piece (280 python + 80 vitest green).
+- **Deployment**: `disk.webvm.nedprod.com` A → 82.47.22.78 (proxied OFF —
+  direct to origin, no CF in the read path); box .env now has
+  WEBVM_DISK_BASE_URL=https://disk.webvm.nedprod.com; cert regenerated with
+  DNS:disk.webvm.nedprod.com and verified served over SNI.
+- **Verified live**: the baked page URL is absolute to the disk host; CSP
+  carries https://disk.webvm.nedprod.com; OPTIONS preflight → 204 with
+  allow-headers Range + expose Content-Range/ETag; range GET → 206 + ACAO.
+  During a full live boot ALL 676 ext2 reads went to disk.webvm.nedprod.com
+  (0 non-206/failures).
+- **Boot timing (Playwright, same Mac, ~same hour as the "before")**:
+  - nedprod BEFORE (reads via CF): sized ~30-31 s, content ~42-43 s.
+  - nedprod AFTER (reads direct): sized ~26 s, content **~36-38 s** (~14 %
+    faster, matches the ~20 % per-read latency drop × 660 reads ≈ 6 s).
+  - webvm.io same window: ~22-24 s (first run 40 s — their edge warm
+    variance). Upstream still faster: WS disk server + leaner pipeline +
+    a 1.5 GB image served by purpose-built infra; closing the rest of the
+    gap would need their-style WS disk serving or R2.
+- **CAVEAT (public readers)**: disk.webvm.nedprod.com terminates TLS at the
+  origin with the PRIVATE-CA cert — only browsers that trust that CA (the
+  owner's, plus E2E with ignoreHTTPSErrors) accept it. Public visitors
+  would hit a cert error unless (a) the private CA is distributed, (b) the
+  disk host gets a public cert (Let's Encrypt on the origin), or (c) the
+  disk host is CF-proxied (public cert, but reads then go CF→origin again —
+  still faster than today IF CF edge-caches the image; CF does not cache
+  206s, so proxying alone does not regain the direct-read win).
+
+
 ## Measured (headless Chromium, same Mac, sequential runs)
 
 | Metric | webvm.nedprod.com | webvm.io (upstream) |
