@@ -212,6 +212,21 @@ Deployed the fix live and measured it through Cloudflare:
   name). Deployment state: `/root/webbrowser-python-idle` (its `.env` is
   never committed).
 
+## LIVE-SITE ETA RECALIBRATION (2026-09-02, Cloudflare front)
+
+The "Estimated time remaining" pill was calibrated to the pre-CDN
+origin-direct profile (105 s baseline at 57 ms read latency). Through
+Cloudflare every byte-range read is proxied to the origin (206s are not
+edge-cached), so the profile shifted. Measured with
+tests/e2e/measure-latency-boot.mjs through the CF front: 57.8 s boot at
+73 ms steady latency (UK), 70.4 s at 96 ms (+90 ms throttle) — ~0.55 s/ms.
+Recalibrated (WebVM.svelte): BOOT_ETA_SECONDS 105→75, LATENCY_REF_MS
+57→73, BOOT_ETA_LATENCY_SCALE 0.75→0.6. Pill trace before/after (same
+55.6 s live boot): pill still showed ~60 s remaining when the desktop
+landed; after, it starts ~01:17 and shows ~00:26 at landing (~1.4x
+headroom by design — never under-run). tests/e2e/pill-trace.mjs samples
+the trajectory.
+
 ## Machine state / housekeeping (as of 2026-09-02)
 
 - Local stack: browser backend running on 127.0.0.1:8081 (guest fingerprint
