@@ -79,6 +79,32 @@ if ! is_ip_literal "$CONTROL_HOST"; then
 	SAN="DNS:${CONTROL_HOST},${SAN}"
 fi
 
+# Optional disk-image host (configurable facility 2026-09-02): when the
+# deployment reads its ext2 cross-origin from WEBVM_DISK_BASE_URL (e.g.
+# https://disk.webvm.nedprod.com -> the same origin box, proxied-off DNS),
+# the server certificate must also cover that hostname or the direct TLS
+# handshake fails (the browser checks the SAN of the disk origin). Only the
+# hostname part is added — never a URL path/port (SAN entries are
+# hostnames; the private-CA trust caveat below applies to whoever reads the
+# ext2 directly).
+_DISK_HOST=""
+if [ -n "${WEBVM_DISK_BASE_URL:-}" ]; then
+	case "$WEBVM_DISK_BASE_URL" in
+		*://*)
+			_DISK_HOST=${WEBVM_DISK_BASE_URL#*://}
+			_DISK_HOST=${_DISK_HOST%%[/:]*}
+			;;
+		*)
+			_DISK_HOST=${WEBVM_DISK_BASE_URL%%[/:]*}
+			;;
+	esac
+	if [ -n "$_DISK_HOST" ] && ! is_ip_literal "$_DISK_HOST"; then
+		SAN="DNS:${_DISK_HOST},${SAN}"
+	else
+		_DISK_HOST=""
+	fi
+fi
+
 # Skip the server-cert regeneration when the CURRENT cert already covers the
 # env (same CONTROL_HOST/LAN_IP/GATEWAY_CONTROL_IP SAN). `make up` runs this
 # on every launch; regenerating a byte-different cert while a container is
@@ -90,6 +116,9 @@ fi
 _needed_san="DNS:localhost,IP:127.0.0.1,IP:${LAN_IP},IP:${GATEWAY_CONTROL_IP}"
 if ! is_ip_literal "$CONTROL_HOST"; then
 	_needed_san="DNS:${CONTROL_HOST},${_needed_san}"
+fi
+if [ -n "$_DISK_HOST" ]; then
+	_needed_san="DNS:${_DISK_HOST},${_needed_san}"
 fi
 _existing_san=$(openssl x509 -in "$CERT_DIR/server.crt" -noout -ext subjectAltName 2>/dev/null \
 	| sed -n '2,$p' | sed 's/IP Address:/IP:/g' | tr -d ' \t\n')

@@ -42,6 +42,14 @@ HEADSCALE_BOOTSTRAP="${HEADSCALE_BOOTSTRAP:-0}"
 # baked config, whatever .env carries). `make up-tailnet` passes on (the
 # default) — the ONLY tailnet-capable launch.
 WEBVM_TAILNET="${WEBVM_TAILNET:-on}"
+# Optional cross-origin base for the ext2 disk-image URL (configurable
+# facility 2026-09-02): empty = same-origin image reads. Set it (e.g.
+# https://disk.webvm.nedprod.com) to make the page read the ext2 from a
+# dedicated disk host — the frontend build, the CSP connect-src, the nginx
+# CORS answer and the server-cert SAN all consume this ONE value (see
+# config_public_alpine.js / render-webvm-config.py / nginx.conf.template /
+# gen-certs.sh; tests enforce the compose default matches this lib).
+WEBVM_DISK_BASE_URL="${WEBVM_DISK_BASE_URL:-}"
 # The server container's static compose-network IP — the ONLY address the
 # gateway/join-test client use for the control plane (cert SAN covers it;
 # the cert generator and compose/gateway/tests must agree on this value).

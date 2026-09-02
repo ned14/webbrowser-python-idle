@@ -170,6 +170,31 @@ class TestNginx:
         assert "wss://192.168.1.10 " not in csp
         assert "127.0.0.1" not in csp
 
+    def test_csp_disk_origin_appended_when_set(self, render_webvm_config):
+        # Configurable facility (2026-09-02): when WEBVM_DISK_BASE_URL is
+        # set, the ext2 range reads go cross-origin — connect-src must add
+        # the disk origin's scheme://host or the browser blocks every read.
+        csp = render_webvm_config.render_csp(
+            "127.0.0.1", "8443", "https://disk.webvm.nedprod.com")
+        assert ("connect-src 'self' https://127.0.0.1:8443 "
+                "wss://127.0.0.1:8443 https://disk.webvm.nedprod.com") in csp
+        # A path/port in the base URL must not leak into the allowlist.
+        csp2 = render_webvm_config.render_csp(
+            "127.0.0.1", "8443", "https://disk.example.com:8443/base/")
+        assert "https://disk.example.com:8443" in csp2
+        assert "/base/" not in csp2
+
+    def test_nginx_image_location_serves_cors_for_disk_reads(self, nginx):
+        # The ext2 location must answer cross-origin range reads (CORS +
+        # expose Content-Range/ETag) and the OPTIONS preflight (the Range
+        # request header is not CORS-safelisted) when the deployment points
+        # diskImageUrl at a disk host. Harmless on same-origin reads.
+        assert 'add_header Access-Control-Allow-Origin "*" always;' in nginx
+        assert 'add_header Access-Control-Expose-Headers "Content-Range, ETag" always;' in nginx
+        assert 'add_header Access-Control-Allow-Headers "Range" always;' in nginx
+        assert 'if ($request_method = OPTIONS)' in nginx
+        assert 'return 204;' in nginx
+
     def test_render_csp_cli_requires_only_host_port(self):
         # The ENTRYPOINT invokes --render-csp with ONLY --control-host and
         # --control-port — no deployment secrets exist yet at that point.

@@ -45,6 +45,11 @@ x-server-env: &server-env
   # entrypoint bakes it into /webvm-config.js so the page shows the countdown.
   RESET_INTERVAL_HOURS: ${RESET_INTERVAL_HOURS:-}
   RESET_DEADLINE_FILE: ${RESET_DEADLINE_FILE:-/etc/webvm/reset/deadline}
+  # Optional cross-origin base for the ext2 disk-image URL (configurable
+  # facility 2026-09-02): when set (e.g. https://disk.webvm.nedprod.com), the
+  # frontend (built with the same value) reads the ext2 from that origin and
+  # the CSP connect-src must allow it — rendered here in the entrypoint.
+  WEBVM_DISK_BASE_URL: ${WEBVM_DISK_BASE_URL:-}
 
 services:
   # nginx (site + control plane + DERP) + headscale (+ wsgidav in webdav mode)

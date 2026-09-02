@@ -18,6 +18,12 @@ _ENV_BACKEND := $(word 1,$(subst |, ,$(_ENV_RESOLVED)))
 _ENV_DATA_DIR := $(word 2,$(subst |, ,$(_ENV_RESOLVED)))
 _ENV_IMAGE_DIR := $(word 3,$(subst |, ,$(_ENV_RESOLVED)))
 _ENV_IMAGE_NAME := $(word 4,$(subst |, ,$(_ENV_RESOLVED)))
+# Optional cross-origin base for the ext2 disk-image URL (empty = same-origin
+# image reads). Read from .env through the same shared loader; passed to the
+# frontend build below (WEBVM_DISK_BASE_URL) and to the server container
+# (compose reads .env directly).
+_ENV_DISK_BASE_URL := $(shell WEBVM_COMMON=scripts/lib/webvm-common.sh sh -c '. "$$WEBVM_COMMON"; webvm_load_dotenv; printf "%s" "$$WEBVM_DISK_BASE_URL"')
+WEBVM_DISK_BASE_URL ?= $(_ENV_DISK_BASE_URL)
 STORAGE_BACKEND ?= $(_ENV_BACKEND)
 WEBVM_IMAGE_DIR ?= $(_ENV_IMAGE_DIR)
 WEBVM_IMAGE_NAME ?= $(_ENV_IMAGE_NAME)
@@ -52,7 +58,7 @@ build:
 		node -e "const [p,q]=process.versions.node.split('.').map(Number); if (!((p===20&&q>=19)||(p===22&&q>=12)||p>22)) { console.error('ERROR: webvm build requires Node ^20.19.0 or >=22.12.0 (npm ci pulls vitest 4 -> rolldown, which enforces it); found '+process.versions.node+'. Install Node 22.12+ or newer, then re-run make build.'); process.exit(1) }"; \
 		npm ci --no-audit --no-fund; \
 	fi
-	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/$(WEBVM_IMAGE_DIR)/image-build.txt 2>/dev/null || echo dev) WEBVM_COMMIT=$$(git rev-parse HEAD 2>/dev/null || true) WEBVM_COMMIT_DATE=$$(git show -s --format=%cs HEAD 2>/dev/null || true) npm run build
+	cd webvm && WEBVM_MODE=$(STORAGE_BACKEND) WEBVM_IMAGE_BUILD=$$(cat ../webvm/$(WEBVM_IMAGE_DIR)/image-build.txt 2>/dev/null || echo dev) WEBVM_DISK_BASE_URL=$(WEBVM_DISK_BASE_URL) WEBVM_COMMIT=$$(git rev-parse HEAD 2>/dev/null || true) WEBVM_COMMIT_DATE=$$(git show -s --format=%cs HEAD 2>/dev/null || true) npm run build
 	docker compose build
 	@echo ""
 	@echo "==> Built image sizes:"

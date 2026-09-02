@@ -72,6 +72,7 @@ mkdir -p /etc/nginx /etc/headscale /etc/webvm /var/lib/headscale /var/run/headsc
 # the `>` redirect left the file empty).
 python3 /etc/webvm/render-webvm-config.py --render-csp \
 	--control-host "$CONTROL_HOST" --control-port "$CONTROL_PORT" \
+	${WEBVM_DISK_BASE_URL:+--disk-origin "$WEBVM_DISK_BASE_URL"} \
 	> /etc/nginx/csp.conf || {
 		echo "FATAL: CSP header render failed — refusing to serve without a CSP" >&2
 		exit 1

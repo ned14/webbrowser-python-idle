@@ -42,7 +42,7 @@ def build_config(control_host, control_port, auth_key, backend, gateway_ip,
     return config
 
 
-def render_csp(control_host, control_port):
+def render_csp(control_host, control_port, disk_origin=""):
     """The nginx Content-Security-Policy header text (single home — the
     entrypoint renders /etc/nginx/csp.conf from this; a second envsubst
     template could drift from the page's connect-src needs). connect-src is
@@ -54,7 +54,21 @@ def render_csp(control_host, control_port):
     https://<host>/derp/probe), so all of them dial CONTROL_PORT — the
     scheme-default 443 is never used (never portless, which would open the
     WHOLE host to connect-src).
+
+    disk_origin (optional): when the deployment builds with
+    WEBVM_DISK_BASE_URL set (configurable facility 2026-09-02), the ext2
+    byte-range reads go CROSS-origin to that disk host — connect-src must
+    allow it or the browser blocks every range GET. The arg is the full
+    base URL; only its scheme://host is added (the runtime never dials
+    anything else on the disk host).
     """
+    disk_src = ""
+    if disk_origin:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(disk_origin)
+        if parts.scheme and parts.netloc:
+            disk_src = " " + parts.scheme + "://" + parts.netloc
     return (
         'add_header Content-Security-Policy "default-src \'self\'; '
         + "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
@@ -62,7 +76,7 @@ def render_csp(control_host, control_port):
         + "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         + "font-src 'self' data:; "
         + f"connect-src 'self' https://{control_host}:{control_port} "
-        + f"wss://{control_host}:{control_port}\" always;\n"
+        + f"wss://{control_host}:{control_port}{disk_src}\" always;\n"
     )
 
 
@@ -124,10 +138,16 @@ def main(argv=None):
                         help="epoch-seconds of the NEXT periodic storage reset "
                              "(sidebar countdown; the entrypoint passes the "
                              "deadline file written by scripts/reset-cycle.sh)")
+    parser.add_argument("--disk-origin", default=None,
+                        help="WEBVM_DISK_BASE_URL of the deployment (optional): "
+                             "when the ext2 is read cross-origin from a disk "
+                             "host, its origin is added to the CSP connect-src "
+                             "(configurable facility 2026-09-02)")
     args = parser.parse_args(argv)
 
     if args.render_csp:
-        sys.stdout.write(render_csp(args.control_host, args.control_port))
+        sys.stdout.write(render_csp(args.control_host, args.control_port,
+                                    args.disk_origin or ""))
         return 0
 
     missing = [f"--{name}" for name in (
