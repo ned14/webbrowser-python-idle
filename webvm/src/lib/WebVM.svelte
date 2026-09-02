@@ -164,21 +164,24 @@
 
 	// The single funnel for a detected engine trap. `reloadAllowed` marks the
 	// call as a DEFINITIVE boot-death signal (a rejecting cx.run() — the run
-	// loop is gone — or the watchdog's sustained-silence verdict). Only those
-	// may trigger the one-shot auto reload, because the engine's own console
-	// trap reports are ambiguous: when it swallows a trap it kills just that
-	// guest process and carries on, so a report during boot might not be boot-
-	// fatal. Ambiguous reports (the console capture, window errors/unhandled
-	// rejections) surface the overlay immediately instead — never a surprise
-	// reload of a boot that could still reach the desktop. The reload itself
-	// is plain (block cache untouched: a blockCache.reset() would wipe the
-	// user's persisted overlay); a second consecutive definitive failure
-	// shows the overlay.
+	// loop is gone — the watchdog's sustained-silence verdict, or an engine
+	// "Unexpected exit" report before the desktop marker). Those may trigger
+	// the one-shot auto reload. Local reproduction (2026-09-01) has shown
+	// EVERY observed "Unexpected exit" during boot to be fatal for this
+	// image (the boot deadlocked/stalled in every trapped run — the trap at
+	// ~4 s and silent stalls at ~14 s both ended with a canvas that never
+	// rendered), so a pre-desktop trap report is treated as definitive
+	// death rather than ambiguous. The reload itself is plain (block cache
+	// untouched: a blockCache.reset() would wipe the user's persisted
+	// overlay); a second consecutive definitive failure shows the overlay.
 	function maybeReportRuntimeTrap(reloadAllowed)
 	{
 		if (fatal)
 			return;
-		var allowAutoReload = reloadAllowed && bootStarted && !pixelSeen && !bootedOnce;
+		var allowAutoReload = reloadAllowed && bootStarted && !fileManagerSeen;
+		// Never auto-reload once the desktop marker was seen: a trap in an
+		// established session shows the overlay (a live session cannot be
+		// resumed by restarting the boot anyway).
 		if (allowAutoReload && !trapReloadUsed)
 		{
 			trapReloadUsed = true;
@@ -202,16 +205,17 @@
 	}
 
 	// The engine's own console trap reports (and window errors / unhandled
-	// rejections they surface) are AMBIGUOUS: when the core swallows a WASM
-	// trap it logs "Unexpected exit" and carries on — it may have killed
-	// only a disposable guest process, in which case the boot still reaches
-	// the desktop. So these funnel to the overlay immediately (with the
-	// exact reason) but NEVER trigger the one-shot auto reload; only
-	// definitive boot-death signals (a rejecting cx.run(), the watchdog)
-	// may reload. See maybeReportRuntimeTrap.
+	// rejections they surface) are treated as DEFINITIVE boot death while
+	// the desktop has not appeared yet (local reproduction: every trapped
+	// boot stalled — see maybeReportRuntimeTrap). `fileManagerSeen` — NOT
+	// `bootedOnce` (which stays false for the whole first session, since
+	// cx.run() only resolves when the guest exits) — marks "desktop is up",
+	// so the one-shot auto-reload is allowed only for pre-desktop traps; a
+	// trap after the desktop is up shows the overlay
+	// (reportEngineTrap -> maybeReportRuntimeTrap(false)).
 	function reportEngineTrap()
 	{
-		maybeReportRuntimeTrap(false);
+		maybeReportRuntimeTrap(bootStarted && !fileManagerSeen);
 	}
 
 	// Uncaught engine errors (e.g. the runtime re-raising a WASM trap as a
@@ -276,6 +280,12 @@
 	// a slower tick costs nothing on the stuck verdict (the thresholds are
 	// 200/270 s) while cutting the GPU readback churn in half.
 	var WATCHDOG_INTERVAL_MS = 5000;
+
+	// Fast stuck recovery for pre-desktop deaths does NOT go through this
+	// watchdog: an engine "Unexpected exit" trap report during boot reloads
+	// immediately via reportEngineTrap -> maybeReportRuntimeTrap (2026-09-01
+	// reproduction: every pre-desktop trap was fatal). The watchdog here is
+	// only the backstop for silent halts that never report a trap.
 
 	// Repeat-boot warm (post-boot, idle): after the desktop is up, stream the
 	// ENTIRE image into the browser HTTP cache (immutable-cached, so no

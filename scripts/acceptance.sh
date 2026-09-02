@@ -70,8 +70,9 @@ echo ""
 echo "[5] Storage sync (per backend) — manual:"
 case "$STORAGE_BACKEND" in
 	browser)
-		echo "  * Write a file in ~/ in the guest; reload the tab; file survives."
-		echo "  * Two tabs: the second shows the single-session notice + ephemeral boot."
+		echo "  * Write a file in ~/ in the guest; reload the tab; file is GONE (per-session overlay,"
+		echo "    2026-09-02 — ephemeral-overlay model, see plans/diagnose-flaky-boots.md)."
+		echo "  * Two tabs: both boot independently (each has its own ephemeral overlay); no notice."
 		;;
 	none)
 		echo "  * Write a file in ~/ in the guest; reload the tab; file is GONE."

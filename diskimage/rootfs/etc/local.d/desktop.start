@@ -15,6 +15,16 @@ BACKEND=$(cat /etc/webvm-backend 2>/dev/null || echo browser)
 # cached overlay for every later font use, desktop and guest scripts alike).
 (cat /usr/share/fonts/dejavu/*.ttf /usr/share/fonts/misc/*.pcf.gz >/dev/null 2>&1) &
 
+# Warm the Tk/Python read set (libpython3.14.so, the tcl/tk libs, the tcl
+# encodings) the same way, BEFORE the X session launches the file explorer:
+# the explorer's `import tkinter` does a burst of cold block reads at the
+# exact moment an emulator-load deadlock has been observed (2026-09-01: the
+# stall's last reads were the Tk/python blocks; plans/diagnose-flaky-boots.md).
+# A background python startup costs ~2-4 s of emulated CPU while Xorg starts
+# in parallel; the blocks then come from the guest FS cache for the explorer,
+# IDLE and every later Tk app.
+(python3 -c "import tkinter" >/dev/null 2>&1) &
+
 # Bring eth0 up once the emulated NIC appears. The CheerpX NIC is only created
 # after the browser-side Tailscale client connects, so configuration is
 # retried here (open spike: baked /etc/network/interfaces + this retry loop).

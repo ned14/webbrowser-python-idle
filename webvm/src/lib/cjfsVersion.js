@@ -58,6 +58,42 @@ function isOwnCjfsDb(name) {
 	return name === 'cjFS_/files/' || name.startsWith('cjFS_/blocks_alpine_');
 }
 
+// The per-load overlay sweep (2026-09-02, ephemeral-overlay model): deletes
+// ONLY the app's own overlay family ('cjFS_/blocks_alpine_*' — the cacheId
+// derivation in $lib/cacheId.js keeps every per-session id inside the
+// 'blocks_alpine_' prefix). Unlike deleteCjfsDatabases() this deliberately
+// does NOT touch 'cjFS_/files/': that name is the CheerpX runtime's generic
+// folder-FS database for ANY app mounting a CheerpJIndexedDBFolder at
+// /files/ on the same origin, and IndexedDB is origin-scoped, not
+// path-scoped — on a shared origin (e.g. every GitHub Pages project of one
+// account) a blanket per-load deletion would destroy a co-tenant CheerpX
+// app's persistent data. This app never creates 'cjFS_/files/' (its folder
+// mounts are per-cacheId), so the per-load sweep never needs to.
+export async function deleteOverlayDatabases() {
+	const names = [];
+	try {
+		if (typeof indexedDB !== 'undefined' && indexedDB.databases) {
+			const dbs = await indexedDB.databases();
+			names.push(...dbs.map((d) => d.name).filter((n) => n && n.startsWith('cjFS_/blocks_alpine_')));
+		}
+	} catch (e) {
+		// enumeration unavailable — nothing to sweep by name
+	}
+	let allSucceeded = true;
+	for (const name of names) {
+		const ok = await new Promise((resolve) => {
+			const req = indexedDB.deleteDatabase(name);
+			req.onsuccess = () => resolve(true);
+			req.onerror = () => resolve(false);
+			// Another live tab's session holds the DB open; the delete is
+			// blocked and simply skipped (that tab's next load sweeps it).
+			req.onblocked = () => resolve(false);
+		});
+		if (!ok) allSucceeded = false;
+	}
+	return allSucceeded;
+}
+
 // Delete this app's cjFS_* databases. Best-effort; never throws. Returns
 // true ONLY when every requested deletion actually completed — a blocked
 // delete (another tab's live VM holds the database open) or an errored

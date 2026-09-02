@@ -3,6 +3,7 @@ import {
 	shouldResetCjfs,
 	resetCjfsIfImageChanged,
 	deleteCjfsDatabases,
+	deleteOverlayDatabases,
 	cjfsMarkerKey,
 } from './cjfsVersion.js';
 
@@ -79,6 +80,33 @@ describe('cjfsVersion', () => {
 			'cjFS_/blocks_alpine_ddc8cd798bb0/',
 			'cjFS_/files/',
 		]);
+	});
+
+	it('deleteOverlayDatabases deletes ONLY the app\'s overlay family — never the generic cjFS_/files/ store', async () => {
+		// The per-load sweep (ephemeral-overlay model) must not touch
+		// 'cjFS_/files/': on a shared origin that generic runtime name may
+		// belong to a co-tenant CheerpX app (2026-09-02 review finding).
+		const idb = fakeIndexedDB([
+			'cjFS_/files/', // co-tenant CheerpX app — must SURVIVE
+			'cjFS_/blocks_alpine_abc123/',
+			'cjFS_/blocks_alpine_xyz789/',
+			'cjFS_/other-project-fs/', // foreign — must survive
+			'blocks_alpine_other-project/', // foreign — must survive
+		]);
+		vi.stubGlobal('indexedDB', idb);
+		const ok = await deleteOverlayDatabases();
+		expect(ok).toBe(true);
+		expect(idb.deleted.sort()).toEqual([
+			'cjFS_/blocks_alpine_abc123/',
+			'cjFS_/blocks_alpine_xyz789/',
+		]);
+	});
+
+	it('deleteOverlayDatabases tolerates a blocked store (another live tab)', async () => {
+		const idb = fakeIndexedDB(['cjFS_/blocks_alpine_live/'], { 'cjFS_/blocks_alpine_live/': 'blocked' });
+		vi.stubGlobal('indexedDB', idb);
+		const ok = await deleteOverlayDatabases();
+		expect(ok).toBe(false);
 	});
 
 	it('falls back to the known "/files/" mount when databases() is unavailable', async () => {

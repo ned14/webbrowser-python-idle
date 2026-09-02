@@ -1,28 +1,30 @@
 <script>
 	import { onMount } from 'svelte';
 	import WebVM from '$lib/WebVM.svelte';
-	import { acquireSessionLock } from '$lib/sessionGuard.js';
-	import { resetCjfsIfImageChanged } from '$lib/cjfsVersion.js';
-	import { sharedCacheId, ephemeralCacheId } from '$lib/cacheId.js';
+	import { deleteOverlayDatabases } from '$lib/cjfsVersion.js';
+	import { ephemeralCacheId } from '$lib/cacheId.js';
 	import * as configObj from '/config_public_alpine';
 
 	// Boot overlap: start the CheerpX runtime download NOW (module-cached, so
 	// WebVM.svelte's later import awaits the SAME promise) instead of letting
-	// the session-lock acquisition (up to ~1 s worst case: ping + settle)
-	// serialize the runtime fetch behind it. The block devices still need
-	// the lock's verdict (shared vs ephemeral cacheId) and are not started
-	// early — only the runtime itself, which is cacheId-independent.
+	// the pre-boot overlay sweep serialize the runtime fetch behind it. The
+	// block devices still wait for the sweep (see below) — only the runtime
+	// itself is started early, which is cacheId-independent.
 	import('@leaningtech/cheerpx').catch(() => {});
 
-	// cacheId per mode (single derivation in $lib/cacheId.js):
-	//   browser/samba/webdav -> blocks_alpine_<image-build> (shared overlay,
-	//   versioned to the guest image so a rebuilt image starts a fresh overlay)
-	//   none                 -> random per-session id (fresh overlay every load)
-
+	// Overlay cacheId — EPHEMERAL PER LOAD for every backend (2026-09-02,
+	// see plans/diagnose-flaky-boots.md). Reusing an IndexedDB overlay store
+	// across loads makes ~50-60 % of boots die inside the CheerpX core
+	// ("Unexpected exit ... memory access out of bounds" / "table index is
+	// out of bounds" / silent stalls, verified content-independent: even a
+	// byte-perfect store from a clean session crashes the next boot, on
+	// runtimes 1.3.8 AND 1.3.9 — a core cjFS defect in the overlay read-hit
+	// path). A FRESH store per load measures ~0 % failures. Consequence:
+	// browser mode keeps files only for the current session (like the 'none'
+	// backend); samba/webdav modes restore user files from the network
+	// backend at boot, so they are unaffected.
 	let cacheId;
 	let ready = false;
-	let ephemeral = false;
-	let lockError = null;
 
 	// GitHub Pages cannot set COOP/COEP server-side, but the WebVM needs
 	// cross-origin isolation (SharedArrayBuffer). sw.js re-serves the document
@@ -41,63 +43,31 @@
 		}
 	});
 
-	if (configObj.storageBackend === "none") {
-		cacheId = ephemeralCacheId();
+	cacheId = ephemeralCacheId();
+	onMount(async () => {
+		try {
+			// Sweep leftover per-session overlay stores from previous loads
+			// BEFORE the VM opens its fresh one (best-effort and never
+			// blocking: a store still in use by another live tab stays —
+			// its deleteDatabase request is blocked — and is swept by that
+			// tab's next load, so growth is bounded to ~1 store per live
+			// session). Scope: ONLY this app's own 'cjFS_/blocks_alpine_*'
+			// family — never the runtime's generic 'cjFS_/files/' store,
+			// which co-tenant CheerpX apps on a shared origin may own (see
+			// deleteOverlayDatabases in $lib/cjfsVersion.js).
+			await deleteOverlayDatabases();
+		} catch (e) {
+			// Storage blocked/corrupt: never stall the boot on the sweep —
+			// a visitor with blocked storage gets a fresh (ephemeral)
+			// session anyway.
+			console.error("overlay sweep failed:", e);
+		}
 		ready = true;
-	} else {
-		cacheId = sharedCacheId(configObj.imageBuild);
-		onMount(async () => {
-			try {
-				const acquired = await acquireSessionLock();
-				// Migrate the guest-persistent CheerpX folder FS (cjFS_*) to
-				// this image build BEFORE the VM mounts — stale records
-				// written by older runtimes/images crash the boot on open()
-				// ("Uncaught RuntimeError: table index is out of bounds" /
-				// "null function or function signature mismatch" in
-				// cheerpOSOpenMain -> idbMakeFileData, 2026-09-01 on the live
-				// Pages site; fresh profiles booted cleanly). Runs on BOTH
-				// lock paths: cjFS_/files/ is mount-fixed and is opened by
-				// ephemeral sessions too, and an ephemeral tab on poisoned
-				// records crashes just the same. The wipe is safe on the
-				// not-acquired path by construction: another tab's live VM
-				// holds the databases open, deleteDatabase is BLOCKED, and
-				// the marker is recorded only when every deletion actually
-				// succeeded (see $lib/cjfsVersion.js) — so it simply
-				// retries on a later boot.
-				await resetCjfsIfImageChanged(configObj.imageBuild);
-				if (!acquired) {
-					// Another live tab holds the shared overlay: boot an
-					// ephemeral session that never writes to the shared overlay.
-					ephemeral = true;
-					cacheId = ephemeralCacheId();
-				}
-			} catch (e) {
-				// The lock store failed (e.g. storage blocked/corrupt). Never
-				// stall on "Acquiring session lock…" forever — boot ephemeral
-				// (writes nothing shared) and say exactly why.
-				console.error("session lock failed:", e);
-				lockError = String((e && e.message) || e);
-				ephemeral = true;
-				cacheId = ephemeralCacheId();
-			}
-			ready = true;
-		});
-	}
+	});
 </script>
 
 {#if ready}
-	{#if ephemeral}
-		<div style="position:absolute; top:0; left:0; right:0; z-index:50; padding:8px 16px; background:#fde68a; color:#78350f; font-size:14px;">
-			{#if lockError}
-				Could not acquire the session lock ({lockError}) — this tab is running an ephemeral session and will not write to shared storage.
-			{:else}
-				A WebVM session is already active in another tab — this tab is running an ephemeral session and will not write to shared storage.
-			{/if}
-		</div>
-	{/if}
 	<WebVM configObj={configObj} {cacheId}>
-		<p>Personal Linux desktop — Python 3 + IDLE. Files persist in the browser (or sync to your network backend).</p>
+		<p>Personal Linux desktop — Python 3 + IDLE. Files in the browser last for the current session (or sync to your network backend).</p>
 	</WebVM>
-{:else}
-	<p style="padding:16px; font-family:monospace;">Acquiring session lock…</p>
 {/if}

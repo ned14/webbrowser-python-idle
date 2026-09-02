@@ -1,5 +1,8 @@
 # Secrets and local overrides — never commit these
-.env
+# `.env*` (not just `.env`): backups/copies of the local env carry the same
+# live credentials (observed 2026-09-02: an unignored `.env.webdav-backup`
+# holding real HEADSCALE/GATEWAY/WEBDAV secrets nearly got staged).
+.env*
 
 # Generated private CA and certificates
 certs/
