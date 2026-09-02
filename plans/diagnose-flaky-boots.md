@@ -180,6 +180,38 @@ sh -c 'debugfs -R "<cmd>" /img/webvm-custom-disk.ext2'`
    with the shared overlay restored would return browser-mode persistence;
    the git history + this file contain the full reproduction matrix.
 
+## LIVE-SITE VALIDATION (2026-09-02, webvm.nedprod.com)
+
+Deployed the fix live and measured it through Cloudflare:
+
+- Deploy path (no GitHub push access anywhere — the Mac's signing key is on
+  a hardware token, the box pulls anonymously): committed locally as
+  `4612205` (+ `4ee1d23` lockfile, `b0519ff` notes/harnesses — unsigned,
+  NOT on GitHub), then git-bundled + scp'd to the box and fast-forwarded:
+  `git fetch live-update.bundle main:refs/remotes/live/main && git merge
+  --ff-only refs/remotes/live/main`. Box is now at `b0519ff` (same hashes as
+  local main). `make build && make up` on the box (nohup; ~6 min; fingerprint
+  `df053cffbb91`).
+- Live checks: new frontend confirmed served (nodes/3 chunk carries the new
+  fingerprint + "current session" copy; the session-lock UI is gone).
+- Measurement (Playwright through Cloudflare, E2E_SITE_URL=
+  https://webvm.nedprod.com/alpine.html, ~55 s per boot):
+  - warm-hunt 10 (same-tab reloads — the previously-crashing warm-overlay
+    path): **10/10 OK, all first-attempt** (54-58 s each).
+  - flaky-hunt 8 (fresh contexts — first-visit path): **8/8 OK, all
+    first-attempt** (50-58 s each).
+  - Zero traps, zero auto-retries, zero stalls across the 18 boots. The
+    only console error on every run is Cloudflare's own beacon.min.js being
+    refused by the site CSP — unrelated to the VM.
+  - Pre-fix live behavior for comparison: the earlier session measured
+    ~10-25 % boot failures on the live site; locally the warm-overlay path
+    failed ~50-60 %.
+- SSH access for future sessions: the `webvm.nedprod.com` hostname is
+  Cloudflare's frontend — SSH DIRECTLY to the origin box **82.47.22.78**
+  with `-o HostKeyAlias=webvm.nedprod.com` (host key registered under that
+  name). Deployment state: `/root/webbrowser-python-idle` (its `.env` is
+  never committed).
+
 ## Machine state / housekeeping (as of 2026-09-02)
 
 - Local stack: browser backend running on 127.0.0.1:8081 (guest fingerprint

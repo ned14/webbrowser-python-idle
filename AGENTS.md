@@ -98,7 +98,10 @@ and `tests/README.md` before inventing new build or test commands.
 A live **public** running deployment of this repo exists for real-world
 debugging:
 `https://webvm.nedprod.com` (site at `https://webvm.nedprod.com/`, served on the
-standard HTTPS port 443), SSH in as `root@webvm.nedprod.com`, git checkout at
+standard HTTPS port 443). The `webvm.nedprod.com` HOSTNAME is Cloudflare's
+frontend for the origin box (DNS 104.21.x.x); SSH DIRECTLY TO THE ORIGIN IP
+**82.47.22.78** (host key is registered under the name `webvm.nedprod.com`, so
+use `ssh -o HostKeyAlias=webvm.nedprod.com root@82.47.22.78`), git checkout at
 `/root/webbrowser-python-idle` (deployment state lives in its `.env`, which is
 never committed). It runs `STORAGE_BACKEND=browser` via `make up` (nginx-only,
 disconnected sessions, no gateway). A host cron runs `scripts/reset-cycle.sh`
@@ -117,3 +120,13 @@ a real public browser context (cert: private CA at
 > This may affect later testing results — reproduce/verify with the proxy in
 > mind, and reach the origin directly (`--resolve` / the private CA /
 > `ignoreHTTPSErrors`) when the proxy itself would skew the check.
+>
+> **NOTE (2026-09-02): deployments bypass GitHub.** There is no push access
+> from the working machines (the Mac's signing key is on a hardware token;
+> the origin box has anonymous read-only access). To deploy, bundle the
+> commits and scp: locally `git bundle create /tmp/live-update.bundle main`,
+> `scp /tmp/live-update.bundle root@82.47.22.78:/root/webbrowser-python-idle/`,
+> then on the box `git fetch live-update.bundle main:refs/remotes/live/main &&
+> git merge --ff-only refs/remotes/live/main && rm live-update.bundle`, then
+> `make build && make up`. Box toolchain: node 24 + npm 11, ~1 GB RAM
+> (builds are slow; run under nohup and poll).
