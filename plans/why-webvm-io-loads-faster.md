@@ -443,5 +443,5 @@ keeps CF warm WITHOUT a 193 MB download per visitor.
   floor `22` s (was 75/73/60 for the DYNAMIC-leg era). The pill no longer
   starts at ~60+ s for a ~25 s boot.
 
-Both changes ship together (commit follows this section) and deploy to
-webvm.nedprod.com.
+Both changes are in commit 1afe9ac and deployed to webvm.nedprod.com
+(verified live: pill starts at 00:30, boot ~24-25 s to the desktop marker).
