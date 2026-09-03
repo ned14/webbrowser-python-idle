@@ -181,7 +181,7 @@ if [ -n "${LETSENCRYPT_EMAIL:-}" ]; then
 	# certbot deploy hook and the always-run copy below (a fresh checkout has
 	# no certs/ yet while certbot's lineage already exists). Absolute path:
 	# certbot runs deploy hooks with an arbitrary cwd (systemd timer = /).
-	_LE_INSTALL="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/le-install.sh"
+	_LE_INSTALL="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/le-install.sh"
 
 	# The lineage (LETSENCRYPT_CERT_NAME) is STABLE: certbot skips the issue
 	# when the existing cert is valid and covers the same domains (no CA
