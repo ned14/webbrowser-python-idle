@@ -73,4 +73,39 @@ private-SAN regression). Unit suite: 287 passed.
 
 ## Live enablement record (webvm.nedprod.com origin, 82.47.22.78)
 
-<!-- filled in below after the box work -->
+Done 2026-09-03 (commit 9b183e8 shipped to the box as a git bundle — GitHub
+push from the Mac was restored later the same day; the box then re-verified
+in sync with GitHub origin/main via a plain-https `git pull --ff-only`, 0
+ahead/behind, no stored credentials):
+
+- Box `.env` (never committed): `LETSENCRYPT_EMAIL=s_letsencrypt@nedprod.com`,
+  `LETSENCRYPT_DOMAINS=disk.webvm.nedprod.com` (explicit single-SAN override —
+  `webvm.nedprod.com` stays CF-proxied and unlisted; CF's edge cert continues
+  to serve the main site, and the CF→origin leg works because the zone's SSL
+  mode is Full, not strict).
+- `apt-get install certbot` (2.9.0) → `certbot.timer` enabled + active
+  (twice-daily renewals).
+- `sh scripts/gen-certs.sh` issued the cert: account registered, HTTP-01
+  standalone on port 80 (free — compose publishes 443/8443/8082/3478 only),
+  deploy hook `scripts/le-install.sh` copied the lineage into `certs/` and
+  reloaded the RUNNING server container (no stack restart, no rebuild — the
+  facility is host-side only).
+- Verified from a public vantage: `disk.webvm.nedprod.com` now presents
+  `CN=disk.webvm.nedprod.com`, SAN `DNS:disk.webvm.nedprod.com`, issuer
+  Let's Encrypt, valid 2026-09-03 → 2026-12-02; nginx answers with public
+  trust; ext2 range GET returns 206 + `access-control-allow-origin: *` +
+  `content-range` — the split-brain disk-read path is now public-cert clean.
+  `webvm.nedprod.com` through Cloudflare unaffected.
+- Renewal verified: `certbot renew --dry-run` simulated a successful renewal
+  (note: non-interactive renewals sleep a random delay of up to ~390 s before
+  simulating — that is normal certbot behavior, not a hang; the deploy hook
+  is recorded in `/etc/letsencrypt/renewal/webvm.conf` as
+  `renew_hook = /root/webbrowser-python-idle/scripts/le-install.sh`).
+- The host cron `reset-cycle.sh` (6-hourly) rebuilds/restarts on upstream
+  changes and re-runs `make up` → gen-certs.sh → certbot (no-op while valid);
+  the deploy hook covers certbot's own renewals between cycles.
+- Caveat kept on record: if the zone's CF SSL mode is ever set to Full
+  (strict), the CF→origin fetch of webvm.nedprod.com would reject the
+  disk-only origin cert — keep Full, or add webvm.nedprod.com to
+  LETSENCRYPT_DOMAINS and give the origin an HTTP-01 pass-through for the
+  proxied name.

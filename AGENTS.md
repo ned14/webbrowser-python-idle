@@ -121,12 +121,21 @@ a real public browser context (cert: private CA at
 > mind, and reach the origin directly (`--resolve` / the private CA /
 > `ignoreHTTPSErrors`) when the proxy itself would skew the check.
 >
-> **NOTE (2026-09-02): deployments bypass GitHub.** There is no push access
-> from the working machines (the Mac's signing key is on a hardware token;
-> the origin box has anonymous read-only access). To deploy, bundle the
-> commits and scp: locally `git bundle create /tmp/live-update.bundle main`,
-> `scp /tmp/live-update.bundle root@82.47.22.78:/root/webbrowser-python-idle/`,
-> then on the box `git fetch live-update.bundle main:refs/remotes/live/main &&
-> git merge --ff-only refs/remotes/live/main && rm live-update.bundle`, then
-> `make build && make up`. Box toolchain: node 24 + npm 11, ~1 GB RAM
-> (builds are slow; run under nohup and poll).
+> **NOTE (2026-09-03): GitHub transport restored.** Pushing from the Mac works
+> again (2026-09-03), and the box fetches the repo over plain HTTPS with NO
+> stored credentials (verified 2026-09-03) — the GitHub repo is effectively
+> fetchable read-only from the box. Deploy now = push from the Mac, then on
+> the box `cd /root/webbrowser-python-idle && git pull --ff-only` (a no-op
+> when the 6-hourly reset-cycle cron already pulled it — the cron runs
+> `git fetch`+`git pull --ff-only` + `make build` + restart whenever upstream
+> changes, so an explicit pull right after a push keeps that rebuild off the
+> cron's next run when the change is already built/rolled by hand).
+> CAVEAT: the cron rebuilds on ANY upstream change including docs-only
+> commits — pull doc commits to the box manually right after pushing so the
+> cron sees nothing new. Fallback when GitHub is unreachable: `git bundle
+> create /tmp/live-update.bundle main`, `scp` it to the box, then on the box
+> `git fetch live-update.bundle main:refs/remotes/live/main && git merge
+> --ff-only refs/remotes/live/main && rm live-update.bundle`. Box toolchain:
+> node 24 + npm 11, ~1 GB RAM (builds are slow; run under nohup and poll).
+> Box has ~900 MB free disk — prune (`docker system prune -af`) before big
+> rebuilds.
