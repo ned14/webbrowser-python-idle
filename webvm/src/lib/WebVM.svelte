@@ -291,26 +291,6 @@
 	// reproduction: every pre-desktop trap was fatal). The watchdog here is
 	// only the backstop for silent halts that never report a trap.
 
-	// Repeat-boot warm (post-boot, idle): after the desktop is up, stream the
-	// ENTIRE image into the browser HTTP cache (immutable-cached, so no
-	// revalidation) — a later session on this machine then reads EVERY block
-	// from the disk cache, not just the boot-critical leading bytes warmed in
-	// startEarlyBootFetch. One low-priority request; any failure just means
-	// the next boot reads from the network as before. bytes-mode only (the
-	// GitHub Pages deployment streams chunks via GitHubDevice instead).
-	var fullWarmDone = false;
-	function maybeWarmFullImage()
-	{
-		if(fullWarmDone || !configObj || configObj.diskImageType !== "bytes" || !configObj.diskImageUrl)
-			return;
-		fullWarmDone = true;
-		try
-		{
-			fetch(configObj.diskImageUrl, { priority: "low" }).catch(function() {});
-		}
-		catch(e) { /* ignore: the warm fetch is an optimization only */ }
-	}
-
 	function watchdogTick()
 	{
 		if (fatal)
@@ -327,10 +307,6 @@
 			try { sessionStorage.removeItem("webvm-trap-reload"); } catch(e) {}
 			clearInterval(watchdogTimer);
 			watchdogTimer = null;
-			// The desktop is up and the engine is idle-ish: warm the whole
-			// image for the next session (one low-priority fetch, never on
-			// the boot critical path).
-			maybeWarmFullImage();
 			return;
 		}
 		if (bootStarted)
@@ -829,36 +805,14 @@
 					throw new Error("Unrecognized device type");
 			}
 		}));
-		// Cold-boot overlap: the ext2's actual block reads only start at
-		// cx.run() (after the engine worker + wasm compile), so on a cold
-		// cache the network sits idle while the engine initializes, then the
-		// guest's first reads trigger ~1100 sequential range GETs that
-		// compete with the emulator's critical path. Warm the image's
-		// LEADING bytes into the HTTP cache during engine init instead: the
-		// boot-critical blocks (bootloader, init, openrc, Xorg, the Python
-		// stdlib the explorer/IDLE import) live at the start of the image,
-		// and the browser HTTP cache serves the guest's overlapping range
-		// requests from a cached 206 — first reads become cache hits.
-		// 32 MiB (was 16): the boot-critical read set measurably extends
-		// past the first 16 MiB on the emulated i386; one low-priority range
-		// request costs nothing when the image is cached. Same URL (incl.
-		// the ?v= fingerprint) so the cache key is shared with
-		// HttpBytesDevice's reads. Fire-and-forget: any failure just means
-		// the guest reads from the network as before. (Chrome supports fetch
-		// priority hints; other engines ignore it.) Kept at 32 MiB — a
-		// larger warm competed with the wasm client's own cold-boot
-		// download on the shared connection (2026-08-30).
-		if(configObj.diskImageType === "bytes" && configObj.diskImageUrl)
-		{
-			try
-			{
-				fetch(configObj.diskImageUrl, {
-					headers: { Range: "bytes=0-33554432" },
-					priority: "low",
-				}).catch(function() {});
-			}
-			catch(e) { /* ignore: the warm fetch is an optimization only */ }
-		}
+		// NO image warm fetch here (removed 2026-09-03): the browser HTTP
+		// cache cannot serve the guest's XHR byte-range reads — Chromium does
+		// not retain 206 range responses (not even for byte-identical
+		// re-requests) and does not cache the ~193 MB full-200 either, so a
+		// leading-32 MiB warm fetch (or a post-desktop whole-image warm) has
+		// no effect on the guest's reads. The guest's ~660 x 128 KiB reads
+		// always traverse the network; repeat-boot speed comes from the
+		// IndexedDB overlay alone. (Measured on the live site, 2026-09-03.)
 	}
 	async function initCheerpX()
 	{
@@ -951,7 +905,6 @@
 			{
 				await cx.run(configObj.cmd, configObj.args, configObj.opts);
 				bootedOnce = true;
-				maybeWarmFullImage();
 			}
 		}
 		catch(e)
