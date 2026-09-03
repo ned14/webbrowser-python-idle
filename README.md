@@ -112,6 +112,12 @@ when IDLE exits. Example scripts are baked read-only into `~/examples/`
 (reference material to copy, not edit in place). Files in `~/` survive reloads
 via the browser IndexedDB overlay. Use `make url` to print the session URL.
 
+**Public deployment?** An opt-in Let's Encrypt facility (`.env`:
+`LETSENCRYPT_EMAIL=…`) replaces the private-CA server cert with a PUBLIC
+cert for DNS-named deployments (e.g. a proxied-off `disk.` host read by every
+visitor) — see `.env.example` and `scripts/gen-certs.sh`; the private-CA path
+above is unchanged when the facility is off.
+
 ## Storage backends (`STORAGE_BACKEND`)
 
 | Backend | Guest files live in | Extra services |

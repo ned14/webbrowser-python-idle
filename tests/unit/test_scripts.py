@@ -22,6 +22,7 @@ SHELL_SCRIPTS = [
     ROOT / "build.sh",
     ROOT / "scripts" / "lib" / "webvm-common.sh",
     ROOT / "scripts" / "gen-certs.sh",
+    ROOT / "scripts" / "le-install.sh",
     ROOT / "scripts" / "print-url.sh",
     ROOT / "scripts" / "acceptance.sh",
     ROOT / "scripts" / "fetch-cheerpx-runtime.sh",
@@ -1216,3 +1217,243 @@ def test_reset_deadline_key_lockstep():
     assert "resetDeadline" in frontend
     assert "RESET_INTERVAL_HOURS" in (ROOT / ".env.example").read_text()
     assert "RESET_INTERVAL_HOURS" in (ROOT / "compose.yaml").read_text()
+
+
+# --------------------------------------------------------------------------
+# Let's Encrypt facility (gen-certs.sh LETSENCRYPT branch + le-install.sh)
+# --------------------------------------------------------------------------
+
+GEN_CERTS = ROOT / "scripts" / "gen-certs.sh"
+LE_INSTALL = ROOT / "scripts" / "le-install.sh"
+
+
+def _run_gen(env, cwd=None):
+    return subprocess.run(
+        ["sh", str(GEN_CERTS)], capture_output=True, text=True,
+        env={**os.environ, **env}, cwd=str(cwd) if cwd else None,
+    )
+
+
+def _stub_certbot(tmp_path, args_out=None, write_lineage=True):
+    """A fake certbot on PATH: records its argv (one arg per line) to
+    args_out and — like the real one — writes a lineage under the --config-dir
+    it was given (when write_lineage). Returns the bin dir to prepend."""
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir()
+    args_file = args_out or (tmp_path / "certbot-args.txt")
+    lineage = (
+        "mkdir -p \"$cfg/live/webvm\"\n"
+        "printf 'STUB-LE-CERT\\n' > \"$cfg/live/webvm/fullchain.pem\"\n"
+        "printf 'STUB-LE-KEY\\n' > \"$cfg/live/webvm/privkey.pem\"\n"
+        if write_lineage else ""
+    )
+    (bin_dir / "certbot").write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > {shlex.quote(str(args_file))}\n'
+        "cfg=''\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    --config-dir) cfg=\"$2\"; shift 2 ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "if [ -n \"$cfg\" ]; then\n"
+        f"{lineage}"
+        "fi\n"
+        "exit 0\n",
+    )
+    os.chmod(bin_dir / "certbot", 0o755)
+    return bin_dir
+
+
+def test_le_facility_defaults_are_off():
+    """The facility is OPT-IN: the lib defaults leave LETSENCRYPT_EMAIL empty
+    (off — gen-certs.sh then keeps issuing the private CA cert) and .env.example
+    must document the switch. The guest copy is pinned byte-identical by
+    test_guest_lib_copy_matches_shared_lib."""
+    assert _lib_var("LETSENCRYPT_EMAIL") == ""
+    assert _lib_var("LETSENCRYPT_DOMAINS") == ""
+    assert _lib_var("LETSENCRYPT_CERT_NAME") == "webvm"
+    assert _lib_var("LETSENCRYPT_ROOT") == "/etc/letsencrypt"
+    env_example = (ROOT / ".env.example").read_text()
+    assert "LETSENCRYPT_EMAIL=" in env_example, \
+        ".env.example must document the LETSENCRYPT_EMAIL switch"
+    assert "LETSENCRYPT_DOMAINS=" in env_example
+    gen = GEN_CERTS.read_text()
+    assert "LETSENCRYPT_EMAIL" in gen, "gen-certs.sh must host the LE branch"
+    assert "le-install.sh" in gen, "gen-certs.sh must wire le-install.sh as the deploy hook + installer"
+
+
+def test_le_branch_derives_san_and_installs(tmp_path):
+    """LE on, no LETSENCRYPT_DOMAINS: the SAN is derived from the DNS names the
+    private cert would carry (a hostname CONTROL_HOST + the WEBVM_DISK_BASE_URL
+    host) and certbot gets a -d per name; the lineage then lands in
+    certs/server.{crt,key} via le-install.sh."""
+    cert_dir = tmp_path / "certs"
+    args_file = tmp_path / "args.txt"
+    bin_dir = _stub_certbot(tmp_path, args_out=args_file)
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "CERT_DIR": str(cert_dir),
+        "LETSENCRYPT_ROOT": str(tmp_path / "le"),
+        "LETSENCRYPT_EMAIL": "acct@example.com",
+        "CONTROL_HOST": "webvm.nedprod.com",
+        "LAN_IP": "0.0.0.0",
+        "WEBVM_DISK_BASE_URL": "https://disk.webvm.nedprod.com:443/x",
+        "GATEWAY_CONTROL_IP": "172.28.0.10",
+        "STORAGE_BACKEND": "browser",
+        "HEADSCALE_ENABLED": "0",
+        "LETSENCRYPT_NO_RELOAD": "1",
+    }
+    res = _run_gen(env)
+    assert res.returncode == 0, res.stderr
+    args = args_file.read_text().splitlines()
+    assert "--standalone" in args and args[args.index("--preferred-challenges") + 1] == "http"
+    assert "--email" in args and args[args.index("--email") + 1] == "acct@example.com"
+    assert "--cert-name" in args and args[args.index("--cert-name") + 1] == "webvm"
+    assert "--config-dir" in args and args[args.index("--config-dir") + 1] == str(tmp_path / "le")
+    assert args.count("-d") == 2
+    first_d = args.index("-d")
+    assert args[first_d + 1] == "webvm.nedprod.com"
+    assert args[first_d + 3] == "disk.webvm.nedprod.com"
+    hook = args[args.index("--deploy-hook") + 1]
+    assert hook == str(LE_INSTALL), "deploy hook must be the absolute le-install.sh path"
+    # The lineage reached certs/ (le-install's always-run copy) with the
+    # server key restricted to root.
+    assert (cert_dir / "server.crt").read_text() == "STUB-LE-CERT\n"
+    assert (cert_dir / "server.key").read_text() == "STUB-LE-KEY\n"
+    assert (cert_dir / "server.key").stat().st_mode & 0o777 == 0o600
+    # The private CA is still ensured (kept for tooling/E2E trust) — but NO
+    # private server cert is issued in LE mode.
+    assert (cert_dir / "ca.crt").exists()
+    assert not (cert_dir / "server.csr").exists()
+
+
+def test_le_branch_domains_override_and_dedupe(tmp_path):
+    """LETSENCRYPT_DOMAINS overrides the derivation — a CF-proxied CONTROL_HOST
+    (unvalidatable over plain HTTP-01) must be excludable — and duplicate
+    entries collapse."""
+    cert_dir = tmp_path / "certs"
+    args_file = tmp_path / "args.txt"
+    bin_dir = _stub_certbot(tmp_path, args_out=args_file)
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "CERT_DIR": str(cert_dir),
+        "LETSENCRYPT_ROOT": str(tmp_path / "le"),
+        "LETSENCRYPT_EMAIL": "acct@example.com",
+        "LETSENCRYPT_DOMAINS": "disk.webvm.nedprod.com, other.example.com, disk.webvm.nedprod.com",
+        "CONTROL_HOST": "webvm.nedprod.com",
+        "WEBVM_DISK_BASE_URL": "https://disk2.webvm.nedprod.com",
+        "STORAGE_BACKEND": "browser",
+        "LETSENCRYPT_NO_RELOAD": "1",
+    }
+    res = _run_gen(env)
+    assert res.returncode == 0, res.stderr
+    args = args_file.read_text().splitlines()
+    assert args.count("-d") == 2, "override list must win and dedupe"
+    first_d = args.index("-d")
+    assert args[first_d + 1] == "disk.webvm.nedprod.com"
+    assert args[first_d + 3] == "other.example.com"
+
+
+def test_le_branch_fails_closed(tmp_path):
+    """Every LE misconfiguration fails closed with a clear FATAL before any
+    certbot call: tailnet backends (the public cert has no IP SANs / is not
+    CA-signed for the gateway), IP-only deployments (nothing to certify),
+    non-public SAN entries, and a missing certbot binary."""
+    cert_dir = tmp_path / "certs"
+    base = {
+        "CERT_DIR": str(cert_dir),
+        "LETSENCRYPT_EMAIL": "a@b.example",
+        "CONTROL_HOST": "127.0.0.1",
+        "LAN_IP": "127.0.0.1",
+        "WEBVM_DISK_BASE_URL": "",
+        "GATEWAY_CONTROL_IP": "172.28.0.10",
+        "STORAGE_BACKEND": "browser",
+        "HEADSCALE_ENABLED": "0",
+    }
+
+    # Tailnet modes must refuse LE (gateway dials the IP SAN / trusts ca.crt).
+    for extra, needle in (
+        ({"STORAGE_BACKEND": "webdav"}, "needs the control plane"),
+        ({"STORAGE_BACKEND": "samba"}, "needs the control plane"),
+        ({"HEADSCALE_ENABLED": "1"}, "needs the control plane"),
+    ):
+        res = _run_gen({**base, **extra})
+        assert res.returncode == 1, extra
+        assert needle in res.stderr, res.stderr
+
+    # IP-only deployment: no public DNS name to certify.
+    res = _run_gen(base)
+    assert res.returncode == 1 and "no public DNS name" in res.stderr
+
+    # IP literal / localhost in the explicit list.
+    res = _run_gen({**base, "LETSENCRYPT_DOMAINS": "10.0.0.1,disk.example.com"})
+    assert res.returncode == 1 and "not a public DNS name" in res.stderr
+    res = _run_gen({**base, "LETSENCRYPT_DOMAINS": "localhost"})
+    assert res.returncode == 1 and "not a public DNS name" in res.stderr
+
+    # Missing certbot binary.
+    res = _run_gen({
+        **base, "LETSENCRYPT_DOMAINS": "disk.example.com",
+        "PATH": "/usr/bin:/bin",
+    })
+    assert res.returncode == 1 and "certbot not found" in res.stderr
+
+
+def test_le_install_requires_lineage(tmp_path):
+    """le-install.sh (the deploy hook) fails closed when the lineage is
+    missing — a broken certbot renewal must never silently leave stale or
+    absent certs behind."""
+    cert_dir = tmp_path / "certs"
+    env = {
+        "CERT_DIR": str(cert_dir),
+        "LETSENCRYPT_ROOT": str(tmp_path / "no-such-le"),
+        "LETSENCRYPT_NO_RELOAD": "1",
+    }
+    res = subprocess.run(
+        ["sh", str(LE_INSTALL)], capture_output=True, text=True,
+        env={**os.environ, **env}, cwd=str(tmp_path),
+    )
+    assert res.returncode == 1
+    assert "lineage not found" in res.stderr
+    assert not (cert_dir / "server.crt").exists()
+
+
+def test_gen_certs_private_disk_host_san_and_reuse(tmp_path):
+    """(Regression for the webvm_disk_host refactor shared with the LE
+    branch.) A WEBVM_DISK_BASE_URL HOSTNAME joins the private cert's SAN and
+    the coverage-skip then reuses the cert; an IP-literal disk base never gets
+    a DNS: entry."""
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not available")
+    cert_dir = tmp_path / "certs"
+    base_env = {
+        "PATH": os.environ["PATH"],
+        "CERT_DIR": str(cert_dir),
+        "CONTROL_HOST": "127.0.0.1",
+        "LAN_IP": "192.168.1.10",
+        "GATEWAY_CONTROL_IP": "172.28.0.10",
+    }
+
+    def san():
+        return subprocess.run(
+            ["openssl", "x509", "-in", str(cert_dir / "server.crt"),
+             "-noout", "-ext", "subjectAltName"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+
+    res = _run_gen({**base_env, "WEBVM_DISK_BASE_URL": "https://disk.example.com:8443/x"})
+    assert res.returncode == 0, res.stderr
+    assert "DNS:disk.example.com" in san()
+    key_mtime = (cert_dir / "server.key").stat().st_mtime_ns
+
+    res2 = _run_gen({**base_env, "WEBVM_DISK_BASE_URL": "https://disk.example.com:8443/x"})
+    assert res2.returncode == 0, res2.stderr
+    assert (cert_dir / "server.key").stat().st_mtime_ns == key_mtime, \
+        "the disk host SAN already covered — the cert must be reused"
+
+    res3 = _run_gen({**base_env, "WEBVM_DISK_BASE_URL": "https://192.168.9.9/x"})
+    assert res3.returncode == 0, res3.stderr
+    assert "DNS:192.168.9.9" not in san(), \
+        "an IP-literal disk base must not get a DNS: SAN entry"

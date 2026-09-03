@@ -50,6 +50,30 @@ WEBVM_TAILNET="${WEBVM_TAILNET:-on}"
 # config_public_alpine.js / render-webvm-config.py / nginx.conf.template /
 # gen-certs.sh; tests enforce the compose default matches this lib).
 WEBVM_DISK_BASE_URL="${WEBVM_DISK_BASE_URL:-}"
+# Let's Encrypt facility for the web server (OPTIONAL, opt-in): LETSENCRYPT_EMAIL
+# empty (default) = OFF — gen-certs.sh then keeps issuing the private-CA cert.
+# Non-empty = ON: gen-certs.sh obtains/renews a PUBLIC Let's Encrypt cert
+# (certbot, HTTP-01 standalone on port 80 — each SAN domain must resolve
+# DIRECTLY to this box, i.e. no CDN proxy in front of it) and installs it as
+# certs/server.{crt,key}, replacing the private server cert. For public
+# deployments whose browsers must trust the origin (e.g. a proxied-off disk
+# host like disk.webvm.nedprod.com). The other cert vars below are the single
+# home of the remaining knobs: LETSENCRYPT_DOMAINS empty = derive the SAN from
+# the DNS names the private cert would carry (a hostname CONTROL_HOST + the
+# WEBVM_DISK_BASE_URL host); set it to an explicit comma/space-separated list
+# to override (a proxied CONTROL_HOST, e.g. webvm.nedprod.com behind
+# Cloudflare, must NOT be listed — HTTP-01 cannot validate through the proxy).
+# LETSENCRYPT_CERT_NAME is the certbot lineage name (stable — a name change
+# issues a second cert); LETSENCRYPT_ROOT is certbot's config-dir (a test/ops
+# knob; deployment default /etc/letsencrypt). Renewal is certbot's own cadence
+# (systemd certbot.timer after `apt-get install certbot`) with scripts/
+# le-install.sh as the deploy hook. NOT for tailnet/LAN deployments: the
+# public cert has no IP SANs and is not CA-signed, so the gateway's TLS to
+# 172.28.0.10 and its SSL_CERT_FILE trust would break (gen-certs fails closed).
+LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-}"
+LETSENCRYPT_DOMAINS="${LETSENCRYPT_DOMAINS:-}"
+LETSENCRYPT_CERT_NAME="${LETSENCRYPT_CERT_NAME:-webvm}"
+LETSENCRYPT_ROOT="${LETSENCRYPT_ROOT:-/etc/letsencrypt}"
 # The server container's static compose-network IP — the ONLY address the
 # gateway/join-test client use for the control plane (cert SAN covers it;
 # the cert generator and compose/gateway/tests must agree on this value).
