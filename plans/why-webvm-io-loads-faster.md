@@ -419,3 +419,29 @@ warm of the current `?v=` URL — e.g. the box cron after each image rebuild
 (the origin box's curl only warms the PoP(s) its egress reaches). If remote
 PoPs matter, replace with a scheduled warm (curl the full fingerprinted URL
 per region) rather than re-adding a per-visitor 193 MB download.
+
+## REINSTATED as HEAD-gated edge warm + ETA recalibration (2026-09-03, later)
+
+The caveat above was actioned: `maybeWarmFullImage` is back in a form that
+keeps CF warm WITHOUT a 193 MB download per visitor.
+
+- **`maybeWarmCfEdge()`** replaces it (WebVM.svelte): post-desktop, issue a
+  cheap `HEAD` (no body) to the image URL and read `cf-cache-status`.
+  Verified live: CF answers `HIT` (+age) for a cached `?v=` object and
+  `MISS` for an uncached one, so a HEAD tells us the PoP state in one
+  round trip. `HIT`/`REVALIDATED` (or no header = not behind CF) → nothing
+  is fetched; `MISS`/`EXPIRED` → one low-priority full-200 GET populates
+  that PoP. Cost: one HEAD per session, and one ~193 MB download per
+  (PoP, image version) — the minimum that keeps range reads edge-served.
+  Range reads still never populate the full-object cache, so without this
+  fetcher CF would evict/expire the 200 and reads would silently drop to
+  the origin leg again.
+- **Boot-ETA recalibration** for the CF-edge regime. Measured live
+  (pill-appear → 'webvm desktop ready'): 23.5-25.6 s boot at a 23-26 ms
+  steady per-read latency (UK, DUB edge). New model:
+  `BOOT_ETA_SECONDS=30`, `LATENCY_REF_MS=24`, slope `0.6` s/ms unchanged,
+  floor `22` s (was 75/73/60 for the DYNAMIC-leg era). The pill no longer
+  starts at ~60+ s for a ~25 s boot.
+
+Both changes ship together (commit follows this section) and deploy to
+webvm.nedprod.com.

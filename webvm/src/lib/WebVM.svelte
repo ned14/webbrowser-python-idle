@@ -73,20 +73,18 @@
 	// screen, and the pill counts down from an ETA until that marker lands.
 	// The ETA is SCALED by the engine's measured per-block read latency (the
 	// same "Backend latency" the Disk pane displays). Recalibrated
-	// 2026-09-02 for the Cloudflare-fronted deployment (webvm.nedprod.com):
-	// the CDN proxies every byte-range request to the origin (206s are not
-	// edge-cached), adding a fixed ~15-20 ms per block read, so the
-	// measured profile is now 57.8 s boot at a 73 ms steady read latency
-	// (UK) and 70.4 s at 96 ms (+90 ms throttle) — ~0.55 s of boot per extra
-	// ms — vs the pre-CDN origin-direct points the 105 s/57 ms/0.75 model
-	// was fitted to (52.5 s at 57 ms; 86.8 s at 103 ms). The anchor moves to
-	// the CDN reference and the slope is set slightly above the measured
-	// 0.55 for headroom; latency below the reference never shrinks the ETA
-	// below the floor (cache-warm or edge-cached reads).
-	var BOOT_ETA_SECONDS = 75;
-	var LATENCY_REF_MS = 73;          // measured steady read latency through Cloudflare
-	var BOOT_ETA_LATENCY_SCALE = 0.6; // s of boot per extra ms of read latency (CDN proxy leg)
-	var BOOT_ETA_MIN_SECONDS = 60;
+	// 2026-09-03 for the CF-edge-cached deployment (webvm.nedprod.com): the
+	// full ext2 200 is cached at the Cloudflare edge and the guest's range
+	// reads are served from it (206s at ~22-26 ms), measured pill boot
+	// 23.5-25.6 s at a 23-26 ms steady read latency (UK, DUB edge). The
+	// slope stays ~0.55-0.6 s of boot per extra ms (origin-direct and
+	// DYNAMIC-leg points from 2026-09-02: 52.5 s/57 ms, 57.8 s/73 ms, 70.4
+	// s/96 ms). The anchor is the CF-edge reference + headroom; latency
+	// below the reference never shrinks the ETA below the floor.
+	var BOOT_ETA_SECONDS = 30;
+	var LATENCY_REF_MS = 24;          // measured steady read latency from the CF edge cache
+	var BOOT_ETA_LATENCY_SCALE = 0.6; // s of boot per extra ms of read latency
+	var BOOT_ETA_MIN_SECONDS = 22;
 	var BOOT_ETA_MAX_SECONDS = 300;
 	var DESKTOP_READY_MARKER = "webvm desktop ready";
 	var fileManagerSeen = false;
@@ -291,6 +289,37 @@
 	// reproduction: every pre-desktop trap was fatal). The watchdog here is
 	// only the backstop for silent halts that never report a trap.
 
+	// Cloudflare full-object cache warm (restored 2026-09-03, HEAD-gated).
+	// The guest's byte-range reads never populate CF's full-object cache
+	// (206s are not stored), so the ext2 200 eventually expires/evicts per
+	// PoP and the range reads silently fall back to the origin leg. Probe
+	// with a cheap HEAD first (no body): cf-cache-status HIT/REVALIDATED =
+	// this PoP already has the object — skip, zero extra bytes. MISS /
+	// EXPIRED = fetch the full 200 once (low priority, fire-and-forget) to
+	// repopulate this PoP for every later visitor. No cf-cache-status header
+	// = not behind Cloudflare — nothing to warm. One probe+possible fetch per
+	// session, after the desktop is up (never on the boot critical path).
+	// Same URL incl. the ?v= fingerprint so a rebuilt image warms as a fresh
+	// key; a full download has no client-side benefit (the browser does not
+	// serve the guest's range reads from it) — this is purely an edge warm.
+	var cfWarmProbed = false;
+	async function maybeWarmCfEdge()
+	{
+		if(cfWarmProbed || fatal || !configObj || configObj.diskImageType !== "bytes" || !configObj.diskImageUrl)
+			return;
+		cfWarmProbed = true;
+		try
+		{
+			var probe = await fetch(configObj.diskImageUrl, { method: "HEAD" });
+			var status = probe.headers.get("cf-cache-status") || "";
+			if(status === "MISS" || status === "EXPIRED")
+			{
+				fetch(configObj.diskImageUrl, { priority: "low" }).catch(function() {});
+			}
+		}
+		catch(e) { /* probe failed — nothing cached-warm can be done */ }
+	}
+
 	function watchdogTick()
 	{
 		if (fatal)
@@ -307,6 +336,10 @@
 			try { sessionStorage.removeItem("webvm-trap-reload"); } catch(e) {}
 			clearInterval(watchdogTimer);
 			watchdogTimer = null;
+			// The desktop is up and the engine is idle-ish: keep the
+			// Cloudflare full-object cache warm for the NEXT visitor (HEAD
+			// probe; only downloads the image when this PoP is cold).
+			maybeWarmCfEdge();
 			return;
 		}
 		if (bootStarted)
@@ -905,6 +938,7 @@
 			{
 				await cx.run(configObj.cmd, configObj.args, configObj.opts);
 				bootedOnce = true;
+				maybeWarmCfEdge();
 			}
 		}
 		catch(e)
