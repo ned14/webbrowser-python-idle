@@ -16,12 +16,16 @@
 #      The restore command matches the mode: tailnet backends (samba/webdav)
 #      come back with `make up-tailnet`, browser/none with `make up`.
 #
-#   3. DOCKER PRUNE (opt-in, deployment-scoped): when the cycle actually
-#      stopped and restored the stack AND ${PRUNE_DOCKER} is 1, run
-#      `docker system prune -af` (no --volumes — the headscale/gateway state
-#      volumes must survive) to reclaim the build-cache/layer churn that a
-#      tight-disk VPS like webvm.nedprod.com accumulates on every rebuild.
-#      Set PRUNE_DOCKER=1 in the DEPLOYMENT's .env only — never a default.
+#   3. DOCKER PRUNE (opt-in, deployment-scoped, BEST-EFFORT): when
+#      ${PRUNE_DOCKER} is 1, prune aggressively — docker build cache, unused
+#      docker images, apt cache and journald logs — BOTH before a rebuild
+#      (so a full disk can never fail `make build` and take the site down)
+#      and after a restore (to reclaim the churn the rebuild left behind);
+#      a no-op cycle still prunes so the disk never creeps toward full
+#      between rebuilds. Named volumes are never touched (--volumes is never
+#      passed — the headscale/gateway state survives). Every prune step is
+#      guarded so a failure never aborts the cycle. Set PRUNE_DOCKER=1 in
+#      the DEPLOYMENT's .env only — never a default.
 #
 # The storage-reset countdown is OPT-IN: with RESET_INTERVAL_HOURS set, a
 # reset cycle writes the next deadline (epoch seconds) to
@@ -103,6 +107,51 @@ if [ "${RESET_CYCLE_DRY_RUN:-}" = "1" ]; then
 	exit 0
 fi
 
+# --- Aggressive docker/system prune (best-effort, deployment-scoped opt-in) --
+# Reclaims the build-cache + image churn a tight-disk VPS accumulates on every
+# rebuild so a full disk can never take the site down. Richer than a single
+# `docker system prune -af`: build cache first (the biggest single reclaimable
+# — GBs on webvm.nedprod.com), then unused images, then the docker-independent
+# apt + journald caches. Best-effort by design: every step is guarded so a
+# missing tool (e.g. no docker CLI on a test runner) or a transient failure
+# logs a warning and NEVER aborts the cycle — pruning is housekeeping, never a
+# dependency of the update/restore steps. `-af` never touches named volumes
+# (headscale/gateway state survives). Gated by ${PRUNE_DOCKER} in the
+# DEPLOYMENT's .env (opt-in, never a default).
+# $1: "rebuild-imminent" flag — 1 when a `make build` is about to recreate
+#     every image, 0 otherwise. Images are dropped with `docker image prune
+#     -af` only when they are safe to lose: a rebuild is imminent OR a
+#     container is currently running (its image is protected). This never
+#     strands a down-but-not-rebuilding deployment without the images
+#     `make up` needs for a fast restore.
+prune_docker() {
+	[ "${PRUNE_DOCKER:-0}" = "1" ] || return 0
+	echo "==> prune: reclaiming space (PRUNE_DOCKER=1)"
+
+	if command -v docker >/dev/null 2>&1; then
+		echo "==> prune: docker build cache"
+		docker builder prune -af 2>&1 || echo "WARNING: docker builder prune failed" >&2
+		if [ "${1:-0}" = "1" ] || docker ps -q 2>/dev/null | grep -q .; then
+			echo "==> prune: unused docker images"
+			docker image prune -af 2>&1 || echo "WARNING: docker image prune failed" >&2
+		else
+			echo "==> prune: no rebuild imminent and no running containers — keeping images for a fast restore"
+		fi
+	else
+		echo "WARNING: docker not found — skipping docker prunes" >&2
+	fi
+
+	if command -v apt-get >/dev/null 2>&1; then
+		echo "==> prune: apt cache"
+		apt-get clean 2>&1 || echo "WARNING: apt-get clean failed" >&2
+	fi
+
+	if command -v journalctl >/dev/null 2>&1; then
+		echo "==> prune: journald logs (vacuum to 20M)"
+		journalctl --vacuum-size=20M 2>&1 || echo "WARNING: journald vacuum failed" >&2
+	fi
+}
+
 # --- 1. Upstream update check (pulls + rebuilds ONLY when upstream changed) --
 # `git fetch` failure (offline / no remotes) is NON-fatal: the rebuild is
 # skipped (nothing new rolled) and the storage-reset leg below still decides
@@ -114,6 +163,11 @@ if git fetch --quiet 2>/dev/null; then
 		if [ -n "$(git rev-list HEAD..@{u} 2>/dev/null)" ]; then
 			echo "==> upstream has new commits — pulling + rebuilding (service stays up)"
 			git pull --ff-only
+			# Free headroom BEFORE the rebuild: `make build` (guest ext2 + npm
+			# ci + docker compose build) is the biggest disk consumer and fails
+			# hardest on a full disk. A rebuild recreates every image, so drop
+			# them all here (rebuild-imminent=1).
+			prune_docker 1
 			make build
 			rebuilt=1
 		else
@@ -165,17 +219,17 @@ if [ "$needs_reset" = "1" ] || [ "$rebuilt" = "1" ]; then
 	echo "==> reset-cycle: restoring the stack (make $restore_target)"
 	make "$restore_target"
 
-	# Deployment-scoped docker prune (opt-in via the DEPLOYMENT's .env):
-	# reclaims the build-cache + untagged layer churn every rebuild leaves
-	# behind — on a tight-disk VPS (webvm.nedprod.com) that accumulates
-	# fast. `-af` removes every image not used by a running container; the
-	# named state volumes are untouched (never --volumes).
-	if [ "${PRUNE_DOCKER:-0}" = "1" ]; then
-		echo "==> reset-cycle: pruning docker (PRUNE_DOCKER=1)"
-		docker system prune -af
-	fi
+	# Post-restore prune: reclaim the churn the rebuild just left behind. The
+	# restored stack is running, so running containers protect their images
+	# from `docker image prune -af`; only unused layers are dropped.
+	prune_docker 0
 
 	echo "==> reset-cycle: cycle complete"
 else
 	echo "==> reset-cycle: nothing to do — no storage to reset ($STORAGE_BACKEND) and no upstream changes; service left untouched"
+	# Even on a no-op cycle, reclaim any leftover churn (a previous build
+	# outside the cron, a mid-cycle reboot, log growth) so the disk never
+	# silently creeps toward full between rebuilds. The stack is up, so its
+	# images are protected from the image prune.
+	prune_docker 0
 fi
