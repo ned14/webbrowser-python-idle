@@ -138,7 +138,19 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 	# presenting after the initial frame. Remove it from the guest rootfs here
 	# (a Dockerfile `RUN rm` cannot help: it is recreated at container start).
 	rm -f /tmp/rootfs/.dockerenv /tmp/rootfs/.dockerinit
+	# Size the ext2 from the MAX of the rootfs's ALLOCATED and APPARENT
+	# size. `du -sk` measures allocated blocks, which under-report when the
+	# unpacked files are SPARSE (overlay2 on some backing filesystems /
+	# thin-provisioned VPS disks produce sparse files in the exported rootfs)
+	# — but `mkfs.ext2 -d` writes every file by its APPARENT size, so a size
+	# derived from allocated-only blocks can be far too small and exhaust the
+	# block bitmap mid-population ("Could not allocate block in ext2
+	# filesystem while writing file ...", seen on a sparse-backed remote).
+	# `du -sk --apparent-size` is always >= allocated for non-sparse trees
+	# (block rounding) and catches the sparse case, so max() covers both.
 	rootfs_kb=$(du -sk /tmp/rootfs | cut -f1)
+	rootfs_apparent_kb=$(du -sk --apparent-size /tmp/rootfs | cut -f1)
+	[ "$rootfs_apparent_kb" -gt "$rootfs_kb" ] && rootfs_kb=$rootfs_apparent_kb
 	size_mb=$(( (rootfs_kb * 12 / 10240) + 1 ))   # rootfs + ~20%
 	if [ "$size_mb" -lt 100 ]; then size_mb=100; fi
 	if [ "$size_mb" -gt 2000 ]; then size_mb=2000; fi
