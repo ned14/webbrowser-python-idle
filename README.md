@@ -30,11 +30,14 @@ typed it by hand. See [Paste from the device](#paste-from-the-device).
 The project website **is the VM**: the latest `main` build runs entirely in your
 browser at
 [**https://ned14.github.io/webbrowser-python-idle/alpine.html**](https://ned14.github.io/webbrowser-python-idle/alpine.html)
-— test-drive it there before running it yourself. The first load takes about sixty
-seconds to boot; later visits reuse the browser cache, then boot takes less than
-twenty seconds. This poor performance is due to Github Pages not honouring HTTP
+— test-drive it there before running it yourself. Each boot from that source takes
+about ninety seconds; later visits reuse the browser cache, then boot takes less than
+fifteen seconds. This poor performance is due to Github Pages not honouring HTTP
 Range requests, so we split the ext2 image into 128 Kb chunks, and every page
 fault turns into a whole individual HTTPS GET round trip.
+
+Until at least August 2027, there is a Cloudflare CDN served edition at
+https://webvm.nedprod.com/alpine.html. This loads in about fifteen seconds!
 
 When running on LAN, the VM is noticeably more snappy, even on a relatively
 limited CPU such as a Chromebook or a phone. The Docker image's HTTPS server

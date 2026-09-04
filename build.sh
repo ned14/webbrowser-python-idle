@@ -80,11 +80,17 @@ FINGERPRINT_FILE="$OUT_DIR/image-build.txt"
 cleanup() {
 	docker rm -f webvm-guest-export >/dev/null 2>&1 || true
 	rm -f rootfs.tar
-	# A failed Linux build can leave the host-mounted extraction dir behind
-	# (the docker run aborts before the post-run `rm -rf .rootfs`); never let
-	# it linger in the repo root (it would otherwise be committed or churn CI).
+	# A Linux build that aborts INSIDE the helper container (before its own
+	# `rm -rf "$exroot"`) leaves the host-mounted extraction tree behind. It
+	# is root-owned (the container extracts as root), so this best-effort rm
+	# can fail for the non-root user — warn instead of masking the failure.
 	case "$(uname -s)" in
-		Linux) rm -rf .rootfs ;;
+		Linux)
+			if ! rm -rf .rootfs 2>/dev/null; then
+				echo "WARNING: could not remove .rootfs (root-owned leftovers from an aborted" >&2
+				echo "         container run). Remove it with:  sudo rm -rf .rootfs" >&2
+			fi
+			;;
 	esac
 }
 trap cleanup EXIT
@@ -155,6 +161,9 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 	exroot='"$EXTRACT_DIR"'
 	# The macOS case unpacks into container-local /tmp/rootfs; Linux unpacks
 	# into /work/.rootfs (host-mounted, uid-safe, no container /tmp surprises).
+	# The tree is root-owned on the host mount (the container extracts as
+	# root), so it is removed HERE, as root, at the end of this script — never
+	# by the host user (who cannot delete root-owned files).
 	rm -rf "$exroot" && mkdir -p "$exroot"
 	tar -xf /work/rootfs.tar -C "$exroot"
 	# CRITICAL FIX (2026-08-10, root cause of the display bug): the Docker
@@ -171,15 +180,16 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 	# fail far more confusingly inside mkfs.ext2 (see EXTRACT_DIR comment).
 	[ -d "$exroot/etc" ] || { echo "ERROR: rootfs unpack is empty/truncated at $exroot" >&2; exit 1; }
 	# Size the ext2 from the MAX of the rootfs'"'"'s ALLOCATED and APPARENT
-	# size. `du -sk` measures allocated blocks, which under-report when the
-	# unpacked files are SPARSE (overlay2 on some backing filesystems /
-	# thin-provisioned VPS disks produce sparse files in the exported rootfs)
-	# — but `mkfs.ext2 -d` writes every file by its APPARENT size, so a size
-	# derived from allocated-only blocks can be far too small and exhaust the
-	# block bitmap mid-population ("Could not allocate block in ext2
-	# filesystem while writing file ...", seen on a sparse-backed remote).
-	# `du -sk --apparent-size` is always >= allocated for non-sparse trees
-	# (block rounding) and catches the sparse case, so max() covers both.
+	# size. `du -sk` measures allocated blocks, which under-report whenever
+	# the backing store keeps files smaller than their logical size — sparse
+	# files (some overlay2/backing-fs combos) OR transparent compression (ZFS
+	# lz4: a ~150 MiB rootfs measured ~6.6 MiB allocated on webvm@milla) — but
+	# `mkfs.ext2 -d` writes every file by its APPARENT size, so a size derived
+	# from allocated-only blocks can be far too small and exhaust the block
+	# bitmap mid-population ("Could not allocate block in ext2 filesystem
+	# while writing file ..."). `du -sk --apparent-size` is always >=
+	# allocated for non-sparse trees (block rounding) and catches both cases,
+	# so max() covers them all.
 	rootfs_kb=$(du -sk "$exroot" | cut -f1)
 	rootfs_apparent_kb=$(du -sk --apparent-size "$exroot" | cut -f1)
 	[ "$rootfs_apparent_kb" -gt "$rootfs_kb" ] && rootfs_kb=$rootfs_apparent_kb
@@ -195,15 +205,13 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 	debugfs -R "stat /home/user" "/work/image.ext2" 2>/dev/null | grep -Eq "User:[[:space:]]+1000" || { echo "ERROR: /home/user uid is not 1000" >&2; exit 1; }
 	debugfs -R "stat /home/user" "/work/image.ext2" 2>/dev/null | grep -Eq "Group:[[:space:]]+1000" || { echo "ERROR: /home/user gid is not 1000" >&2; exit 1; }
 	debugfs -R "stat /sbin/init" "/work/image.ext2" >/dev/null 2>&1 || { echo "ERROR: /sbin/init missing" >&2; exit 1; }
+	# Remove the extraction tree AS ROOT (we are root here) so nothing
+	# root-owned is left behind on the host bind mount for the host user.
+	rm -rf "$exroot"
 '
 
 mv image.ext2 "$OUT_IMAGE"
 rm -f rootfs.tar
-# Clean up the Linux extraction dir (host-mounted) now that the image is made;
-# the macOS /tmp/rootfs is inside the throwaway container and already gone.
-case "$(uname -s)" in
-	Linux) rm -rf .rootfs ;;
-esac
 
 # --- 4b. Warn about weak sync credentials (samba/webdav) ---------------------
 # The baked /root/.syncrc (and the fingerprint below) expose credential-derived
