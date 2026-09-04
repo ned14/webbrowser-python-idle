@@ -56,7 +56,18 @@ esac
 echo "==> Backend: $STORAGE_BACKEND (from $BACKEND_SOURCE)"
 
 IMAGE_TAG="webvm-guest"
-HELPER_TAG="webvm-ext2-helper"
+# Where the rootfs is unpacked before mkfs (inside the throwaway helper
+# container). On macOS the mounted /work is a macOS filesystem that remaps
+# uid/gid, so we MUST unpack into a container-local path (/tmp/rootfs) for
+# ownership to survive. On Linux /work is a native Linux dir (uid-safe), and
+# unpacking there instead of /tmp avoids container-local /tmp quirks (a small
+# or full tmpfs can silently truncate the extraction on some hosts, leaving an
+# undersized rootfs that mkfs.ext2 then fills — the "Could not allocate block"
+# / "No such file or directory" build failures seen on a remote Linux box).
+EXTRACT_DIR=/tmp/rootfs
+case "$(uname -s)" in
+	Linux) EXTRACT_DIR=/work/.rootfs ;;
+esac
 # Image name + serving dir come from the shared lib (single home — nginx
 # aliases the same values via the entrypoint's envsubst; the frontend
 # literal is pinned by tests/unit/test_scripts.py).
@@ -69,6 +80,12 @@ FINGERPRINT_FILE="$OUT_DIR/image-build.txt"
 cleanup() {
 	docker rm -f webvm-guest-export >/dev/null 2>&1 || true
 	rm -f rootfs.tar
+	# A failed Linux build can leave the host-mounted extraction dir behind
+	# (the docker run aborts before the post-run `rm -rf .rootfs`); never let
+	# it linger in the repo root (it would otherwise be committed or churn CI).
+	case "$(uname -s)" in
+		Linux) rm -rf .rootfs ;;
+	esac
 }
 trap cleanup EXIT
 
@@ -113,8 +130,13 @@ docker rm -f webvm-guest-export >/dev/null
 # --- 3. Build the ext2 helper image (e2fsprogs, cached) --------------------
 # Skip the (idempotent) build when the tag already exists: the image is
 # pinned by content (ubuntu:26.04 + e2fsprogs) and `docker build` of an
-# unchanged Dockerfile is pure overhead per `make build`.
-echo "==> Preparing ext2 helper"
+# unchanged Dockerfile is pure overhead per `make build`. A stale image under
+# the same tag (built from an older Dockerfile) would silently be reused, so
+# pin the tag to a hash of the Dockerfile below: the tag changes whenever the
+# helper definition changes, forcing a rebuild, and the skip only matches the
+# current content.
+HELPER_TAG="webvm-ext2-helper:$(printf '%s' 'ubuntu:26.04 + e2fsprogs' | cksum | cut -d' ' -f1)"
+echo "==> Preparing ext2 helper ($HELPER_TAG)"
 if ! docker image inspect "$HELPER_TAG" >/dev/null 2>&1; then
 	docker build -t "$HELPER_TAG" - >/dev/null <<'EOF'
 FROM ubuntu:26.04
@@ -123,12 +145,18 @@ EOF
 fi
 
 # --- 4. Untar + mkfs.ext2 -d on a container-local path ---------------------
-# size = rootfs + ~20% headroom, min 100 MiB, max 2 GiB.
+# Extraction dir is container-local /tmp/rootfs on macOS (the mounted /work is
+# a macOS dir that remaps uids) or the host-mounted /work/.rootfs on Linux
+# (uid-safe there, and immune to container /tmp truncation). size = rootfs +
+# ~20% headroom, min 100 MiB, max 2 GiB.
 echo "==> Creating ext2 image"
 docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 	set -eu
-	rm -rf /tmp/rootfs && mkdir -p /tmp/rootfs
-	tar -xf /work/rootfs.tar -C /tmp/rootfs
+	exroot='"$EXTRACT_DIR"'
+	# The macOS case unpacks into container-local /tmp/rootfs; Linux unpacks
+	# into /work/.rootfs (host-mounted, uid-safe, no container /tmp surprises).
+	rm -rf "$exroot" && mkdir -p "$exroot"
+	tar -xf /work/rootfs.tar -C "$exroot"
 	# CRITICAL FIX (2026-08-10, root cause of the display bug): the Docker
 	# daemon creates `/.dockerenv` in the container at start, so the export
 	# tarball always carries it. OpenRC reads `/.dockerenv` to detect a docker
@@ -137,8 +165,12 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 	# virtual input devices, the cursor freezes, and the CheerpX runtime stops
 	# presenting after the initial frame. Remove it from the guest rootfs here
 	# (a Dockerfile `RUN rm` cannot help: it is recreated at container start).
-	rm -f /tmp/rootfs/.dockerenv /tmp/rootfs/.dockerinit
-	# Size the ext2 from the MAX of the rootfs's ALLOCATED and APPARENT
+	rm -f "$exroot/.dockerenv" "$exroot/.dockerinit"
+	# Fail loudly if the extraction produced nothing: a truncated rootfs.tar or
+	# a constrained /tmp would otherwise silently under-size the filesystem and
+	# fail far more confusingly inside mkfs.ext2 (see EXTRACT_DIR comment).
+	[ -d "$exroot/etc" ] || { echo "ERROR: rootfs unpack is empty/truncated at $exroot" >&2; exit 1; }
+	# Size the ext2 from the MAX of the rootfs'"'"'s ALLOCATED and APPARENT
 	# size. `du -sk` measures allocated blocks, which under-report when the
 	# unpacked files are SPARSE (overlay2 on some backing filesystems /
 	# thin-provisioned VPS disks produce sparse files in the exported rootfs)
@@ -148,15 +180,15 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 	# filesystem while writing file ...", seen on a sparse-backed remote).
 	# `du -sk --apparent-size` is always >= allocated for non-sparse trees
 	# (block rounding) and catches the sparse case, so max() covers both.
-	rootfs_kb=$(du -sk /tmp/rootfs | cut -f1)
-	rootfs_apparent_kb=$(du -sk --apparent-size /tmp/rootfs | cut -f1)
+	rootfs_kb=$(du -sk "$exroot" | cut -f1)
+	rootfs_apparent_kb=$(du -sk --apparent-size "$exroot" | cut -f1)
 	[ "$rootfs_apparent_kb" -gt "$rootfs_kb" ] && rootfs_kb=$rootfs_apparent_kb
 	size_mb=$(( (rootfs_kb * 12 / 10240) + 1 ))   # rootfs + ~20%
 	if [ "$size_mb" -lt 100 ]; then size_mb=100; fi
 	if [ "$size_mb" -gt 2000 ]; then size_mb=2000; fi
 	echo "rootfs ~${rootfs_kb} KiB -> ext2 ${size_mb} MiB"
 	rm -f /work/image.ext2
-	mkfs.ext2 -q -m 0 -b 4096 -d /tmp/rootfs "/work/image.ext2" "${size_mb}M"
+	mkfs.ext2 -q -m 0 -b 4096 -d "$exroot" "/work/image.ext2" "${size_mb}M"
 	e2fsck -f -y "/work/image.ext2" >/dev/null
 	# Ownership sanity checks (uid/gid must survive the untar on the local
 	# path; debugfs prints "User:"/"Group:")
@@ -167,6 +199,11 @@ docker run --rm -v "$PWD":/work "$HELPER_TAG" sh -c '
 
 mv image.ext2 "$OUT_IMAGE"
 rm -f rootfs.tar
+# Clean up the Linux extraction dir (host-mounted) now that the image is made;
+# the macOS /tmp/rootfs is inside the throwaway container and already gone.
+case "$(uname -s)" in
+	Linux) rm -rf .rootfs ;;
+esac
 
 # --- 4b. Warn about weak sync credentials (samba/webdav) ---------------------
 # The baked /root/.syncrc (and the fingerprint below) expose credential-derived
