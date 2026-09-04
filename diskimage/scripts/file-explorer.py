@@ -1,4 +1,39 @@
 import os
+
+# PID file for the keep-alive daemon / single-instance guard. The CheerpX
+# core's /proc/<pid>/cmdline read traps the emulator for processes still being
+# set up, so `pgrep -f` is unusable in the guest (see faccessat-fix.c); process
+# liveness is tracked via this file instead (keep-file-explorer.sh,
+# open-file-explorer.sh).
+PIDFILE = "/tmp/explorer.pid"
+
+
+def _process_starttime():
+    """/proc/self/stat field 22 (starttime, clock ticks since boot) — the
+    pidfile's recycled-pid guard (webvm-pidfile.sh) verifies it. A pid
+    REUSED by an unrelated process keeps the number but changes the
+    starttime, so the guard can tell the record apart from a recycled
+    impostor."""
+    try:
+        with open("/proc/self/stat") as f:
+            return f.read().split()[21]
+    except (OSError, IndexError):
+        return ""
+
+
+# Write the pidfile IMMEDIATELY (before the heavy imports below): the
+# keep-alive daemon's "no explorer process" detection reads this file, and on
+# a slow machine the imports can take 60+ seconds — without an early write
+# the daemon sees "no explorer" and relaunches repeatedly, stacking
+# concurrent explorers that thrash the emulated disk (the slow-Chromebook
+# hang, 2026-09-04). The full "pid starttime" record is written here so the
+# recycled-pid guard is armed from the very first moment.
+try:
+    with open(PIDFILE, "w") as f:
+        f.write("%s %s" % (os.getpid(), _process_starttime()))
+except OSError:
+    pass
+
 import re
 import shutil
 import signal
@@ -59,33 +94,6 @@ def _zf():
     return mod
 
 VIEWER = "/usr/local/bin/file-viewer.py"
-
-# PID file for the keep-alive daemon / single-instance guard. The CheerpX
-# core's /proc/<pid>/cmdline read traps the emulator for processes still being
-# set up, so `pgrep -f` is unusable in the guest (see faccessat-fix.c); process
-# liveness is tracked via this file instead (keep-file-explorer.sh,
-# open-file-explorer.sh).
-PIDFILE = "/tmp/explorer.pid"
-
-
-def _process_starttime():
-    """/proc/self/stat field 22 (starttime, clock ticks since boot) — the
-    pidfile's recycled-pid guard (webvm-pidfile.sh) verifies it. A pid
-    REUSED by an unrelated process keeps the number but changes the
-    starttime, so the guard can tell the record apart from a recycled
-    impostor."""
-    try:
-        with open("/proc/self/stat") as f:
-            return f.read().split()[21]
-    except (OSError, IndexError):
-        return ""
-
-
-try:
-    with open(PIDFILE, "w") as f:
-        f.write("%s %s" % (os.getpid(), _process_starttime()))
-except OSError:
-    pass
 
 
 def _remove_pidfile():

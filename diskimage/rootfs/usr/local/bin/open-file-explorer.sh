@@ -20,4 +20,15 @@
 if pidfile_alive /tmp/explorer.pid; then
 	exit 0
 fi
+# Write OUR pid to the pidfile BEFORE exec'ing python3 (exec keeps the same
+# pid, so this is the explorer's own record): the keep-alive daemon's "no
+# explorer process" detection reads this file, and on a slow machine the
+# explorer's own early write (after the interpreter starts) can take seconds
+# — without this, the daemon could see "no explorer" and stack a second
+# launch (the 2026-09-04 slow-Chromebook hang). The full "pid starttime"
+# record is written here (field 22 of /proc/self/stat — the recycled-pid
+# guard in webvm-pidfile.sh); the explorer rewrites the same record as soon
+# as it starts.
+_STARTTIME=$(awk '{print $22}' /proc/self/stat 2>/dev/null || true)
+echo "$$ $_STARTTIME" > /tmp/explorer.pid 2>/dev/null
 exec python3 /usr/local/bin/file-explorer.py

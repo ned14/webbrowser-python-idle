@@ -75,7 +75,7 @@ def _sandbox(script_tmp: pathlib.Path) -> dict[str, str]:
         "WM_CLIENTS_BIN=\"${WM_CLIENTS_BIN:-/usr/local/bin/wm-clients.sh}\"":
             f"WM_CLIENTS_BIN=\"${{WM_CLIENTS_BIN:-{script_tmp}/wm-clients.sh}}\"",
         # Shrink timings: stuck after 2s, spy session 4s, 0.5s ticks/grace.
-        "STUCK_SECONDS=30": "STUCK_SECONDS=2",
+        "STUCK_SECONDS=300": "STUCK_SECONDS=2",
         "SESSION_SECONDS=60": "SESSION_SECONDS=4",
         "POLL_SECONDS=2": "POLL_SECONDS=1",
         "BACKOFF_SECONDS=2": "BACKOFF_SECONDS=1",

@@ -65,7 +65,25 @@ WEBVM_PIDFILE_SH="${WEBVM_PIDFILE_SH:-/usr/local/lib/webvm-pidfile.sh}"
 # shellcheck disable=SC1090
 . "$WEBVM_PIDFILE_SH"
 
-STUCK_SECONDS=30
+# Diagnostic logging: the daemon's stderr is discarded by the openbox
+# autostart (>/dev/null 2>&1), so keep-alive decisions are echoed to the
+# boot console (/dev/console — the page's xterm) when it exists. Overridable
+# for tests.
+KEEPALIVE_LOG="${KEEPALIVE_LOG:-/dev/console}"
+ka_log() {
+	[ -n "$KEEPALIVE_LOG" ] || return 0
+	printf 'keep-alive: %s\n' "$1" >> "$KEEPALIVE_LOG" 2>/dev/null || true
+}
+
+# A windowless-but-alive explorer is force-killed only after STUCK_SECONDS of
+# windowlessness. 300 s (5 min) is deliberately GENEROUS: on a slow machine
+# (a low-end Chromebook, a throttled emulated disk) a healthy explorer can
+# take 2-3 minutes to map its first window — the old 30 s threshold killed
+# exactly those slow-but-progressing startups, and the relaunch then restarted
+# the same slow boot from scratch (the 2026-09-04 slow-Chromebook hang). A
+# genuinely deadlocked Tk startup is a permanent condition, so a 5-minute
+# heal delay is an acceptable trade-off against killing healthy slow boots.
+STUCK_SECONDS=300
 SESSION_SECONDS=60
 POLL_SECONDS=2
 BACKOFF_SECONDS=2
@@ -147,6 +165,7 @@ apply_window_count() {
 			   [ "$WINDOWLESS_SINCE" != "0" ] && \
 			   [ "$NOW" -gt "$WINDOWLESS_SINCE" ] && \
 			   [ $((NOW - WINDOWLESS_SINCE)) -ge "$STUCK_SECONDS" ]; then
+				ka_log "FORCE-KILL explorer (windowless $((NOW - WINDOWLESS_SINCE))s, pid $(awk '{print $1}' "$EXPLORER_PIDFILE" 2>/dev/null))"
 				# The pidfile holds "pid starttime" (the recycled-pid guard);
 				# only the first field is the pid.
 				kill -9 "$(awk '{print $1}' "$EXPLORER_PIDFILE" 2>/dev/null)" 2>/dev/null
@@ -166,6 +185,7 @@ apply_window_count() {
 			# No explorer at all (closed or crashed): relaunch now. The
 			# stale pidfile (a crashed explorer that never removed it) is
 			# removed first — the single-instance guard would refuse.
+			ka_log "relaunch (no explorer process)"
 			rm -f "$EXPLORER_PIDFILE"
 			launch
 			WINDOWLESS_SINCE=$NOW
