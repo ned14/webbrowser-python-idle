@@ -23,7 +23,17 @@ jobs:
         run: ./build.sh ${{ matrix.backend }}
       - name: Verify ext2 (ownership + key paths)
         run: |
-          docker run --rm -v "$PWD":/work webvm-ext2-helper sh -c '
+          # build.sh tags the helper with a content pin
+          # (webvm-ext2-helper:<cksum>), never `:latest` — discover the tag
+          # the build actually created (single home: build.sh) instead of
+          # re-deriving or hard-coding it. `docker images` lists local
+          # images only, so on the fresh runner exactly the pinned tag from
+          # the Build step above matches.
+          HELPER=$(docker images --format '{{.Repository}}:{{.Tag}}' \
+            | grep '^webvm-ext2-helper:' | head -1)
+          [ -n "$HELPER" ] || { echo "FAIL: no webvm-ext2-helper image present (Build step?)" >&2; exit 1; }
+          echo "verify using $HELPER"
+          docker run --rm -v "$PWD":/work "$HELPER" sh -c '
             debugfs -R "stat /sbin/init" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
             debugfs -R "stat /usr/bin/idle3.14" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
             debugfs -R "stat /home/user/.config/openbox/rc.xml" /work/webvm/custom-disk-images/webvm-custom-disk.ext2 >/dev/null || exit 1
